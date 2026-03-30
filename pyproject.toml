@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nzyme-task-tracker"
+version = "0.2.0"
+description = "AI-driven sync engine that extracts action items from Notion meeting notes into a Team Task Tracker."
+requires-python = ">=3.11"
+dependencies = [
+    "notion-client",
+    "python-dotenv",
+    "pydantic",
+    "openai",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+]
+
+[project.scripts]
+nzyme-task-tracker = "src.main:main"
