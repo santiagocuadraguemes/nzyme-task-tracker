@@ -1,0 +1,84 @@
+from unittest.mock import MagicMock, call
+
+from src.sources.single_source import SingleSource
+
+
+def _make_meeting_page(page_id: str, title: str, date: str, meeting_type: str, attendees: list[dict]) -> dict:
+    return {
+        "id": page_id,
+        "properties": {
+            "Meeting": {
+                "type": "title",
+                "title": [{"plain_text": title}],
+            },
+            "Date": {
+                "type": "date",
+                "date": {"start": date} if date else None,
+            },
+            "Meeting type": {
+                "type": "select",
+                "select": {"name": meeting_type} if meeting_type else None,
+            },
+            "Attendees": {
+                "type": "people",
+                "people": attendees,
+            },
+            "Processed": {"type": "checkbox", "checkbox": False},
+        },
+    }
+
+
+class TestSingleSource:
+    def test_get_unprocessed_pages_applies_buffer_filter(self):
+        client = MagicMock()
+        client.query_database.return_value = {"results": []}
+        source = SingleSource(client, "db-meetings")
+
+        source.get_unprocessed_pages(buffer_hours=2)
+
+        call_kwargs = client.query_database.call_args.kwargs
+        conditions = call_kwargs["filter"]["and"]
+        assert any(c.get("property") == "Processed" for c in conditions)
+        assert any(c.get("property") == "Date" for c in conditions)
+
+    def test_get_page_content_converts_blocks_to_text(self):
+        client = MagicMock()
+        client.get_block_children.return_value = [
+            {
+                "id": "b1",
+                "type": "paragraph",
+                "has_children": False,
+                "paragraph": {"rich_text": [{"plain_text": "Meeting notes here"}]},
+            },
+        ]
+        source = SingleSource(client, "db-meetings")
+
+        content = source.get_page_content("page-123")
+
+        assert content == "Meeting notes here"
+        client.get_block_children.assert_called_once_with("page-123")
+
+    def test_get_page_metadata(self):
+        page = _make_meeting_page(
+            "page-1", "Q1 Review", "2026-03-15", "Team sync",
+            [{"id": "user-1", "name": "Santiago"}],
+        )
+        source = SingleSource(MagicMock(), "db-meetings")
+
+        meta = source.get_page_metadata(page)
+
+        assert meta["title"] == "Q1 Review"
+        assert meta["date"] == "2026-03-15"
+        assert meta["meeting_type"] == "Team sync"
+        assert meta["attendees"] == [{"id": "user-1", "name": "Santiago"}]
+
+    def test_mark_page_processed(self):
+        client = MagicMock()
+        source = SingleSource(client, "db-meetings")
+
+        source.mark_page_processed("page-1")
+
+        client.update_page.assert_called_once_with(
+            page_id="page-1",
+            properties={"Processed": {"checkbox": True}},
+        )
