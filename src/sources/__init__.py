@@ -1,13 +1,6 @@
-"""Meeting-notes source implementations.
+"""Meeting-notes source — fetches unprocessed pages from the Meeting Notes DB.
 
-This package provides the adapters that fetch meeting-note pages from
-Notion databases.  Two strategies are supported:
-
-* ``SingleSource``  — reads from one shared database (Mode A).
-* ``MultiSource``   — reads a registry of per-person databases and
-  iterates over all active sources (Mode B).
-
-Both strategies ultimately yield raw Notion page dicts that downstream
-extraction modules consume.
+Provides ``SingleSource`` which queries a single shared Notion database
+with a configurable buffer delay and converts page blocks to plain text.
 """
 from __future__ import annotations

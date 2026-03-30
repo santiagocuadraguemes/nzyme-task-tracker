@@ -1,7 +1,6 @@
-"""Tracker package — writes ActionItems to the Macro Task Tracker database.
+"""Tracker package — writes AI-extracted tasks to the Team Task Tracker.
 
-Contains the ``TaskTrackerWriter`` which converts normalised
-``ActionItem`` instances into Notion page-creation payloads and writes
-them to the target database via the Notion API.
+Contains ``TeamTaskTrackerWriter`` which maps task dicts from the AI
+extractor to Notion page properties and creates pages via the API.
 """
 from __future__ import annotations

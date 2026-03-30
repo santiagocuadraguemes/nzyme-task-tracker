@@ -1,11 +1,8 @@
-"""Nzyme Macro Task Tracker — automated sync engine.
+"""Nzyme — AI-driven task extraction from Notion meeting notes.
 
-This package extracts action items from Notion meeting-notes databases
-and writes them to a centralised Macro Task Tracker database.  It supports
-two operating modes:
-
-* **Single-source (Mode A):** one shared meeting-notes database.
-* **Multi-source (Mode B):** a registry of per-person databases with
-  heterogeneous schemas.
+Extracts action items from meeting notes using OpenAI function calling
+and writes them to the Team Task Tracker database. A natural-language
+playbook (stored as a Notion page) defines extraction rules, and the
+tracker schema is read dynamically so Notion changes require no code updates.
 """
 from __future__ import annotations

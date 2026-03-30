@@ -15,8 +15,7 @@ Design notes:
     * The underlying ``notion_client.Client`` is injected at construction
       time so that unit tests can substitute a mock.
     * Return types are kept as raw ``dict`` to avoid coupling the rest of
-      the codebase to Notion SDK internals; downstream code should use
-      ``SchemaMapper`` or ``BlockParser`` for interpretation.
+      the codebase to Notion SDK internals.
 """
 from __future__ import annotations
 
