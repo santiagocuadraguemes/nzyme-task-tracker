@@ -6,7 +6,7 @@
 |----------|----|-------|
 | Meeting Notes DB | `b07976472620499fa4b89be7b03c07d0` | Source of meeting pages |
 | Team Task Tracker DB | `32f83e67e2e7803f9662f43125603afa` | Destination for extracted tasks |
-| Playbook page | `2a283e67-e2e7-806c-9768-f51c5146e60b` | In "PRUEBAS SANTI" section |
+| Playbook page | `33083e67-e2e7-8108-bb08-eaeba8b65678` | "Nzyme Playbook - Task Extraction Rules" under Nzyme Home |
 
 Workspace: `kiboventures.notion.so`
 
@@ -104,7 +104,7 @@ Use `notion-create-pages` with database ID `32f83e67e2e7803f9662f43125603afa`.
 Include properties: Task (title), Status, Assignee (edit access), Due Date, Priority, Category, Parent item.
 
 **Read playbook:**
-Use `notion-fetch` with page ID `2a283e67-e2e7-806c-9768-f51c5146e60b`.
+Use `notion-fetch` with page ID `33083e67-e2e7-8108-bb08-eaeba8b65678`.
 
 **Archive a page (for cleanup):**
 Use `notion-update-page` on the page and set `archived: true`.
