@@ -189,9 +189,16 @@ class NotionClientWrapper:
         )
 
     def retrieve_database(self, database_id: str) -> dict[str, Any]:
-        """Retrieve a Notion database schema by ID."""
+        """Retrieve a Notion database by ID (no properties in API 2025-09-03)."""
         return self._call_with_retry(
             self._client.databases.retrieve, database_id=database_id
+        )
+
+    def retrieve_data_source(self, database_id: str) -> dict[str, Any]:
+        """Retrieve the data source schema (properties, etc.) for a database."""
+        ds_id = self._resolve_data_source_id(database_id)
+        return self._call_with_retry(
+            self._client.data_sources.retrieve, data_source_id=ds_id
         )
 
     def list_users(self) -> list[dict[str, Any]]:

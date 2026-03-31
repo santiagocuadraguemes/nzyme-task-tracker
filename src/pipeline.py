@@ -18,11 +18,10 @@ logger = logging.getLogger(__name__)
 
 
 def _load_categories(client: NotionClientWrapper, database_id: str) -> list[str]:
-    """Read category select options from the Team Task Tracker DB schema."""
-    db = client.retrieve_database(database_id)
-    cat_prop = db.get("properties", {}).get("Category", {})
-    # API 2025-09-03: options at top level; older API: nested under "select"
-    options = cat_prop.get("options", []) or cat_prop.get("select", {}).get("options", [])
+    """Read category select options from the Team Task Tracker data source schema."""
+    ds = client.retrieve_data_source(database_id)
+    cat_prop = ds.get("properties", {}).get("Category", {})
+    options = cat_prop.get("select", {}).get("options", [])
     return [opt["name"] for opt in options]
 
 
