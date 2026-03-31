@@ -10,7 +10,10 @@ logger = logging.getLogger(__name__)
 
 
 class TeamTaskTrackerWriter:
-    """Writes task dicts to the Team Task Tracker Notion database."""
+    """Writes task dicts to the Team Task Tracker Notion database.
+
+    On initialization, loads all existing task titles for deduplication.
+    """
 
     def __init__(
         self,
@@ -21,16 +24,44 @@ class TeamTaskTrackerWriter:
         self._client = client
         self._db_id = database_id
         self._dry_run = dry_run
+        self._existing_titles: set[str] = set()
+        self._load_existing_titles()
+
+    @staticmethod
+    def _normalize_title(title: str) -> str:
+        return title.strip().lower()
+
+    @staticmethod
+    def _get_title(page: dict[str, Any]) -> str:
+        for prop in page.get("properties", {}).values():
+            if prop.get("type") == "title":
+                return "".join(
+                    p.get("plain_text", "") for p in prop.get("title", [])
+                )
+        return ""
+
+    def _load_existing_titles(self) -> None:
+        """Query all tasks in the tracker and cache their titles for dedup."""
+        try:
+            response = self._client.query_database(database_id=self._db_id)
+            for page in response.get("results", []):
+                title = self._get_title(page)
+                if title:
+                    self._existing_titles.add(self._normalize_title(title))
+            logger.info("Loaded %d existing task titles for dedup", len(self._existing_titles))
+        except Exception:
+            logger.exception("Failed to load existing titles for dedup — proceeding without dedup")
 
     def create_task(self, task: dict[str, Any]) -> dict[str, Any] | None:
         """Create a single page in the Team Task Tracker.
 
-        Parameters
-        ----------
-        task:
-            Dict with keys: title, assignee_id, due_date, priority,
-            category, parent_task_id, status. Only title is required.
+        Skips if a task with the same title (case-insensitive) already exists.
         """
+        normalized = self._normalize_title(task["title"])
+        if normalized in self._existing_titles:
+            logger.info("DEDUP — skipping duplicate: %s", task["title"][:80])
+            return None
+
         properties: dict[str, Any] = {
             "Task": {
                 "title": [{"text": {"content": task["title"][:2000]}}]
@@ -61,11 +92,18 @@ class TeamTaskTrackerWriter:
                 "relation": [{"id": task["parent_task_id"]}]
             }
 
+        if task.get("meeting_page_id"):
+            properties["Meeting - Relation"] = {
+                "relation": [{"id": task["meeting_page_id"]}]
+            }
+
         if self._dry_run:
             logger.info("DRY RUN — would create: %s", task["title"][:80])
+            self._existing_titles.add(normalized)
             return None
 
         result = self._client.create_page(self._db_id, properties)
+        self._existing_titles.add(normalized)
         logger.info("Created task: %s (id=%s)", task["title"][:80], result.get("id"))
         return result
 

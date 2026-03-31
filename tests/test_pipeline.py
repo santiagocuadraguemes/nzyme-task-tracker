@@ -44,6 +44,11 @@ class TestRunSync:
     ):
         config = _make_config()
         client = MagicMock()
+        client.list_users.return_value = [
+            {"id": "u1", "name": "Santiago", "type": "person"},
+            {"id": "u2", "name": "Reyes", "type": "person"},
+            {"id": "bot-1", "name": "Integration", "type": "bot"},
+        ]
 
         mock_load_cats.return_value = ["Operations", "Other"]
         mock_source = mock_source_cls.return_value
@@ -66,7 +71,14 @@ class TestRunSync:
         run_sync(config, client)
 
         mock_source.get_unprocessed_pages.assert_called_once_with(2)
-        mock_extractor_cls.return_value.extract.assert_called_once()
+        extract_kwargs = mock_extractor_cls.return_value.extract.call_args.kwargs
+        assert extract_kwargs["team_members"] == [
+            {"id": "u1", "name": "Santiago"},
+            {"id": "u2", "name": "Reyes"},
+        ]
+        write_call_args = mock_writer_cls.return_value.write_batch.call_args
+        tasks_written = write_call_args.args[0]
+        assert tasks_written[0]["meeting_page_id"] == "p1"
         mock_writer_cls.return_value.write_batch.assert_called_once()
         mock_source.mark_page_processed.assert_called_once_with("p1")
 
@@ -82,6 +94,7 @@ class TestRunSync:
     ):
         config = _make_config()
         client = MagicMock()
+        client.list_users.return_value = []
 
         mock_load_cats.return_value = ["Other"]
         mock_source_cls.return_value.get_unprocessed_pages.return_value = []
@@ -104,6 +117,7 @@ class TestRunSync:
     ):
         config = _make_config()
         client = MagicMock()
+        client.list_users.return_value = []
 
         mock_load_cats.return_value = ["Other"]
         mock_source = mock_source_cls.return_value

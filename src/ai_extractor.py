@@ -17,14 +17,27 @@ Your job is to extract action items from meeting notes and create tasks.
 ## Team Task Tracker Schema
 - Task (title): string
 - Status: "Not Started" | "In Progress" | "Done"
-- Assignee: Notion user ID (from attendees list)
+- Assignee: Notion user ID (from team members list — prefer attendees when ambiguous)
 - Due Date: ISO date string (YYYY-MM-DD) or null
 - Priority: "High" | "Medium" | "Low"
 - Category: {categories}
 - Parent item: page ID of parent task from hierarchy (optional)
 
 ## Existing Hierarchy
+
+Below is the current Team Task Tracker hierarchy as JSON. Each node has an "id", "title", and "children" array.
+
+When creating tasks, you MUST set "parent_task_id" to the "id" of the most specific matching node:
+- If the task relates to a specific entity (company, project, fund), find that entity in the hierarchy and use its "id"
+- If no specific entity matches, find the best-matching category node and use its "id"
+- Only set "parent_task_id" to null if absolutely nothing in the hierarchy is relevant
+
+IMPORTANT: Always try to place tasks in the hierarchy. Most tasks should have a parent_task_id.
+
 {hierarchy}
+
+## Team Members (available assignees)
+{team_members}
 
 ## Attendees in this meeting
 {attendees}"""
@@ -87,8 +100,10 @@ def _build_tool_definition(categories: list[str]) -> dict:
 class AIExtractor:
     """Extracts tasks from meeting content using OpenAI function calling."""
 
-    def __init__(self, api_key: str, model: str = "gpt-4.1") -> None:
-        self._client = OpenAI(api_key=api_key)
+    # TEMPORARY: base_url param allows using Gemini's OpenAI-compatible endpoint.
+    # Remove once we switch back to OpenAI (target model: gpt-5-mini).
+    def __init__(self, api_key: str, model: str = "gpt-4.1", base_url: str | None = None) -> None:
+        self._client = OpenAI(api_key=api_key, base_url=base_url)
         self._model = model
 
     def extract(
@@ -98,6 +113,7 @@ class AIExtractor:
         meeting_type: str,
         meeting_content: str,
         attendees: list[dict],
+        team_members: list[dict],
         playbook: str,
         hierarchy: list[dict],
         categories: list[str],
@@ -107,10 +123,15 @@ class AIExtractor:
             f"- {a['name']} (ID: {a['id']})" for a in attendees
         ) or "No attendees listed"
 
+        team_members_text = "\n".join(
+            f"- {m['name']} (ID: {m['id']})" for m in team_members
+        ) or "No team members available — use attendees only"
+
         system_msg = SYSTEM_PROMPT_TEMPLATE.format(
             playbook=playbook,
             hierarchy=json.dumps(hierarchy, indent=2),
             attendees=attendees_text,
+            team_members=team_members_text,
             categories=" | ".join(f'"{c}"' for c in categories),
         )
         user_msg = USER_PROMPT_TEMPLATE.format(
@@ -147,4 +168,11 @@ class AIExtractor:
         logger.info(
             "AI extracted %d tasks from '%s'", len(tasks), meeting_title[:60]
         )
+        for task in tasks:
+            logger.info(
+                "  Task: '%s' | parent: %s | category: %s",
+                task.get("title", "?")[:60],
+                task.get("parent_task_id") or "NONE",
+                task.get("category", "?"),
+            )
         return tasks

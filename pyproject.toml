@@ -12,6 +12,7 @@ dependencies = [
     "python-dotenv",
     "pydantic",
     "openai",
+    "logfire",
 ]
 
 [project.optional-dependencies]

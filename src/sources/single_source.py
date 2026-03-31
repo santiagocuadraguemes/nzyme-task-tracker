@@ -35,6 +35,14 @@ class SingleSource:
         logger.info("Found %d unprocessed pages (buffer=%dh)", len(pages), buffer_hours)
         return pages
 
+    def get_processed_pages(self) -> list[dict]:
+        """Return all pages where Processed = true (for dedup fingerprinting)."""
+        response = self._client.query_database(
+            database_id=self._database_id,
+            filter={"property": "Processed", "checkbox": {"equals": True}},
+        )
+        return response.get("results", [])
+
     def get_page_content(self, page_id: str) -> str:
         """Fetch all blocks from a page and convert to plain text."""
         blocks = self._client.get_block_children(page_id)

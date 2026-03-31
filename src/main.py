@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import sys
 
+import logfire
 from notion_client import Client as NotionClient
 
 from src.config import load_config
@@ -42,6 +43,10 @@ def main() -> None:
         config = config.model_copy(update={"log_level": "DEBUG"})
 
     setup_logging(config.log_level)
+
+    logfire.configure(token=config.logfire_token, service_name="nzyme")
+    logfire.instrument_openai()
+
     logger.info("Starting Nzyme sync (dry_run=%s)", config.dry_run)
 
     notion = NotionClient(auth=config.notion_api_token)

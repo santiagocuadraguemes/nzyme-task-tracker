@@ -58,11 +58,33 @@ class HierarchyLoader:
             else:
                 roots.append(node)
 
-        self._cache = roots
+        # Prune: keep only top 2 levels (categories + entities).
+        # Remove leaf tasks at depth 2+ that have no children, and
+        # filter out nodes with empty titles.
+        pruned = self._prune(roots, max_depth=2)
+
+        self._cache = pruned
         logger.info(
-            "Loaded hierarchy: %d roots, %d total pages", len(roots), len(pages)
+            "Loaded hierarchy: %d categories, %d total pages (pruned from %d)",
+            len(pruned), sum(1 + len(r["children"]) for r in pruned), len(pages),
         )
         return self._cache
+
+    @staticmethod
+    def _prune(nodes: list[dict[str, Any]], max_depth: int, depth: int = 0) -> list[dict[str, Any]]:
+        """Keep only nodes down to max_depth, removing empty titles."""
+        result: list[dict[str, Any]] = []
+        for node in nodes:
+            if not node.get("title"):
+                continue
+            if depth < max_depth:
+                node["children"] = HierarchyLoader._prune(
+                    node["children"], max_depth, depth + 1
+                )
+            else:
+                node["children"] = []
+            result.append(node)
+        return result
 
     @staticmethod
     def _get_title(page: dict[str, Any]) -> str:

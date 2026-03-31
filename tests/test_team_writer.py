@@ -16,6 +16,7 @@ class TestTeamTaskTrackerWriter:
             "priority": "High",
             "category": "Sourcing / Investing / Divesting",
             "parent_task_id": "parent-1",
+            "meeting_page_id": "meeting-1",
             "status": "Not Started",
         }
         result = writer.create_task(task)
@@ -30,6 +31,7 @@ class TestTeamTaskTrackerWriter:
         assert props["Priority"]["select"]["name"] == "High"
         assert props["Category"]["select"]["name"] == "Sourcing / Investing / Divesting"
         assert props["Parent item"]["relation"][0]["id"] == "parent-1"
+        assert props["Meeting - Relation"]["relation"][0]["id"] == "meeting-1"
 
     def test_create_task_minimal(self):
         client = MagicMock()
@@ -43,6 +45,7 @@ class TestTeamTaskTrackerWriter:
         assert "Assignee (edit access)" not in props
         assert "Due Date" not in props
         assert "Parent item" not in props
+        assert "Meeting - Relation" not in props
 
     def test_dry_run_does_not_write(self):
         client = MagicMock()

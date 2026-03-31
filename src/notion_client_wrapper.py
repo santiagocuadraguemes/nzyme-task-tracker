@@ -53,6 +53,7 @@ class NotionClientWrapper:
         self._client = client
         self._rate_limiter = rate_limiter or RateLimiter()
         self._max_retries = max_retries
+        self._ds_id_cache: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -75,6 +76,28 @@ class NotionClientWrapper:
                 else:
                     raise
 
+    def _resolve_data_source_id(self, database_id: str) -> str:
+        """Resolve a database ID to its primary data source ID.
+
+        notion-client v3 / Notion API 2025-09-03 replaced databases.query
+        with data_sources.query. This method fetches the database schema
+        to find the data source ID, then caches it.
+        """
+        if database_id in self._ds_id_cache:
+            return self._ds_id_cache[database_id]
+
+        db = self._call_with_retry(
+            self._client.databases.retrieve, database_id=database_id
+        )
+        data_sources = db.get("data_sources", [])
+        if not data_sources:
+            raise ValueError(f"Database {database_id} has no data sources")
+
+        ds_id = data_sources[0]["id"]
+        self._ds_id_cache[database_id] = ds_id
+        logger.debug("Resolved DB %s → data source %s", database_id, ds_id)
+        return ds_id
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -87,15 +110,17 @@ class NotionClientWrapper:
     ) -> dict[str, Any]:
         """Query a Notion database, returning the raw response dict.
 
-        Automatically paginates if the result set exceeds the API page
-        size (100).  Rate limiting and retries are applied per request.
+        Automatically resolves the database ID to a data source ID,
+        paginates, and applies rate limiting + retries.
         """
+        ds_id = self._resolve_data_source_id(database_id)
+
         all_results: list[dict[str, Any]] = []
         has_more = True
         next_cursor: str | None = None
 
         while has_more:
-            kwargs: dict[str, Any] = {"database_id": database_id}
+            kwargs: dict[str, Any] = {"data_source_id": ds_id}
             if filter is not None:
                 kwargs["filter"] = filter
             if sorts is not None:
@@ -103,7 +128,9 @@ class NotionClientWrapper:
             if next_cursor is not None:
                 kwargs["start_cursor"] = next_cursor
 
-            response = self._call_with_retry(self._client.databases.query, **kwargs)
+            response = self._call_with_retry(
+                self._client.data_sources.query, **kwargs
+            )
             all_results.extend(response.get("results", []))
             has_more = response.get("has_more", False)
             next_cursor = response.get("next_cursor")
@@ -166,3 +193,21 @@ class NotionClientWrapper:
         return self._call_with_retry(
             self._client.databases.retrieve, database_id=database_id
         )
+
+    def list_users(self) -> list[dict[str, Any]]:
+        """Return all users in the workspace, handling pagination."""
+        all_users: list[dict[str, Any]] = []
+        has_more = True
+        next_cursor: str | None = None
+
+        while has_more:
+            kwargs: dict[str, Any] = {}
+            if next_cursor is not None:
+                kwargs["start_cursor"] = next_cursor
+
+            response = self._call_with_retry(self._client.users.list, **kwargs)
+            all_users.extend(response.get("results", []))
+            has_more = response.get("has_more", False)
+            next_cursor = response.get("next_cursor")
+
+        return all_users
