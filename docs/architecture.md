@@ -168,6 +168,15 @@ Task dicts
 | Empty meeting content | Mark processed, skip extraction (no tasks to create) |
 | Duplicate meeting | Skip extraction, mark processed (fingerprint-based dedup) |
 
+## Auto-Archiving
+
+At the end of each sync cycle, the pipeline archives tasks where `Status = Done` and `last_edited_time` is older than 3 days. This keeps the tracker clean while giving the team a grace period to review completed work in standups.
+
+- Runs every cycle, even when there are no unprocessed meetings
+- Per-task error handling: one failed archive doesn't block others
+- Respects dry-run mode (logs what would be archived)
+- Archived pages go to Notion's trash and can be restored if needed
+
 ## Key Design Principles
 
 1. **Dynamic schema** — Playbook, hierarchy, and categories are all fetched from Notion at runtime. Schema changes in Notion require no code changes.

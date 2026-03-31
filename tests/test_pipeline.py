@@ -1,7 +1,7 @@
 from unittest.mock import MagicMock, patch, call
 
 from src.config import SyncConfig
-from src.pipeline import run_sync
+from src.pipeline import run_sync, _archive_done_tasks
 
 
 def _make_config(**overrides) -> SyncConfig:
@@ -139,3 +139,64 @@ class TestRunSync:
 
         assert mock_source.mark_page_processed.call_count == 1
         mock_source.mark_page_processed.assert_called_with("p2")
+
+
+class TestArchiveDoneTasks:
+    def test_archives_done_tasks(self):
+        client = MagicMock()
+        client.query_database.return_value = {
+            "results": [
+                {
+                    "id": "task-1",
+                    "properties": {"Task": {"type": "title", "title": [{"plain_text": "Old done task"}]}},
+                },
+                {
+                    "id": "task-2",
+                    "properties": {"Task": {"type": "title", "title": [{"plain_text": "Another done"}]}},
+                },
+            ]
+        }
+
+        archived = _archive_done_tasks(client, "db-tracker", grace_days=3)
+
+        assert archived == 2
+        assert client.archive_page.call_count == 2
+        client.archive_page.assert_any_call("task-1")
+        client.archive_page.assert_any_call("task-2")
+
+    def test_dry_run_does_not_archive(self):
+        client = MagicMock()
+        client.query_database.return_value = {
+            "results": [
+                {"id": "task-1", "properties": {"Task": {"type": "title", "title": [{"plain_text": "Done task"}]}}},
+            ]
+        }
+
+        archived = _archive_done_tasks(client, "db-tracker", grace_days=3, dry_run=True)
+
+        assert archived == 0
+        client.archive_page.assert_not_called()
+
+    def test_no_done_tasks(self):
+        client = MagicMock()
+        client.query_database.return_value = {"results": []}
+
+        archived = _archive_done_tasks(client, "db-tracker", grace_days=3)
+
+        assert archived == 0
+        client.archive_page.assert_not_called()
+
+    def test_continues_on_individual_failure(self):
+        client = MagicMock()
+        client.query_database.return_value = {
+            "results": [
+                {"id": "task-1", "properties": {"Task": {"type": "title", "title": [{"plain_text": "Fail"}]}}},
+                {"id": "task-2", "properties": {"Task": {"type": "title", "title": [{"plain_text": "OK"}]}}},
+            ]
+        }
+        client.archive_page.side_effect = [Exception("API error"), {"id": "task-2"}]
+
+        archived = _archive_done_tasks(client, "db-tracker", grace_days=3)
+
+        assert archived == 1
+        assert client.archive_page.call_count == 2

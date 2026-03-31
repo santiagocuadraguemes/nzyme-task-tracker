@@ -188,6 +188,14 @@ class NotionClientWrapper:
             properties=properties,
         )
 
+    def archive_page(self, page_id: str) -> dict[str, Any]:
+        """Archive (soft-delete) a Notion page."""
+        return self._call_with_retry(
+            self._client.pages.update,
+            page_id=page_id,
+            archived=True,
+        )
+
     def retrieve_database(self, database_id: str) -> dict[str, Any]:
         """Retrieve a Notion database by ID (no properties in API 2025-09-03)."""
         return self._call_with_retry(

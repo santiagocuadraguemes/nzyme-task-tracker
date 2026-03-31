@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime, timedelta, timezone
 
 import logfire
 
@@ -49,6 +50,45 @@ def _build_seen_fingerprints(source: SingleSource) -> set[str]:
     except Exception:
         logger.exception("Failed to load processed meetings for dedup — proceeding without")
     return seen
+
+
+def _archive_done_tasks(
+    client: NotionClientWrapper,
+    database_id: str,
+    grace_days: int = 3,
+    dry_run: bool = False,
+) -> int:
+    """Archive tasks marked Done whose last edit is older than grace_days."""
+    cutoff = datetime.now(timezone.utc) - timedelta(days=grace_days)
+    db_filter = {
+        "and": [
+            {"property": "Status", "status": {"equals": "Done"}},
+            {"timestamp": "last_edited_time", "last_edited_time": {"before": cutoff.isoformat()}},
+        ]
+    }
+    response = client.query_database(database_id=database_id, filter=db_filter)
+    pages = response.get("results", [])
+
+    archived = 0
+    for page in pages:
+        page_id = page["id"]
+        title = ""
+        for prop in page.get("properties", {}).values():
+            if prop.get("type") == "title":
+                title = "".join(p.get("plain_text", "") for p in prop.get("title", []))
+                break
+
+        if dry_run:
+            logger.info("DRY RUN — would archive done task: %s", title[:80])
+        else:
+            try:
+                client.archive_page(page_id)
+                logger.info("Archived done task: %s", title[:80])
+                archived += 1
+            except Exception:
+                logger.exception("Failed to archive task: %s", title[:80])
+
+    return archived
 
 
 def run_sync(config: SyncConfig, client: NotionClientWrapper) -> None:
@@ -101,64 +141,73 @@ def run_sync(config: SyncConfig, client: NotionClientWrapper) -> None:
     pages = source.get_unprocessed_pages(config.buffer_hours)
     if not pages:
         logger.info("No unprocessed meetings found")
-        return
+    else:
+        # Build meeting-level dedup set from already-processed meetings
+        seen_meetings = _build_seen_fingerprints(source)
 
-    # Build meeting-level dedup set from already-processed meetings
-    seen_meetings = _build_seen_fingerprints(source)
+        total_tasks = 0
+        for page in pages:
+            page_id = page["id"]
+            metadata = source.get_page_metadata(page)
+            title = metadata["title"]
 
-    total_tasks = 0
-    for page in pages:
-        page_id = page["id"]
-        metadata = source.get_page_metadata(page)
-        title = metadata["title"]
-
-        # Meeting-level dedup: skip if same meeting (title+date) already processed
-        fingerprint = _meeting_fingerprint(title, metadata["date"])
-        if fingerprint in seen_meetings:
-            logger.info("DEDUP — skipping duplicate meeting: '%s'", title)
-            if not config.dry_run:
-                source.mark_page_processed(page_id)
-            continue
-        seen_meetings.add(fingerprint)
-
-        try:
-            with logfire.span("process_meeting", meeting_title=title, page_id=page_id):
-                content = source.get_page_content(page_id)
-                if not content.strip():
-                    logger.info("Page '%s' has no content — marking processed", title)
-                    if not config.dry_run:
-                        source.mark_page_processed(page_id)
-                    continue
-
-                tasks = extractor.extract(
-                    meeting_title=title,
-                    meeting_date=metadata["date"],
-                    meeting_type=metadata["meeting_type"],
-                    meeting_content=content,
-                    attendees=metadata["attendees"],
-                    team_members=all_users,
-                    playbook=playbook,
-                    hierarchy=hierarchy,
-                    categories=categories,
-                )
-
-                for task in tasks:
-                    task["meeting_page_id"] = page_id
-
-                if tasks:
-                    created = writer.write_batch(tasks)
-                    total_tasks += len(created) if not config.dry_run else len(tasks)
-                    logger.info(
-                        "Page '%s': %d tasks extracted", title, len(tasks)
-                    )
-                else:
-                    logger.info("Page '%s': no tasks found", title)
-
+            # Meeting-level dedup: skip if same meeting (title+date) already processed
+            fingerprint = _meeting_fingerprint(title, metadata["date"])
+            if fingerprint in seen_meetings:
+                logger.info("DEDUP — skipping duplicate meeting: '%s'", title)
                 if not config.dry_run:
                     source.mark_page_processed(page_id)
+                continue
+            seen_meetings.add(fingerprint)
 
-        except Exception:
-            logger.exception("Failed to process '%s' — will retry next cycle", title)
-            continue
+            try:
+                with logfire.span("process_meeting", meeting_title=title, page_id=page_id):
+                    content = source.get_page_content(page_id)
+                    if not content.strip():
+                        logger.info("Page '%s' has no content — marking processed", title)
+                        if not config.dry_run:
+                            source.mark_page_processed(page_id)
+                        continue
 
-    logger.info("Sync complete: %d tasks processed", total_tasks)
+                    tasks = extractor.extract(
+                        meeting_title=title,
+                        meeting_date=metadata["date"],
+                        meeting_type=metadata["meeting_type"],
+                        meeting_content=content,
+                        attendees=metadata["attendees"],
+                        team_members=all_users,
+                        playbook=playbook,
+                        hierarchy=hierarchy,
+                        categories=categories,
+                    )
+
+                    for task in tasks:
+                        task["meeting_page_id"] = page_id
+
+                    if tasks:
+                        created = writer.write_batch(tasks)
+                        total_tasks += len(created) if not config.dry_run else len(tasks)
+                        logger.info(
+                            "Page '%s': %d tasks extracted", title, len(tasks)
+                        )
+                    else:
+                        logger.info("Page '%s': no tasks found", title)
+
+                    if not config.dry_run:
+                        source.mark_page_processed(page_id)
+
+            except Exception:
+                logger.exception("Failed to process '%s' — will retry next cycle", title)
+                continue
+
+        logger.info("Extraction complete: %d tasks processed", total_tasks)
+
+    # Archive done tasks (3-day grace period)
+    try:
+        archived = _archive_done_tasks(
+            client, config.team_tracker_db_id, grace_days=3, dry_run=config.dry_run,
+        )
+        if archived:
+            logger.info("Archived %d done tasks", archived)
+    except Exception:
+        logger.exception("Failed to archive done tasks — will retry next cycle")
