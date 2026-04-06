@@ -16,7 +16,7 @@ Workspace: `kiboventures.notion.so`
 | Property | Type | Values / Notes |
 |----------|------|----------------|
 | Meeting | title | Meeting title text |
-| Date | date | ISO date; used with 2-hour buffer filter |
+| Date | date | ISO date; informational only — **not used for processing logic** (created_time and last_edited_time are used instead) |
 | Attendees | people | List of Notion users (returns id + name) |
 | Meeting type | select | Standup, 1:1, Deal review, Portfolio review, Team sync, External, Other (as of 2026-03-27; editable in Notion) |
 | Processed | checkbox | `false` = unprocessed, `true` = AI extraction completed |
@@ -29,13 +29,13 @@ Workspace: `kiboventures.notion.so`
 
 Polling mode (unprocessed meetings with buffer):
 ```
-filter: Processed = false AND Date < (now - buffer_hours)
+filter: Processed = false AND created_time < (now - buffer_hours)
 sort: last_edited_time descending
 ```
 
 Webhook/cron mode (ready for extraction):
 ```
-filter: Processed = false AND Date <= now AND last_edited_time < (now - idle_minutes)
+filter: Processed = false AND last_edited_time < (now - idle_minutes)
 sort: last_edited_time descending
 ```
 

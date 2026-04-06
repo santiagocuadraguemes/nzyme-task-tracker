@@ -359,18 +359,6 @@ def run_sync_for_page(
         logger.info("Page %s already processed — skipping", page_id)
         return
 
-    date_prop = props.get("Date", {}).get("date")
-    if date_prop:
-        date_start = date_prop.get("start", "")
-        if date_start:
-            from dateutil.parser import parse as parse_date
-            meeting_date = parse_date(date_start)
-            if meeting_date.tzinfo is None:
-                meeting_date = meeting_date.replace(tzinfo=timezone.utc)
-            if meeting_date > datetime.now(timezone.utc):
-                logger.info("Page %s has future date %s — skipping", page_id, date_start)
-                return
-
     # Load context and extract
     try:
         ctx = _load_sync_context(config, client)

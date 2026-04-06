@@ -88,8 +88,8 @@ Helper functions:
 
 | Method | Purpose |
 |--------|---------|
-| `get_unprocessed_pages(buffer_hours)` | Filter: `Processed=false AND Date < (now - buffer)` |
-| `get_ready_pages(idle_minutes)` | Filter: `Processed=false AND Date<=now AND last_edited_time < (now - idle)` |
+| `get_unprocessed_pages(buffer_hours)` | Filter: `Processed=false AND created_time < (now - buffer)` |
+| `get_ready_pages(idle_minutes)` | Filter: `Processed=false AND last_edited_time < (now - idle)` |
 | `get_processed_pages()` | All processed meetings (for dedup fingerprinting) |
 | `get_page_content(page_id, include_ai_notes)` | Fetch blocks, optionally filter out AI-generated blocks, convert to text via `blocks_to_text` |
 | `get_page_metadata(page)` | Extract title, date, meeting_type, attendees from properties |

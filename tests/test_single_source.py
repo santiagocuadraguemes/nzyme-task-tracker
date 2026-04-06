@@ -39,7 +39,7 @@ class TestSingleSource:
         call_kwargs = client.query_database.call_args.kwargs
         conditions = call_kwargs["filter"]["and"]
         assert any(c.get("property") == "Processed" for c in conditions)
-        assert any(c.get("property") == "Date" for c in conditions)
+        assert any(c.get("timestamp") == "created_time" for c in conditions)
 
     def test_get_page_content_converts_blocks_to_text(self):
         client = MagicMock()

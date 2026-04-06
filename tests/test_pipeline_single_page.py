@@ -138,21 +138,6 @@ class TestRunSyncForPage:
         # Should return early without calling any extraction
         client.list_users.assert_not_called()
 
-    def test_skips_future_date(self):
-        config = _make_config()
-        client = MagicMock()
-        client.retrieve_page.return_value = {
-            "id": "page-1",
-            "properties": {
-                "Processed": {"type": "checkbox", "checkbox": False},
-                "Date": {"type": "date", "date": {"start": "2099-12-31"}},
-            },
-        }
-
-        run_sync_for_page(config, client, "page-1")
-
-        client.list_users.assert_not_called()
-
     @patch("src.pipeline._load_sync_context")
     @patch("src.pipeline._build_seen_fingerprints")
     @patch("src.pipeline.SingleSource")

@@ -32,15 +32,15 @@ class SingleSource:
     def get_unprocessed_pages(self, buffer_hours: int | None = 2) -> list[dict]:
         """Return pages where Processed = false.
 
-        When *buffer_hours* is set, also requires Date < (now - buffer).
-        When *buffer_hours* is None, returns all unprocessed pages regardless of date.
+        When *buffer_hours* is set, also requires created_time < (now - buffer).
+        When *buffer_hours* is None, returns all unprocessed pages regardless of age.
         """
         if buffer_hours is not None:
             cutoff = datetime.now(timezone.utc) - timedelta(hours=buffer_hours)
             db_filter: dict = {
                 "and": [
                     {"property": "Processed", "checkbox": {"equals": False}},
-                    {"property": "Date", "date": {"before": cutoff.isoformat()}},
+                    {"timestamp": "created_time", "created_time": {"before": cutoff.isoformat()}},
                 ]
             }
         else:
@@ -108,15 +108,12 @@ class SingleSource:
 
         A page is "ready" when:
         - Processed = false (not yet extracted)
-        - Date <= now (meeting time has passed)
         - last_edited_time < now - idle_minutes (no one actively editing)
         """
-        now = datetime.now(timezone.utc)
-        idle_cutoff = now - timedelta(minutes=idle_minutes)
+        idle_cutoff = datetime.now(timezone.utc) - timedelta(minutes=idle_minutes)
         db_filter: dict = {
             "and": [
                 {"property": "Processed", "checkbox": {"equals": False}},
-                {"property": "Date", "date": {"on_or_before": now.isoformat()}},
                 {
                     "timestamp": "last_edited_time",
                     "last_edited_time": {"before": idle_cutoff.isoformat()},
