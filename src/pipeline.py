@@ -359,53 +359,67 @@ def run_sync_for_page(
         logger.info("Page %s already processed — skipping", page_id)
         return
 
-    # Load context and extract
-    try:
-        ctx = _load_sync_context(config, client)
-    except Exception:
-        logger.exception("Failed to load sync context — aborting extraction for %s", page_id)
-        raise
-
-    metadata = source.get_page_metadata(page)
-    title = metadata["title"]
-
-    # Dedup check
-    seen_meetings = _build_seen_fingerprints(source)
-    fingerprint = _meeting_fingerprint(title, metadata["date"])
-    if fingerprint in seen_meetings:
-        logger.info("DEDUP — skipping duplicate meeting: '%s'", title)
-        if not config.dry_run:
-            source.mark_page_processed(page_id)
+    processing = props.get("Processing", {}).get("checkbox", False)
+    if processing:
+        logger.info("Page %s already being processed by another invocation — skipping", page_id)
         return
 
-    with logfire.span("process_meeting", meeting_title=title, page_id=page_id):
-        content = source.get_page_content(page_id, include_ai_notes=config.include_ai_notes)
-        if not content.strip():
-            logger.info("Page '%s' has no content — marking processed", title)
+    # Claim the page (concurrency lock)
+    if not config.dry_run:
+        source.mark_processing(page_id)
+
+    try:
+        # Load context and extract
+        ctx = _load_sync_context(config, client)
+
+        metadata = source.get_page_metadata(page)
+        title = metadata["title"]
+
+        # Dedup check
+        seen_meetings = _build_seen_fingerprints(source)
+        fingerprint = _meeting_fingerprint(title, metadata["date"])
+        if fingerprint in seen_meetings:
+            logger.info("DEDUP — skipping duplicate meeting: '%s'", title)
             if not config.dry_run:
                 source.mark_page_processed(page_id)
             return
 
-        tasks = ctx["extractor"].extract(
-            meeting_title=title,
-            meeting_date=metadata["date"],
-            meeting_type=metadata["meeting_type"],
-            meeting_content=content,
-            attendees=metadata["attendees"],
-            team_members=ctx["all_users"],
-            playbook=ctx["playbook"],
-            hierarchy=ctx["hierarchy"],
-            categories=ctx["categories"],
-        )
+        with logfire.span("process_meeting", meeting_title=title, page_id=page_id):
+            content = source.get_page_content(page_id, include_ai_notes=config.include_ai_notes)
+            if not content.strip():
+                logger.info("Page '%s' has no content — marking processed", title)
+                if not config.dry_run:
+                    source.mark_page_processed(page_id)
+                return
 
-        for task in tasks:
-            task["meeting_page_id"] = page_id
+            tasks = ctx["extractor"].extract(
+                meeting_title=title,
+                meeting_date=metadata["date"],
+                meeting_type=metadata["meeting_type"],
+                meeting_content=content,
+                attendees=metadata["attendees"],
+                team_members=ctx["all_users"],
+                playbook=ctx["playbook"],
+                hierarchy=ctx["hierarchy"],
+                categories=ctx["categories"],
+            )
 
-        if tasks:
-            ctx["writer"].write_batch(tasks)
-            logger.info("Page '%s': %d tasks extracted", title, len(tasks))
-        else:
-            logger.info("Page '%s': no tasks found", title)
+            for task in tasks:
+                task["meeting_page_id"] = page_id
 
+            if tasks:
+                ctx["writer"].write_batch(tasks)
+                logger.info("Page '%s': %d tasks extracted", title, len(tasks))
+            else:
+                logger.info("Page '%s': no tasks found", title)
+
+            if not config.dry_run:
+                source.mark_page_processed(page_id)
+    except Exception:
+        # Release the lock so the page retries next cycle
         if not config.dry_run:
-            source.mark_page_processed(page_id)
+            try:
+                source.clear_processing(page_id)
+            except Exception:
+                logger.exception("Failed to clear processing lock on %s", page_id)
+        raise

@@ -131,5 +131,5 @@ class TestSingleSource:
 
         client.update_page.assert_called_once_with(
             page_id="page-1",
-            properties={"Processed": {"checkbox": True}},
+            properties={"Processed": {"checkbox": True}, "Processing": {"checkbox": False}},
         )

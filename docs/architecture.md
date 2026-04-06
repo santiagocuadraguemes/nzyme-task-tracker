@@ -93,8 +93,10 @@ Helper functions:
 | `get_processed_pages()` | All processed meetings (for dedup fingerprinting) |
 | `get_page_content(page_id, include_ai_notes)` | Fetch blocks, optionally filter out AI-generated blocks, convert to text via `blocks_to_text` |
 | `get_page_metadata(page)` | Extract title, date, meeting_type, attendees from properties |
+| `mark_processing(page_id)` | Set `Processing=true` (concurrency lock) |
+| `clear_processing(page_id)` | Set `Processing=false` (release lock on failure) |
 | `mark_template_injected(page_id)` | Set `Template Injected=true` checkbox |
-| `mark_page_processed(page_id)` | Set `Processed=true` checkbox |
+| `mark_page_processed(page_id)` | Set `Processed=true` + clear `Processing` lock |
 
 ### AIExtractor (`src/ai_extractor.py`)
 

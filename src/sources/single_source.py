@@ -118,6 +118,7 @@ class SingleSource:
         db_filter: dict = {
             "and": [
                 {"property": "Processed", "checkbox": {"equals": False}},
+                {"property": "Processing", "checkbox": {"equals": False}},
                 {
                     "timestamp": "last_edited_time",
                     "last_edited_time": {"before": idle_cutoff.isoformat()},
@@ -138,6 +139,22 @@ class SingleSource:
                 logger.info("  ready page: id=%s last_edited=%s", pid, let)
         return pages
 
+    def mark_processing(self, page_id: str) -> None:
+        """Claim a page for extraction (concurrency lock)."""
+        self._client.update_page(
+            page_id=page_id,
+            properties={"Processing": {"checkbox": True}},
+        )
+        logger.debug("Claimed page %s for processing", page_id)
+
+    def clear_processing(self, page_id: str) -> None:
+        """Release the processing lock (on failure/retry)."""
+        self._client.update_page(
+            page_id=page_id,
+            properties={"Processing": {"checkbox": False}},
+        )
+        logger.debug("Released processing lock on page %s", page_id)
+
     def mark_template_injected(self, page_id: str) -> None:
         """Set Template Injected = true on a meeting page."""
         self._client.update_page(
@@ -147,9 +164,12 @@ class SingleSource:
         logger.debug("Marked page %s as template injected", page_id)
 
     def mark_page_processed(self, page_id: str) -> None:
-        """Set Processed = true on a meeting page."""
+        """Set Processed = true and clear Processing lock on a meeting page."""
         self._client.update_page(
             page_id=page_id,
-            properties={"Processed": {"checkbox": True}},
+            properties={
+                "Processed": {"checkbox": True},
+                "Processing": {"checkbox": False},
+            },
         )
         logger.debug("Marked page %s as processed", page_id)

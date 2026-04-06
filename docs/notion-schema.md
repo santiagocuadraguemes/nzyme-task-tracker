@@ -21,6 +21,7 @@ Workspace: `kiboventures.notion.so`
 | Meeting type | select | Standup, 1:1, Deal review, Portfolio review, Team sync, External, Other (as of 2026-03-27; editable in Notion) |
 | Processed | checkbox | `false` = unprocessed, `true` = AI extraction completed |
 | Template Injected | checkbox | `false` = template not yet injected, `true` = template applied |
+| Processing | checkbox | Concurrency lock — `true` while a Lambda is extracting tasks from this page |
 | Task - Relation | relation | Relation to Team Task Tracker (auto-populated when tasks set "Meeting - Relation") |
 | Created | created_time | Auto-set by Notion |
 | Created by | created_by | Auto-set by Notion |
