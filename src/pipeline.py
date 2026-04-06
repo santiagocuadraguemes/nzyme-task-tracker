@@ -351,7 +351,7 @@ def run_sync_for_page(
     source = SingleSource(client, config.meeting_notes_db_id)
 
     # Fetch page and validate state
-    page = client.retrieve_page(page_id)
+    page = client.get_page(page_id)
     props = page.get("properties", {})
 
     processed = props.get("Processed", {}).get("checkbox", False)

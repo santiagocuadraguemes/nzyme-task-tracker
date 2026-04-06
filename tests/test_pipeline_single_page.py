@@ -82,7 +82,7 @@ class TestRunSyncForPage:
     ):
         config = _make_config()
         client = MagicMock()
-        client.retrieve_page.return_value = {
+        client.get_page.return_value = {
             "id": "page-1",
             "properties": {
                 "Processed": {"type": "checkbox", "checkbox": False},
@@ -125,7 +125,7 @@ class TestRunSyncForPage:
     def test_skips_already_processed_page(self):
         config = _make_config()
         client = MagicMock()
-        client.retrieve_page.return_value = {
+        client.get_page.return_value = {
             "id": "page-1",
             "properties": {
                 "Processed": {"type": "checkbox", "checkbox": True},
@@ -146,7 +146,7 @@ class TestRunSyncForPage:
     ):
         config = _make_config()
         client = MagicMock()
-        client.retrieve_page.return_value = {
+        client.get_page.return_value = {
             "id": "page-1",
             "properties": {
                 "Processed": {"type": "checkbox", "checkbox": False},
@@ -183,7 +183,7 @@ class TestRunSyncForPage:
     ):
         config = _make_config()
         client = MagicMock()
-        client.retrieve_page.return_value = {
+        client.get_page.return_value = {
             "id": "page-1",
             "properties": {
                 "Processed": {"type": "checkbox", "checkbox": False},
