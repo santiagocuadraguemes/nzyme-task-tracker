@@ -15,7 +15,8 @@ if [ ! -d "$BUILD_DIR" ]; then
 fi
 
 echo "=== Copying source files ==="
-cp -r src/ "$BUILD_DIR/src/"
+rm -rf "$BUILD_DIR/src"
+cp -r src "$BUILD_DIR/src"
 
 echo "=== Zipping ==="
 python -c "

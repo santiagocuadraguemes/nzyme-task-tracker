@@ -15,12 +15,15 @@ from src.webhook.handler import handle_automation_webhook
 
 logger = logging.getLogger(__name__)
 
+# Lambda pre-configures the root logger. Set level on root so all our
+# loggers (src.webhook, src.sources, src.pipeline, etc.) actually emit.
+_log_level = getattr(logging, os.getenv("LOG_LEVEL", "INFO"), logging.INFO)
+logging.getLogger().setLevel(_log_level)
+logging.getLogger("src").setLevel(_log_level)
+
 
 def _init():
     """Shared initialisation."""
-    log_level = os.getenv("LOG_LEVEL", "INFO")
-    logging.basicConfig(level=getattr(logging, log_level, logging.INFO))
-
     config = load_config()
     notion = NotionClient(auth=config.notion_api_token)
     client = NotionClientWrapper(notion)
@@ -36,10 +39,13 @@ def handler(event, context):
     """
     # CloudWatch Events cron
     if event.get("source") == "aws.events":
+        print("[nzyme] Event routed to: extraction (CloudWatch cron)")
+        logger.info("Event routed to: extraction (CloudWatch cron)")
         return _handle_extraction(event, context)
 
     # API Gateway (has requestContext or pathParameters)
     if event.get("requestContext") or event.get("pathParameters"):
+        logger.info("Event routed to: webhook (API Gateway)")
         return _handle_webhook(event, context)
 
     logger.warning("Unknown event source: %s", json.dumps(event)[:200])
@@ -86,11 +92,12 @@ def _handle_extraction(event, context):
     Triggered by CloudWatch Events rule (every 1 minute).
     """
     config, client = _init()
+    logger.info("Extraction tick — db=%s, idle_minutes=%s", config.meeting_notes_db_id, config.idle_minutes)
     source = SingleSource(client, config.meeting_notes_db_id)
 
     pages = source.get_ready_pages(idle_minutes=config.idle_minutes)
     if not pages:
-        logger.debug("No pages ready for extraction")
+        logger.info("No pages ready for extraction")
         return {"statusCode": 200, "body": json.dumps({"processed": 0})}
 
     processed = 0

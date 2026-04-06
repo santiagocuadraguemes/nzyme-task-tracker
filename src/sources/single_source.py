@@ -111,6 +111,10 @@ class SingleSource:
         - last_edited_time < now - idle_minutes (no one actively editing)
         """
         idle_cutoff = datetime.now(timezone.utc) - timedelta(minutes=idle_minutes)
+        logger.info(
+            "get_ready_pages: idle_cutoff=%s, db=%s",
+            idle_cutoff.isoformat(), self._database_id,
+        )
         db_filter: dict = {
             "and": [
                 {"property": "Processed", "checkbox": {"equals": False}},
@@ -127,6 +131,11 @@ class SingleSource:
         )
         pages = response.get("results", [])
         logger.info("Found %d pages ready for extraction (idle>%dmin)", len(pages), idle_minutes)
+        if pages:
+            for p in pages[:5]:
+                pid = p.get("id", "?")
+                let = p.get("last_edited_time", "?")
+                logger.info("  ready page: id=%s last_edited=%s", pid, let)
         return pages
 
     def mark_template_injected(self, page_id: str) -> None:
