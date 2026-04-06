@@ -13,6 +13,7 @@ from src.playbook_loader import PlaybookLoader
 from src.hierarchy_loader import HierarchyLoader
 from src.ai_extractor import AIExtractor
 from src.sources.single_source import SingleSource
+from src.template_injector import fetch_template, inject_notes_section
 from src.tracker.team_writer import TeamTaskTrackerWriter
 
 logger = logging.getLogger(__name__)
@@ -91,8 +92,71 @@ def _archive_done_tasks(
     return archived
 
 
+def _inject_templates(
+    client: NotionClientWrapper,
+    database_id: str,
+    template_blocks: list[dict],
+    marker: tuple[str, str] | None,
+    dry_run: bool = False,
+) -> int:
+    """Inject template blocks into recent unprocessed meeting pages.
+
+    Only targets pages created in the last 12 hours to avoid touching old pages.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=12)
+    response = client.query_database(
+        database_id=database_id,
+        filter={
+            "and": [
+                {"property": "Processed", "checkbox": {"equals": False}},
+                {"timestamp": "created_time", "created_time": {"after": cutoff.isoformat()}},
+            ]
+        },
+        sorts=[{"timestamp": "created_time", "direction": "descending"}],
+    )
+    pages = response.get("results", [])
+
+    injected = 0
+    for page in pages:
+        page_id = page["id"]
+        title = ""
+        for prop in page.get("properties", {}).values():
+            if prop.get("type") == "title":
+                title = "".join(p.get("plain_text", "") for p in prop.get("title", []))
+                break
+
+        if dry_run:
+            logger.info("DRY RUN — would inject template into: %s", title[:80])
+        else:
+            try:
+                if inject_notes_section(client, page_id, template_blocks, marker):
+                    injected += 1
+            except Exception:
+                logger.exception("Failed to inject template into: %s", title[:80])
+
+    return injected
+
+
+def run_inject_templates(config: SyncConfig, client: NotionClientWrapper) -> None:
+    """Inject meeting note template into new pages (standalone command)."""
+    if not config.meeting_template_page_id:
+        logger.warning("MEETING_TEMPLATE_PAGE_ID not set — skipping template injection")
+        return
+
+    template_blocks, marker = fetch_template(client, config.meeting_template_page_id)
+    if not template_blocks:
+        logger.warning("Template page has no usable blocks — skipping")
+        return
+
+    injected = _inject_templates(
+        client, config.meeting_notes_db_id,
+        template_blocks, marker, config.dry_run,
+    )
+    logger.info("Template injection complete: %d pages updated", injected)
+
+
 def run_sync(config: SyncConfig, client: NotionClientWrapper) -> None:
-    """Execute one full sync cycle."""
+    """Execute one full sync cycle (AI extraction + archiving)."""
     source = SingleSource(client, config.meeting_notes_db_id)
     playbook_loader = PlaybookLoader(client, config.playbook_page_id)
     hierarchy_loader = HierarchyLoader(client, config.team_tracker_db_id)
@@ -162,7 +226,7 @@ def run_sync(config: SyncConfig, client: NotionClientWrapper) -> None:
 
             try:
                 with logfire.span("process_meeting", meeting_title=title, page_id=page_id):
-                    content = source.get_page_content(page_id)
+                    content = source.get_page_content(page_id, include_ai_notes=config.include_ai_notes)
                     if not content.strip():
                         logger.info("Page '%s' has no content — marking processed", title)
                         if not config.dry_run:

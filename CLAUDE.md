@@ -24,9 +24,19 @@ Environment: copy `.env.example` to `.env` and fill in credentials. Never commit
 # Run tests (see docs/testing.md for details)
 ../venv/Scripts/python -m pytest tests/ -v
 
-# Run the sync engine
+# Watch mode — loop continuously (Ctrl+C to stop)
+python -m src.main --watch
+python -m src.main --watch --dry-run --verbose
+
+# One-shot: run both template injection + AI extraction (default)
 python -m src.main
 python -m src.main --dry-run --verbose
+
+# One-shot: run only template injection
+python -m src.main --inject-templates
+
+# One-shot: run only AI extraction pipeline
+python -m src.main --sync
 
 # Lint
 ../venv/Scripts/python -m ruff check src/ tests/
@@ -35,10 +45,12 @@ python -m src.main --dry-run --verbose
 ## Architecture
 
 ```
-main.py → pipeline.run_sync() → for each unprocessed meeting:
-  1. playbook_loader  → fetch playbook rules from Notion page
-  2. hierarchy_loader → snapshot Team Task Tracker parent-child tree
-  3. single_source    → fetch meeting content as plain text
+main.py → pipeline.run_sync():
+  0. template_injector → inject "Your own notes" section into new meeting pages
+  then for each unprocessed meeting:
+    1. playbook_loader  → fetch playbook rules from Notion page
+    2. hierarchy_loader → snapshot Team Task Tracker parent-child tree
+    3. single_source    → fetch meeting content as plain text (filtered by INCLUDE_AI_NOTES)
   4. ai_extractor     → call OpenAI with playbook + hierarchy + content
   5. team_writer      → create task pages in Team Task Tracker
   6. single_source    → mark meeting page as Processed
@@ -54,7 +66,8 @@ Key design: playbook, hierarchy, and category options are all read dynamically f
 | `src/ai_extractor.py` | OpenAI prompt + function calling, parses tool_calls |
 | `src/playbook_loader.py` | Fetches playbook Notion page, converts to text, caches per run |
 | `src/hierarchy_loader.py` | Queries tracker DB, builds parent-child tree |
-| `src/sources/single_source.py` | Polls Meeting Notes DB with buffer delay, fetches page content |
+| `src/template_injector.py` | Injects "Your own notes" section into new meeting pages |
+| `src/sources/single_source.py` | Polls Meeting Notes DB with buffer delay, fetches page content (AI block filtering) |
 | `src/tracker/team_writer.py` | Maps task dicts to Notion properties, creates pages |
 | `src/utils/blocks_to_text.py` | Converts Notion block arrays to plain text |
 | `src/config.py` | Pydantic config from env vars |

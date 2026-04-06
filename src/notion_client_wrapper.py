@@ -160,6 +160,25 @@ class NotionClientWrapper:
 
         return all_blocks
 
+    def append_block_children(
+        self,
+        block_id: str,
+        children: list[dict[str, Any]],
+        position: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Add child blocks to a page or block.
+
+        *position* controls where blocks are inserted:
+        - ``None`` or ``{"type": "end"}`` — append at the end (default)
+        - ``{"type": "start"}`` — prepend at the beginning
+        """
+        kwargs: dict[str, Any] = {"block_id": block_id, "children": children}
+        if position is not None:
+            kwargs["position"] = position
+        return self._call_with_retry(
+            self._client.blocks.children.append, **kwargs
+        )
+
     def get_page(self, page_id: str) -> dict[str, Any]:
         """Retrieve a single Notion page by ID."""
         return self._call_with_retry(self._client.pages.retrieve, page_id=page_id)

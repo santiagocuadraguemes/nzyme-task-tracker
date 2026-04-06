@@ -72,6 +72,57 @@ class TestSingleSource:
         assert meta["meeting_type"] == "Team sync"
         assert meta["attendees"] == [{"id": "user-1", "name": "Santiago"}]
 
+    def test_get_page_content_excludes_ai_blocks_by_default(self):
+        client = MagicMock()
+        client.get_block_children.return_value = [
+            {
+                "id": "b1",
+                "type": "to_do",
+                "has_children": False,
+                "to_do": {"rich_text": [{"plain_text": "Call Natalia"}], "checked": False},
+            },
+            {
+                "id": "b2",
+                "type": "paragraph",
+                "has_children": False,
+                "paragraph": {"rich_text": []},
+            },
+            {
+                "id": "ai-block",
+                "type": "ai_block",
+                "has_children": True,
+                "ai_block": {"rich_text": [{"plain_text": "AI summary"}]},
+            },
+        ]
+        source = SingleSource(client, "db-meetings")
+
+        content = source.get_page_content("page-123", include_ai_notes=False)
+
+        assert "Call Natalia" in content
+        assert "AI summary" not in content
+
+    def test_get_page_content_includes_ai_blocks_when_enabled(self):
+        client = MagicMock()
+        client.get_block_children.return_value = [
+            {
+                "id": "b1",
+                "type": "to_do",
+                "has_children": False,
+                "to_do": {"rich_text": [{"plain_text": "Call Natalia"}], "checked": False},
+            },
+            {
+                "id": "ai-block",
+                "type": "ai_block",
+                "has_children": False,
+                "ai_block": {"rich_text": [{"plain_text": "AI summary"}]},
+            },
+        ]
+        source = SingleSource(client, "db-meetings")
+
+        content = source.get_page_content("page-123", include_ai_notes=True)
+
+        assert "Call Natalia" in content
+
     def test_mark_page_processed(self):
         client = MagicMock()
         source = SingleSource(client, "db-meetings")

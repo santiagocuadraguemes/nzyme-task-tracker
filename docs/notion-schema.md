@@ -7,6 +7,7 @@
 | Meeting Notes DB | `b07976472620499fa4b89be7b03c07d0` | Source of meeting pages |
 | Team Task Tracker DB | `32f83e67e2e7803f9662f43125603afa` | Destination for extracted tasks |
 | Playbook page | `33083e67-e2e7-8108-bb08-eaeba8b65678` | "Nzyme Playbook - Task Extraction Rules" under Nzyme Home |
+| Meeting template page | `32f83e67-e2e7-8086-9863-e276b70cc5a2` | Default "New page" template in Meeting Notes DB — edit in Notion to change injected content |
 
 Workspace: `kiboventures.notion.so`
 

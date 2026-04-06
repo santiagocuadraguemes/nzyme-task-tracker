@@ -24,6 +24,10 @@ class SyncConfig(BaseModel):
     logfire_token: str | None = Field(None, description="Logfire write token for LLM observability")
     log_level: str = Field("INFO", description="Logging level")
     dry_run: bool = Field(False, description="Log tasks but don't write to Notion")
+    include_ai_notes: bool = Field(False, description="Include AI-generated meeting notes in extraction")
+    meeting_template_page_id: str | None = Field(None, description="Notion template page ID for meeting notes")
+    watch_interval: int = Field(10, description="Seconds between template injection checks in watch mode")
+    sync_interval: int = Field(300, description="Seconds between sync runs in watch mode")
 
 
 def load_config() -> SyncConfig:
@@ -42,4 +46,8 @@ def load_config() -> SyncConfig:
         buffer_hours=int(os.getenv("BUFFER_HOURS", "2")),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
         dry_run=os.getenv("DRY_RUN", "false").lower() in ("true", "1", "yes"),
+        include_ai_notes=os.getenv("INCLUDE_AI_NOTES", "false").lower() in ("true", "1", "yes"),
+        meeting_template_page_id=os.getenv("MEETING_TEMPLATE_PAGE_ID"),
+        watch_interval=int(os.getenv("WATCH_INTERVAL", "10")),
+        sync_interval=int(os.getenv("SYNC_INTERVAL", "300")),
     )

@@ -3,23 +3,37 @@
 ## Pipeline Overview
 
 ```
-main.py → pipeline.run_sync() → for each unprocessed meeting:
-  1. playbook_loader  → fetch playbook rules from Notion page
-  2. hierarchy_loader → snapshot Team Task Tracker parent-child tree
-  3. single_source    → fetch meeting content as plain text
-  4. ai_extractor     → call OpenAI with playbook + hierarchy + content
-  5. team_writer      → create task pages in Team Task Tracker
-  6. single_source    → mark meeting page as Processed
+main.py → pipeline.run_sync():
+  0. template_injector → inject "Your own notes" section into new meeting pages
+  then for each unprocessed meeting:
+    1. playbook_loader  → fetch playbook rules from Notion page
+    2. hierarchy_loader → snapshot Team Task Tracker parent-child tree
+    3. single_source    → fetch meeting content as plain text (filtered by INCLUDE_AI_NOTES)
+    4. ai_extractor     → call OpenAI with playbook + hierarchy + content
+    5. team_writer      → create task pages in Team Task Tracker
+    6. single_source    → mark meeting page as Processed
 ```
 
 ## Entry Point (`src/main.py`)
 
-- Parses CLI args: `--dry-run`, `--verbose`
+- Parses CLI args: `--watch`, `--inject-templates`, `--sync`, `--dry-run`, `--verbose`
 - Loads `SyncConfig` from `.env` via Pydantic
 - Configures Logfire for OpenAI observability (uses `LOGFIRE_TOKEN` when provided)
-- Creates `NotionClientWrapper` and calls `run_sync()`
+- Creates `NotionClientWrapper` and runs in one of two modes:
+
+**Watch mode** (`--watch`): Continuous loop. Template injection runs every `WATCH_INTERVAL` seconds (default 10s). Sync extraction runs every `SYNC_INTERVAL` seconds (default 5 min). Ctrl+C to stop.
+
+**One-shot mode** (default): Runs `run_inject_templates()` and/or `run_sync()` once and exits. If neither `--inject-templates` nor `--sync` is passed, both run.
 
 ## Pipeline Orchestrator (`src/pipeline.py`)
+
+Two independent entry points:
+
+### `run_inject_templates()` (`--inject-templates`)
+
+Fetches the meeting note template from Notion (`MEETING_TEMPLATE_PAGE_ID`), then injects it into unprocessed pages that don't have it yet. Queries `Processed=false` with no buffer delay to catch pages ASAP.
+
+### `run_sync()` (`--sync`)
 
 Instantiates all components with a shared `NotionClientWrapper`, then:
 
@@ -30,7 +44,7 @@ Instantiates all components with a shared `NotionClientWrapper`, then:
 5. **Build dedup fingerprints** — loads already-processed meetings for cross-cycle dedup
 6. **For each meeting page:**
    - Check fingerprint `(normalized_title|date)` against dedup set; skip duplicates
-   - Fetch page content (blocks to text); skip if empty
+   - Fetch page content (blocks to text, filtered by `include_ai_notes` config); skip if empty
    - Call AI extractor with full context
    - Write extracted tasks via team writer
    - Mark page as Processed
@@ -40,8 +54,18 @@ Helper functions:
 - `_meeting_fingerprint()` — strips Notion's `(1)`, `(2)` suffixes, lowercases, combines with date
 - `_load_categories()` — reads Category select options from DB schema
 - `_build_seen_fingerprints()` — collects fingerprints from processed meetings
+- `_inject_templates()` — injects "Your own notes" section into new meeting pages via `template_injector`
 
 ## Component Details
+
+### TemplateInjector (`src/template_injector.py`)
+
+- **Input:** NotionClientWrapper + template page ID + target page ID
+- **Output:** Boolean (True if template was injected)
+- Fetches template blocks dynamically from a Notion template page (`MEETING_TEMPLATE_PAGE_ID`), converts from "read" to "create" format, filters out AI blocks
+- Detects if template is already injected by checking for the first heading match (idempotent)
+- On empty/new pages the blocks land at the top; if AI content already exists they go at the bottom (the pipeline filters by block type regardless of position)
+- Edit the template in Notion to change what gets injected — no code changes needed
 
 ### PlaybookLoader (`src/playbook_loader.py`)
 
@@ -66,7 +90,7 @@ Helper functions:
 |--------|---------|
 | `get_unprocessed_pages(buffer_hours)` | Filter: `Processed=false AND Date < (now - buffer)` |
 | `get_processed_pages()` | All processed meetings (for dedup fingerprinting) |
-| `get_page_content(page_id)` | Fetch blocks, convert to text via `blocks_to_text` |
+| `get_page_content(page_id, include_ai_notes)` | Fetch blocks, optionally filter out AI-generated blocks, convert to text via `blocks_to_text` |
 | `get_page_metadata(page)` | Extract title, date, meeting_type, attendees from properties |
 | `mark_page_processed(page_id)` | Set `Processed=true` checkbox |
 
@@ -138,7 +162,7 @@ Internal behavior:
 
 ```
 Meeting Notes DB page
-  → SingleSource.get_page_content() → plain text
+  → SingleSource.get_page_content(include_ai_notes) → plain text (human-only or full)
   → SingleSource.get_page_metadata() → {title, date, meeting_type, attendees}
 
 Playbook Notion page
@@ -165,6 +189,7 @@ Task dicts
 | Single meeting fails | Log error, skip to next; failed meeting NOT marked processed (retry next cycle) |
 | Single task write fails | Log error, continue with remaining tasks in batch |
 | Notion API 429/5xx | Exponential backoff retry (up to 3 attempts) |
+| Template injection fails | Log error, continue sync cycle — template injection is optional |
 | Empty meeting content | Mark processed, skip extraction (no tasks to create) |
 | Duplicate meeting | Skip extraction, mark processed (fingerprint-based dedup) |
 
@@ -179,7 +204,8 @@ At the end of each sync cycle, the pipeline archives tasks where `Status = Done`
 
 ## Key Design Principles
 
-1. **Dynamic schema** — Playbook, hierarchy, and categories are all fetched from Notion at runtime. Schema changes in Notion require no code changes.
+1. **Dynamic schema** — Playbook, hierarchy, and category options are all fetched from Notion at runtime. Schema changes in Notion require no code changes.
+1. **AI notes filtering** — `INCLUDE_AI_NOTES` (default `false`) controls whether Notion AI meeting notes blocks are sent to the extractor. When off, only human-written blocks (to-dos, paragraphs, headings, etc.) are included, using a whitelist of known content block types.
 2. **Stateless cycles** — Each sync cycle is independent. No persistent state between runs.
 3. **Graceful degradation** — Non-critical failures (hierarchy, categories, individual meetings/tasks) don't abort the cycle.
 4. **Two-layer dedup** — Meeting-level (title+date fingerprint) and task-level (title match in tracker).

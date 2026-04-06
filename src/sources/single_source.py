@@ -9,6 +9,18 @@ from src.utils.blocks_to_text import blocks_to_text
 
 logger = logging.getLogger(__name__)
 
+# Block types that represent human-written content.
+# AI meeting notes (ai_block, etc.) are excluded from this set.
+HUMAN_CONTENT_BLOCK_TYPES = frozenset({
+    "heading_1", "heading_2", "heading_3",
+    "paragraph", "bulleted_list_item", "numbered_list_item",
+    "to_do", "toggle", "callout", "quote", "divider",
+    "code", "table", "table_row", "column_list", "column",
+    "image", "video", "file", "pdf", "bookmark", "embed",
+    "audio", "equation", "breadcrumb", "link_preview",
+    "synced_block", "template", "link_to_page",
+})
+
 
 class SingleSource:
     """Fetches and processes meeting pages from a single Notion database."""
@@ -17,15 +29,22 @@ class SingleSource:
         self._client = client
         self._database_id = database_id
 
-    def get_unprocessed_pages(self, buffer_hours: int = 2) -> list[dict]:
-        """Return pages where Date < (now - buffer) AND Processed = false."""
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=buffer_hours)
-        db_filter = {
-            "and": [
-                {"property": "Processed", "checkbox": {"equals": False}},
-                {"property": "Date", "date": {"before": cutoff.isoformat()}},
-            ]
-        }
+    def get_unprocessed_pages(self, buffer_hours: int | None = 2) -> list[dict]:
+        """Return pages where Processed = false.
+
+        When *buffer_hours* is set, also requires Date < (now - buffer).
+        When *buffer_hours* is None, returns all unprocessed pages regardless of date.
+        """
+        if buffer_hours is not None:
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=buffer_hours)
+            db_filter: dict = {
+                "and": [
+                    {"property": "Processed", "checkbox": {"equals": False}},
+                    {"property": "Date", "date": {"before": cutoff.isoformat()}},
+                ]
+            }
+        else:
+            db_filter = {"property": "Processed", "checkbox": {"equals": False}}
         response = self._client.query_database(
             database_id=self._database_id,
             filter=db_filter,
@@ -43,9 +62,15 @@ class SingleSource:
         )
         return response.get("results", [])
 
-    def get_page_content(self, page_id: str) -> str:
-        """Fetch all blocks from a page and convert to plain text."""
+    def get_page_content(self, page_id: str, include_ai_notes: bool = True) -> str:
+        """Fetch all blocks from a page and convert to plain text.
+
+        When *include_ai_notes* is False, blocks whose type is not in the
+        human-content whitelist are dropped (along with their children).
+        """
         blocks = self._client.get_block_children(page_id)
+        if not include_ai_notes:
+            blocks = [b for b in blocks if b.get("type") in HUMAN_CONTENT_BLOCK_TYPES]
         return blocks_to_text(blocks, self._client)
 
     def get_page_metadata(self, page: dict) -> dict:

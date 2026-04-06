@@ -1,7 +1,7 @@
 from unittest.mock import MagicMock, patch, call
 
 from src.config import SyncConfig
-from src.pipeline import run_sync, _archive_done_tasks
+from src.pipeline import run_inject_templates, run_sync, _archive_done_tasks, _inject_templates
 
 
 def _make_config(**overrides) -> SyncConfig:
@@ -200,3 +200,81 @@ class TestArchiveDoneTasks:
 
         assert archived == 1
         assert client.archive_page.call_count == 2
+
+
+class TestInjectTemplates:
+    @patch("src.pipeline.inject_notes_section")
+    def test_injects_into_unprocessed_pages(self, mock_inject):
+        client = MagicMock()
+        client.query_database.return_value = {
+            "results": [
+                _make_page("p1", "Meeting 1"),
+                _make_page("p2", "Meeting 2"),
+            ]
+        }
+        mock_inject.side_effect = [True, False]  # p1 injected, p2 already had it
+        template_blocks = [{"type": "heading_2"}]
+        marker = ("heading_2", "action items")
+
+        injected = _inject_templates(client, "db-meetings", template_blocks, marker)
+
+        assert injected == 1
+        assert mock_inject.call_count == 2
+
+    @patch("src.pipeline.inject_notes_section")
+    def test_dry_run_does_not_inject(self, mock_inject):
+        client = MagicMock()
+        client.query_database.return_value = {
+            "results": [_make_page("p1", "Meeting 1")]
+        }
+        template_blocks = [{"type": "heading_2"}]
+        marker = ("heading_2", "action items")
+
+        injected = _inject_templates(
+            client, "db-meetings", template_blocks, marker, dry_run=True,
+        )
+
+        assert injected == 0
+        mock_inject.assert_not_called()
+
+    @patch("src.pipeline.inject_notes_section")
+    def test_continues_on_individual_failure(self, mock_inject):
+        client = MagicMock()
+        client.query_database.return_value = {
+            "results": [
+                _make_page("p1", "Meeting 1"),
+                _make_page("p2", "Meeting 2"),
+            ]
+        }
+        mock_inject.side_effect = [Exception("API error"), True]
+        template_blocks = [{"type": "heading_2"}]
+        marker = ("heading_2", "action items")
+
+        injected = _inject_templates(client, "db-meetings", template_blocks, marker)
+
+        assert injected == 1
+        assert mock_inject.call_count == 2
+
+
+class TestRunInjectTemplates:
+    @patch("src.pipeline._inject_templates")
+    @patch("src.pipeline.fetch_template")
+    def test_fetches_and_injects(self, mock_fetch, mock_inject):
+        config = _make_config(meeting_template_page_id="tmpl-123")
+        client = MagicMock()
+        mock_fetch.return_value = ([{"type": "heading_2"}], ("heading_2", "action items"))
+        mock_inject.return_value = 2
+
+        run_inject_templates(config, client)
+
+        mock_fetch.assert_called_once_with(client, "tmpl-123")
+        mock_inject.assert_called_once()
+
+    @patch("src.pipeline.fetch_template")
+    def test_skips_when_no_template_configured(self, mock_fetch):
+        config = _make_config()  # no meeting_template_page_id
+        client = MagicMock()
+
+        run_inject_templates(config, client)
+
+        mock_fetch.assert_not_called()
