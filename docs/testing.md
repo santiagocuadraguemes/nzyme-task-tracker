@@ -41,6 +41,9 @@ Tests live in `tests/` mirroring `src/` structure. All Notion and OpenAI calls a
 | `test_ai_extractor.py` | Task extraction, no tool calls, invalid JSON, dynamic category enum |
 | `test_team_writer.py` | Full/minimal task creation, dry run, batch, dedup, error continuation |
 | `test_pipeline.py` | Full cycle, no pages, per-page failure handling |
+| `test_pipeline_single_page.py` | Single-page template injection and extraction (webhook entry points) |
+| `test_webhook_handler.py` | Automation payload parsing, DB validation, path token check |
+| `test_webhook_lambda.py` | Lambda handler functions, extraction cron logic |
 
 ---
 
@@ -162,6 +165,14 @@ Create a meeting discussing a specific entity (e.g., "Acme Corp") that already e
 #### Scenario E: Deduplication
 Run the pipeline on a meeting, then uncheck `Processed` and run again.
 **Expected:** Second run should not create duplicate tasks (title-based dedup in `TeamTaskTrackerWriter`). The meeting-level fingerprint dedup will also catch it if the processed meetings are queried.
+
+#### Scenario F: Webhook Template Injection
+Create a meeting page in Notion (via UI or MCP). The Notion automation should fire a webhook to the Lambda, which injects the template.
+**Expected:** Template appears on the page within seconds, `Template Injected` checkbox set to `true`.
+
+#### Scenario G: Cron Extraction
+Create a meeting with a past date and some content. Wait ~4 minutes.
+**Expected:** Extraction Lambda picks it up, tasks created, `Processed` set to `true`.
 
 ### Naming Convention
 

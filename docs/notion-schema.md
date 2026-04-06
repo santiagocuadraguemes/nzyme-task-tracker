@@ -19,15 +19,30 @@ Workspace: `kiboventures.notion.so`
 | Date | date | ISO date; used with 2-hour buffer filter |
 | Attendees | people | List of Notion users (returns id + name) |
 | Meeting type | select | Standup, 1:1, Deal review, Portfolio review, Team sync, External, Other (as of 2026-03-27; editable in Notion) |
-| Processed | checkbox | `false` = unprocessed, `true` = already synced |
+| Processed | checkbox | `false` = unprocessed, `true` = AI extraction completed |
+| Template Injected | checkbox | `false` = template not yet injected, `true` = template applied |
 | Task - Relation | relation | Relation to Team Task Tracker (auto-populated when tasks set "Meeting - Relation") |
 | Created | created_time | Auto-set by Notion |
 | Created by | created_by | Auto-set by Notion |
 
-**Query pattern** for unprocessed meetings (from `single_source.py`):
+**Query patterns** (from `single_source.py`):
+
+Polling mode (unprocessed meetings with buffer):
 ```
 filter: Processed = false AND Date < (now - buffer_hours)
 sort: last_edited_time descending
+```
+
+Webhook/cron mode (ready for extraction):
+```
+filter: Processed = false AND Date <= now AND last_edited_time < (now - idle_minutes)
+sort: last_edited_time descending
+```
+
+Template injection:
+```
+filter: Template Injected = false AND created_time > (now - 12 hours)
+sort: created_time descending
 ```
 
 ## Team Task Tracker DB

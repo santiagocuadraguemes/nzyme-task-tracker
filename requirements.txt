@@ -1,0 +1,6 @@
+notion-client
+python-dotenv
+pydantic
+openai
+logfire
+python-dateutil

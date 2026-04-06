@@ -102,13 +102,14 @@ def _inject_templates(
     """Inject template blocks into recent unprocessed meeting pages.
 
     Only targets pages created in the last 12 hours to avoid touching old pages.
+    Uses the "Template Injected" checkbox to track which pages have been processed.
     """
     cutoff = datetime.now(timezone.utc) - timedelta(hours=12)
     response = client.query_database(
         database_id=database_id,
         filter={
             "and": [
-                {"property": "Processed", "checkbox": {"equals": False}},
+                {"property": "Template Injected", "checkbox": {"equals": False}},
                 {"timestamp": "created_time", "created_time": {"after": cutoff.isoformat()}},
             ]
         },
@@ -116,6 +117,7 @@ def _inject_templates(
     )
     pages = response.get("results", [])
 
+    source = SingleSource(client, database_id)
     injected = 0
     for page in pages:
         page_id = page["id"]
@@ -130,6 +132,7 @@ def _inject_templates(
         else:
             try:
                 if inject_notes_section(client, page_id, template_blocks, marker):
+                    source.mark_template_injected(page_id)
                     injected += 1
             except Exception:
                 logger.exception("Failed to inject template into: %s", title[:80])
@@ -155,22 +158,21 @@ def run_inject_templates(config: SyncConfig, client: NotionClientWrapper) -> Non
     logger.info("Template injection complete: %d pages updated", injected)
 
 
-def run_sync(config: SyncConfig, client: NotionClientWrapper) -> None:
-    """Execute one full sync cycle (AI extraction + archiving)."""
-    source = SingleSource(client, config.meeting_notes_db_id)
+def _load_sync_context(
+    config: SyncConfig, client: NotionClientWrapper,
+) -> dict:
+    """Load shared context needed for AI extraction.
+
+    Returns a dict with: playbook, hierarchy, categories, all_users, extractor, writer.
+    Raises if the playbook fails to load (required).
+    """
     playbook_loader = PlaybookLoader(client, config.playbook_page_id)
     hierarchy_loader = HierarchyLoader(client, config.team_tracker_db_id)
-    extractor = AIExtractor(config.openai_api_key, config.openai_model, config.openai_base_url)
-    writer = TeamTaskTrackerWriter(client, config.team_tracker_db_id, config.dry_run)
 
-    # Load playbook (required — abort if fails)
-    try:
-        playbook = playbook_loader.load()
-    except Exception:
-        logger.exception("Failed to load playbook — aborting sync")
-        raise
+    # Playbook is required — abort if fails
+    playbook = playbook_loader.load()
 
-    # Load hierarchy (optional — proceed without if fails)
+    # Hierarchy is optional
     try:
         hierarchy = hierarchy_loader.load()
         logger.info("Categories: %s", [h["title"] for h in hierarchy])
@@ -178,7 +180,7 @@ def run_sync(config: SyncConfig, client: NotionClientWrapper) -> None:
         logger.exception("Failed to load hierarchy — proceeding without it")
         hierarchy = []
 
-    # Load categories dynamically from DB schema
+    # Categories from DB schema
     try:
         categories = _load_categories(client, config.team_tracker_db_id)
         if not categories:
@@ -189,7 +191,7 @@ def run_sync(config: SyncConfig, client: NotionClientWrapper) -> None:
         logger.exception("Failed to load categories — using fallback")
         categories = ["Other"]
 
-    # Load all workspace users (optional — fall back to attendees-only)
+    # Workspace users (optional)
     try:
         all_users = [
             {"id": u["id"], "name": u.get("name", "")}
@@ -200,6 +202,33 @@ def run_sync(config: SyncConfig, client: NotionClientWrapper) -> None:
     except Exception:
         logger.exception("Failed to load workspace users — will use attendees only")
         all_users = []
+
+    return {
+        "playbook": playbook,
+        "hierarchy": hierarchy,
+        "categories": categories,
+        "all_users": all_users,
+        "extractor": AIExtractor(config.openai_api_key, config.openai_model, config.openai_base_url),
+        "writer": TeamTaskTrackerWriter(client, config.team_tracker_db_id, config.dry_run),
+    }
+
+
+def run_sync(config: SyncConfig, client: NotionClientWrapper) -> None:
+    """Execute one full sync cycle (AI extraction + archiving)."""
+    source = SingleSource(client, config.meeting_notes_db_id)
+
+    try:
+        ctx = _load_sync_context(config, client)
+    except Exception:
+        logger.exception("Failed to load playbook — aborting sync")
+        raise
+
+    playbook = ctx["playbook"]
+    hierarchy = ctx["hierarchy"]
+    categories = ctx["categories"]
+    all_users = ctx["all_users"]
+    extractor = ctx["extractor"]
+    writer = ctx["writer"]
 
     # Poll for unprocessed meetings
     pages = source.get_unprocessed_pages(config.buffer_hours)
@@ -275,3 +304,120 @@ def run_sync(config: SyncConfig, client: NotionClientWrapper) -> None:
             logger.info("Archived %d done tasks", archived)
     except Exception:
         logger.exception("Failed to archive done tasks — will retry next cycle")
+
+
+# ---------------------------------------------------------------------------
+# Single-page entry points (used by webhook / Lambda handlers)
+# ---------------------------------------------------------------------------
+
+def run_inject_templates_for_page(
+    config: SyncConfig, client: NotionClientWrapper, page_id: str,
+) -> bool:
+    """Inject template into a single page (webhook entry point).
+
+    Returns True if the template was injected, False if skipped.
+    """
+    if not config.meeting_template_page_id:
+        logger.warning("MEETING_TEMPLATE_PAGE_ID not set — skipping template injection")
+        return False
+
+    template_blocks, marker = fetch_template(client, config.meeting_template_page_id)
+    if not template_blocks:
+        logger.warning("Template page has no usable blocks — skipping")
+        return False
+
+    source = SingleSource(client, config.meeting_notes_db_id)
+    try:
+        if inject_notes_section(client, page_id, template_blocks, marker):
+            if not config.dry_run:
+                source.mark_template_injected(page_id)
+            logger.info("Template injected into page %s", page_id)
+            return True
+        logger.debug("Template already present on page %s — skipped", page_id)
+        return False
+    except Exception:
+        logger.exception("Failed to inject template into page %s", page_id)
+        raise
+
+
+def run_sync_for_page(
+    config: SyncConfig, client: NotionClientWrapper, page_id: str,
+) -> None:
+    """Run AI extraction on a single page (webhook/cron entry point).
+
+    Guards: skips if page is already processed or if the meeting date is in
+    the future.
+    """
+    source = SingleSource(client, config.meeting_notes_db_id)
+
+    # Fetch page and validate state
+    page = client.retrieve_page(page_id)
+    props = page.get("properties", {})
+
+    processed = props.get("Processed", {}).get("checkbox", False)
+    if processed:
+        logger.info("Page %s already processed — skipping", page_id)
+        return
+
+    date_prop = props.get("Date", {}).get("date")
+    if date_prop:
+        date_start = date_prop.get("start", "")
+        if date_start:
+            from dateutil.parser import parse as parse_date
+            meeting_date = parse_date(date_start)
+            if meeting_date.tzinfo is None:
+                meeting_date = meeting_date.replace(tzinfo=timezone.utc)
+            if meeting_date > datetime.now(timezone.utc):
+                logger.info("Page %s has future date %s — skipping", page_id, date_start)
+                return
+
+    # Load context and extract
+    try:
+        ctx = _load_sync_context(config, client)
+    except Exception:
+        logger.exception("Failed to load sync context — aborting extraction for %s", page_id)
+        raise
+
+    metadata = source.get_page_metadata(page)
+    title = metadata["title"]
+
+    # Dedup check
+    seen_meetings = _build_seen_fingerprints(source)
+    fingerprint = _meeting_fingerprint(title, metadata["date"])
+    if fingerprint in seen_meetings:
+        logger.info("DEDUP — skipping duplicate meeting: '%s'", title)
+        if not config.dry_run:
+            source.mark_page_processed(page_id)
+        return
+
+    with logfire.span("process_meeting", meeting_title=title, page_id=page_id):
+        content = source.get_page_content(page_id, include_ai_notes=config.include_ai_notes)
+        if not content.strip():
+            logger.info("Page '%s' has no content — marking processed", title)
+            if not config.dry_run:
+                source.mark_page_processed(page_id)
+            return
+
+        tasks = ctx["extractor"].extract(
+            meeting_title=title,
+            meeting_date=metadata["date"],
+            meeting_type=metadata["meeting_type"],
+            meeting_content=content,
+            attendees=metadata["attendees"],
+            team_members=ctx["all_users"],
+            playbook=ctx["playbook"],
+            hierarchy=ctx["hierarchy"],
+            categories=ctx["categories"],
+        )
+
+        for task in tasks:
+            task["meeting_page_id"] = page_id
+
+        if tasks:
+            ctx["writer"].write_batch(tasks)
+            logger.info("Page '%s': %d tasks extracted", title, len(tasks))
+        else:
+            logger.info("Page '%s': no tasks found", title)
+
+        if not config.dry_run:
+            source.mark_page_processed(page_id)

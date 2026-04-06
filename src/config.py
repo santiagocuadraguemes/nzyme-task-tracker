@@ -28,6 +28,10 @@ class SyncConfig(BaseModel):
     meeting_template_page_id: str | None = Field(None, description="Notion template page ID for meeting notes")
     watch_interval: int = Field(10, description="Seconds between template injection checks in watch mode")
     sync_interval: int = Field(300, description="Seconds between sync runs in watch mode")
+    # Webhook / Lambda mode
+    webhook_path_token: str | None = Field(None, description="Secret URL token for webhook auth")
+    idle_minutes: int = Field(3, description="Minutes of inactivity before AI extraction triggers")
+    aws_region: str = Field("eu-west-1", description="AWS region for Lambda deployment")
 
 
 def load_config() -> SyncConfig:
@@ -50,4 +54,7 @@ def load_config() -> SyncConfig:
         meeting_template_page_id=os.getenv("MEETING_TEMPLATE_PAGE_ID"),
         watch_interval=int(os.getenv("WATCH_INTERVAL", "10")),
         sync_interval=int(os.getenv("SYNC_INTERVAL", "300")),
+        webhook_path_token=os.getenv("WEBHOOK_PATH_TOKEN"),
+        idle_minutes=int(os.getenv("IDLE_MINUTES", "3")),
+        aws_region=os.getenv("AWS_REGION", "eu-west-1"),
     )

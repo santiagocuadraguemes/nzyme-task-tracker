@@ -1,0 +1,94 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: |
+  Nzyme Task Tracker — webhook-driven sync engine. Template injection via Notion automation webhook, AI extraction via scheduled cron.
+
+Globals:
+  Function:
+    Runtime: python3.13
+    Architectures:
+      - x86_64
+    Environment:
+      Variables:
+        NOTION_API_TOKEN: !Ref NotionApiToken
+        OPENAI_API_KEY: !Ref OpenAIApiKey
+        MEETING_NOTES_DB_ID: !Ref MeetingNotesDbId
+        TEAM_TRACKER_DB_ID: !Ref TeamTrackerDbId
+        PLAYBOOK_PAGE_ID: !Ref PlaybookPageId
+        MEETING_TEMPLATE_PAGE_ID: !Ref MeetingTemplatePageId
+        WEBHOOK_PATH_TOKEN: !Ref WebhookPathToken
+        IDLE_MINUTES: !Ref IdleMinutes
+        LOG_LEVEL: !Ref LogLevel
+        DRY_RUN: !Ref DryRun
+        INCLUDE_AI_NOTES: !Ref IncludeAINotes
+        BUFFER_HOURS: !Ref BufferHours
+
+Parameters:
+  NotionApiToken:
+    Type: String
+    NoEcho: true
+  OpenAIApiKey:
+    Type: String
+    NoEcho: true
+  MeetingNotesDbId:
+    Type: String
+  TeamTrackerDbId:
+    Type: String
+  PlaybookPageId:
+    Type: String
+  MeetingTemplatePageId:
+    Type: String
+    Default: ''
+  WebhookPathToken:
+    Type: String
+    NoEcho: true
+  IdleMinutes:
+    Type: String
+    Default: '3'
+  LogLevel:
+    Type: String
+    Default: INFO
+  DryRun:
+    Type: String
+    Default: 'false'
+  IncludeAINotes:
+    Type: String
+    Default: 'false'
+  BufferHours:
+    Type: String
+    Default: '2'
+
+Resources:
+  NzymeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: nzyme-task-tracker
+      Handler: src.webhook.lambda_handler.handler
+      CodeUri: .
+      MemorySize: 512
+      Timeout: 120
+      Events:
+        WebhookPost:
+          Type: HttpApi
+          Properties:
+            Path: /webhook/{token}
+            Method: POST
+            ApiId: !Ref HttpApi
+        ScheduledExtraction:
+          Type: Schedule
+          Properties:
+            Schedule: rate(1 minute)
+            Description: Check for idle meeting pages and run AI extraction
+            Enabled: true
+
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: $default
+
+Outputs:
+  WebhookUrl:
+    Description: URL for the Notion automation webhook (append your secret token)
+    Value: !Sub https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/webhook/{your-token}
+  FunctionArn:
+    Value: !GetAtt NzymeFunction.Arn

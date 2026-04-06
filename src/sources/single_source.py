@@ -103,6 +103,43 @@ class SingleSource:
             "attendees": attendees,
         }
 
+    def get_ready_pages(self, idle_minutes: int = 3) -> list[dict]:
+        """Return pages ready for AI extraction.
+
+        A page is "ready" when:
+        - Processed = false (not yet extracted)
+        - Date <= now (meeting time has passed)
+        - last_edited_time < now - idle_minutes (no one actively editing)
+        """
+        now = datetime.now(timezone.utc)
+        idle_cutoff = now - timedelta(minutes=idle_minutes)
+        db_filter: dict = {
+            "and": [
+                {"property": "Processed", "checkbox": {"equals": False}},
+                {"property": "Date", "date": {"on_or_before": now.isoformat()}},
+                {
+                    "timestamp": "last_edited_time",
+                    "last_edited_time": {"before": idle_cutoff.isoformat()},
+                },
+            ]
+        }
+        response = self._client.query_database(
+            database_id=self._database_id,
+            filter=db_filter,
+            sorts=[{"timestamp": "last_edited_time", "direction": "descending"}],
+        )
+        pages = response.get("results", [])
+        logger.info("Found %d pages ready for extraction (idle>%dmin)", len(pages), idle_minutes)
+        return pages
+
+    def mark_template_injected(self, page_id: str) -> None:
+        """Set Template Injected = true on a meeting page."""
+        self._client.update_page(
+            page_id=page_id,
+            properties={"Template Injected": {"checkbox": True}},
+        )
+        logger.debug("Marked page %s as template injected", page_id)
+
     def mark_page_processed(self, page_id: str) -> None:
         """Set Processed = true on a meeting page."""
         self._client.update_page(

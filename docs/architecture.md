@@ -31,7 +31,7 @@ Two independent entry points:
 
 ### `run_inject_templates()` (`--inject-templates`)
 
-Fetches the meeting note template from Notion (`MEETING_TEMPLATE_PAGE_ID`), then injects it into unprocessed pages that don't have it yet. Queries `Processed=false` with no buffer delay to catch pages ASAP.
+Fetches the meeting note template from Notion (`MEETING_TEMPLATE_PAGE_ID`), then injects it into pages that don't have it yet. Queries `Template Injected=false` (created in last 12 hours) to catch pages ASAP. Sets `Template Injected=true` after successful injection.
 
 ### `run_sync()` (`--sync`)
 
@@ -89,9 +89,11 @@ Helper functions:
 | Method | Purpose |
 |--------|---------|
 | `get_unprocessed_pages(buffer_hours)` | Filter: `Processed=false AND Date < (now - buffer)` |
+| `get_ready_pages(idle_minutes)` | Filter: `Processed=false AND Date<=now AND last_edited_time < (now - idle)` |
 | `get_processed_pages()` | All processed meetings (for dedup fingerprinting) |
 | `get_page_content(page_id, include_ai_notes)` | Fetch blocks, optionally filter out AI-generated blocks, convert to text via `blocks_to_text` |
 | `get_page_metadata(page)` | Extract title, date, meeting_type, attendees from properties |
+| `mark_template_injected(page_id)` | Set `Template Injected=true` checkbox |
 | `mark_page_processed(page_id)` | Set `Processed=true` checkbox |
 
 ### AIExtractor (`src/ai_extractor.py`)
@@ -201,6 +203,47 @@ At the end of each sync cycle, the pipeline archives tasks where `Status = Done`
 - Per-task error handling: one failed archive doesn't block others
 - Respects dry-run mode (logs what would be archived)
 - Archived pages go to Notion's trash and can be restored if needed
+
+## Webhook / Lambda Mode
+
+An alternative to local polling, the webhook mode uses AWS Lambda for serverless execution:
+
+```
+[Template Injection — event-driven]
+Notion Automation (page created) → API Gateway → Lambda: webhook_handler
+  → inject template → set "Template Injected" = true
+
+[AI Extraction — scheduled]
+CloudWatch Events (every 1 min) → Lambda: extraction_handler
+  → query: Processed=false AND Date<=now AND last_edited_time < now-3min
+  → for each ready page: run AI extraction, write tasks, mark Processed=true
+```
+
+### Components
+
+| File | Responsibility |
+|------|---------------|
+| `src/webhook/handler.py` | Parses Notion automation payload, validates DB, calls template injection |
+| `src/webhook/lambda_handler.py` | Two Lambda entry points: `webhook_handler` (API Gateway) and `extraction_handler` (CloudWatch cron) |
+
+### Single-Page Entry Points (`src/pipeline.py`)
+
+- `run_inject_templates_for_page(config, client, page_id)` — Inject template into one page, set `Template Injected = true`
+- `run_sync_for_page(config, client, page_id)` — Extract tasks from one page; guards on `Processed=false` and `Date<=now`
+- `_load_sync_context(config, client)` — Shared helper that loads playbook, hierarchy, categories, users
+
+### Why Not Webhook on Content Updates?
+
+During meetings, pages are updated thousands of times. Instead of debouncing those events, a 1-minute cron queries Notion's `last_edited_time` to detect idle pages. Maximum latency: ~4 min after editing stops.
+
+### AWS Resources
+
+- API Gateway (HTTP API) — `POST /webhook/{token}`
+- Lambda: `nzyme-webhook` (256 MB, 30s) — template injection
+- Lambda: `nzyme-extraction` (512 MB, 120s) — AI extraction
+- CloudWatch Events rule — `rate(1 minute)` triggers extraction
+
+See `template.yaml` (SAM) for infrastructure definition and `scripts/deploy.sh` for deployment.
 
 ## Key Design Principles
 

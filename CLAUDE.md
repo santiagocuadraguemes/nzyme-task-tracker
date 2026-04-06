@@ -40,9 +40,35 @@ python -m src.main --sync
 
 # Lint
 ../venv/Scripts/python -m ruff check src/ tests/
+
+# Deploy Lambda — code-only changes (fast, ~10 seconds)
+./scripts/quick-deploy.sh
+
+# Deploy Lambda — full (infra/dependency changes, uses SAM + CloudFormation)
+./scripts/deploy.sh
+```
+
+## Deploying to AWS Lambda
+
+Two deploy scripts in `scripts/`:
+
+| Script | When to use | What it does | Speed |
+|--------|------------|--------------|-------|
+| `quick-deploy.sh` | **Code-only changes** (default) | Copies `src/` into the SAM build dir, zips, uploads directly via `aws lambda update-function-code` | ~10 seconds |
+| `deploy.sh` | Dependency or infrastructure changes (`requirements.txt`, `template.yaml`) | Full `sam build` + `sam deploy` with CloudFormation | ~2-3 minutes |
+
+**Always use `quick-deploy.sh`** unless you changed dependencies or `template.yaml`. It requires a prior `sam build` (the `.aws-sam/build/` directory must exist with dependencies installed).
+
+SAM CLI path (Windows): `C:/Users/Santiago Cuadra/AppData/Local/Packages/PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0/LocalCache/local-packages/Python313/Scripts/sam.exe`
+
+For `sam build`, the venv Python must be on PATH:
+```bash
+PATH="C:/Users/Santiago Cuadra/vscode_projects/venv/Scripts:$PATH" sam build
 ```
 
 ## Architecture
+
+### Local polling mode (--watch)
 
 ```
 main.py → pipeline.run_sync():
@@ -51,9 +77,20 @@ main.py → pipeline.run_sync():
     1. playbook_loader  → fetch playbook rules from Notion page
     2. hierarchy_loader → snapshot Team Task Tracker parent-child tree
     3. single_source    → fetch meeting content as plain text (filtered by INCLUDE_AI_NOTES)
-  4. ai_extractor     → call OpenAI with playbook + hierarchy + content
-  5. team_writer      → create task pages in Team Task Tracker
-  6. single_source    → mark meeting page as Processed
+    4. ai_extractor     → call OpenAI with playbook + hierarchy + content
+    5. team_writer      → create task pages in Team Task Tracker
+    6. single_source    → mark meeting page as Processed
+```
+
+### Webhook / Lambda mode (serverless)
+
+```
+Notion automation (page created) → API Gateway → Lambda: webhook_handler
+  → inject template, set "Template Injected" = true
+
+CloudWatch cron (1 min) → Lambda: extraction_handler
+  → query: Processed=false AND Date<=now AND last_edited_time < now-3min
+  → for each ready page: extract tasks, mark Processed=true
 ```
 
 Key design: playbook, hierarchy, and category options are all read dynamically from Notion at runtime. Schema changes in Notion require no code changes.
@@ -72,6 +109,9 @@ Key design: playbook, hierarchy, and category options are all read dynamically f
 | `src/utils/blocks_to_text.py` | Converts Notion block arrays to plain text |
 | `src/config.py` | Pydantic config from env vars |
 | `src/notion_client_wrapper.py` | Rate-limited (3 req/s), auto-retry Notion API client |
+| `src/webhook/handler.py` | Processes Notion automation webhook payloads |
+| `src/webhook/lambda_handler.py` | Unified AWS Lambda entry point (routes webhook + cron) |
+| `template.yaml` | SAM template for AWS infrastructure |
 
 ## Conventions
 

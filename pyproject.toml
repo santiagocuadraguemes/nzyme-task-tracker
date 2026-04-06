@@ -20,6 +20,9 @@ dev = [
     "pytest",
     "ruff",
 ]
+webhook = [
+    "boto3",
+]
 
 [project.scripts]
 nzyme-task-tracker = "src.main:main"
