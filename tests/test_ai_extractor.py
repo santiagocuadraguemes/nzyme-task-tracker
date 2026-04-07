@@ -97,6 +97,24 @@ class TestAIExtractor:
         assert "Cat B" in tool_def["properties"]["category"]["enum"]
 
     @patch("src.ai_extractor.OpenAI")
+    def test_assignee_id_is_optional_in_schema(self, mock_openai_cls):
+        mock_client = MagicMock()
+        mock_openai_cls.return_value = mock_client
+        mock_client.chat.completions.create.return_value = _mock_response(None)
+
+        extractor = AIExtractor(api_key="sk-test")
+        extractor.extract(
+            system_prompt="system",
+            user_prompt="user",
+            categories=["Other"],
+        )
+
+        call_kwargs = mock_client.chat.completions.create.call_args.kwargs
+        tool_def = call_kwargs["tools"][0]["function"]["parameters"]
+        assert "assignee_id" not in tool_def["required"]
+        assert "assignee_id" in tool_def["properties"]
+
+    @patch("src.ai_extractor.OpenAI")
     def test_prompts_passed_to_openai(self, mock_openai_cls):
         mock_client = MagicMock()
         mock_openai_cls.return_value = mock_client

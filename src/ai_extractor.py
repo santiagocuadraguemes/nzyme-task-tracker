@@ -49,7 +49,7 @@ def _build_tool_definition(categories: list[str]) -> dict:
                         "default": "Not Started",
                     },
                 },
-                "required": ["title", "assignee_id", "priority", "category"],
+                "required": ["title", "priority", "category"],
             },
         },
     }

@@ -96,11 +96,18 @@ class SingleSource:
             for p in props.get("Attendees", {}).get("people", [])
         ]
 
+        created_by_prop = page.get("created_by", {})
+        created_by = {
+            "id": created_by_prop.get("id", ""),
+            "name": created_by_prop.get("name", ""),
+        }
+
         return {
             "title": title,
             "date": date_str,
             "meeting_type": meeting_type,
             "attendees": attendees,
+            "created_by": created_by,
         }
 
     def get_ready_pages(self, idle_minutes: int = 3) -> list[dict]:

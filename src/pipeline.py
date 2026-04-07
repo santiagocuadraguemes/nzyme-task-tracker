@@ -118,6 +118,23 @@ def _format_existing_tasks(tasks: list[dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _format_team_members(users: list[dict]) -> str:
+    """Format team members list with aliases for AI prompt injection."""
+    if not users:
+        return "No team members available — use attendees only"
+    lines: list[str] = []
+    for m in users:
+        aliases: list[str] = []
+        if m.get("email"):
+            aliases.append(m["email"].split("@")[0])
+        name_parts = m["name"].split()
+        if name_parts and name_parts[0].lower() != m["name"].lower():
+            aliases.append(name_parts[0])
+        alias_suffix = f" (aliases: {', '.join(aliases)})" if aliases else ""
+        lines.append(f"- {m['name']} (ID: {m['id']}){alias_suffix}")
+    return "\n".join(lines)
+
+
 def _meeting_fingerprint(title: str, date: str) -> str:
     """Normalize meeting title + date into a dedup key.
 
@@ -285,7 +302,11 @@ def _load_sync_context(
     # Workspace users (optional)
     try:
         all_users = [
-            {"id": u["id"], "name": u.get("name", "")}
+            {
+                "id": u["id"],
+                "name": u.get("name", ""),
+                "email": u.get("person", {}).get("email", ""),
+            }
             for u in client.list_users()
             if u.get("type") == "person"
         ]
@@ -331,9 +352,7 @@ def run_sync(config: SyncConfig, client: NotionClientWrapper) -> None:
         categories_text = " | ".join(f'"{c}"' for c in ctx["categories"])
         hierarchy_text = json.dumps(ctx["hierarchy"], indent=2)
         existing_tasks_text = _format_existing_tasks(ctx["existing_tasks"])
-        team_members_text = "\n".join(
-            f"- {m['name']} (ID: {m['id']})" for m in ctx["all_users"]
-        ) or "No team members available — use attendees only"
+        team_members_text = _format_team_members(ctx["all_users"])
 
         total_tasks = 0
         for page in pages:
@@ -362,6 +381,11 @@ def run_sync(config: SyncConfig, client: NotionClientWrapper) -> None:
                     attendees_text = "\n".join(
                         f"- {a['name']} (ID: {a['id']})" for a in metadata["attendees"]
                     ) or "No attendees listed"
+                    creator = metadata.get("created_by", {})
+                    meeting_creator_text = (
+                        f"{creator['name']} (ID: {creator['id']})"
+                        if creator.get("id") else "Unknown"
+                    )
 
                     system_prompt = _substitute_placeholders(
                         ctx["system_prompt_template"],
@@ -370,6 +394,7 @@ def run_sync(config: SyncConfig, client: NotionClientWrapper) -> None:
                         EXISTING_TASKS=existing_tasks_text,
                         TEAM_MEMBERS=team_members_text,
                         ATTENDEES=attendees_text,
+                        MEETING_CREATOR=meeting_creator_text,
                     )
                     user_prompt = _substitute_placeholders(
                         ctx["user_prompt_template"],
@@ -384,6 +409,16 @@ def run_sync(config: SyncConfig, client: NotionClientWrapper) -> None:
                         user_prompt=user_prompt,
                         categories=ctx["categories"],
                     )
+
+                    # Assignee fallback: default to meeting creator
+                    creator_id = creator.get("id")
+                    for task in tasks:
+                        if not task.get("assignee_id") and creator_id:
+                            task["assignee_id"] = creator_id
+                            logger.info(
+                                "Assignee fallback → meeting creator for: %s",
+                                task.get("title", "?")[:60],
+                            )
 
                     for task in tasks:
                         task["meeting_page_id"] = page_id
@@ -506,9 +541,12 @@ def run_sync_for_page(
             attendees_text = "\n".join(
                 f"- {a['name']} (ID: {a['id']})" for a in metadata["attendees"]
             ) or "No attendees listed"
-            team_members_text = "\n".join(
-                f"- {m['name']} (ID: {m['id']})" for m in ctx["all_users"]
-            ) or "No team members available — use attendees only"
+            team_members_text = _format_team_members(ctx["all_users"])
+            creator = metadata.get("created_by", {})
+            meeting_creator_text = (
+                f"{creator['name']} (ID: {creator['id']})"
+                if creator.get("id") else "Unknown"
+            )
 
             system_prompt = _substitute_placeholders(
                 ctx["system_prompt_template"],
@@ -517,6 +555,7 @@ def run_sync_for_page(
                 EXISTING_TASKS=_format_existing_tasks(ctx["existing_tasks"]),
                 TEAM_MEMBERS=team_members_text,
                 ATTENDEES=attendees_text,
+                MEETING_CREATOR=meeting_creator_text,
             )
             user_prompt = _substitute_placeholders(
                 ctx["user_prompt_template"],
@@ -531,6 +570,16 @@ def run_sync_for_page(
                 user_prompt=user_prompt,
                 categories=ctx["categories"],
             )
+
+            # Assignee fallback: default to meeting creator
+            creator_id = creator.get("id")
+            for task in tasks:
+                if not task.get("assignee_id") and creator_id:
+                    task["assignee_id"] = creator_id
+                    logger.info(
+                        "Assignee fallback → meeting creator for: %s",
+                        task.get("title", "?")[:60],
+                    )
 
             for task in tasks:
                 task["meeting_page_id"] = page_id

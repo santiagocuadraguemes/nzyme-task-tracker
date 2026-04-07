@@ -4,7 +4,7 @@ from src.config import SyncConfig
 from src.pipeline import (
     run_inject_templates, run_sync, _archive_done_tasks,
     _inject_templates, _flatten_hierarchy, _load_existing_tasks,
-    _substitute_placeholders, _format_existing_tasks,
+    _substitute_placeholders, _format_existing_tasks, _format_team_members,
 )
 
 
@@ -26,6 +26,7 @@ def _make_config(**overrides) -> SyncConfig:
 def _make_page(page_id: str, title: str) -> dict:
     return {
         "id": page_id,
+        "created_by": {"id": "u1", "name": "Santiago"},
         "properties": {
             "Meeting": {"type": "title", "title": [{"plain_text": title}]},
             "Date": {"type": "date", "date": {"start": "2026-03-28"}},
@@ -50,8 +51,8 @@ class TestRunSync:
         config = _make_config()
         client = MagicMock()
         client.list_users.return_value = [
-            {"id": "u1", "name": "Santiago", "type": "person"},
-            {"id": "u2", "name": "Reyes", "type": "person"},
+            {"id": "u1", "name": "Santiago", "type": "person", "person": {"email": "santiago@kiboventures.com"}},
+            {"id": "u2", "name": "Reyes", "type": "person", "person": {"email": "reyes@kiboventures.com"}},
             {"id": "bot-1", "name": "Integration", "type": "bot"},
         ]
 
@@ -64,9 +65,10 @@ class TestRunSync:
             "date": "2026-03-28",
             "meeting_type": "Team sync",
             "attendees": [{"id": "u1", "name": "Santiago"}],
+            "created_by": {"id": "u1", "name": "Santiago"},
         }
 
-        mock_fetch_text.return_value = "prompt template with {{CATEGORIES}} {{HIERARCHY}} {{EXISTING_TASKS}} {{TEAM_MEMBERS}} {{ATTENDEES}}"
+        mock_fetch_text.return_value = "prompt template with {{CATEGORIES}} {{HIERARCHY}} {{EXISTING_TASKS}} {{TEAM_MEMBERS}} {{ATTENDEES}} {{MEETING_CREATOR}}"
         mock_hierarchy_cls.return_value.load.return_value = [{"id": "cat1", "title": "Ops"}]
         mock_extractor_cls.return_value.extract.return_value = [
             {"title": "Review doc", "assignee_id": "u1", "priority": "High", "category": "Operations"}
@@ -139,6 +141,7 @@ class TestRunSync:
         mock_source.get_page_metadata.return_value = {
             "title": "Meeting", "date": "2026-03-28",
             "meeting_type": "Other", "attendees": [],
+            "created_by": {"id": "u1", "name": "Santiago"},
         }
 
         mock_fetch_text.return_value = "template"
@@ -391,3 +394,67 @@ class TestFormatExistingTasks:
 
     def test_empty_returns_empty_string(self):
         assert _format_existing_tasks([]) == ""
+
+
+class TestFormatTeamMembers:
+    def test_includes_aliases(self):
+        users = [
+            {"id": "u1", "name": "Jose Gasalla", "email": "jmg@kiboventures.com"},
+            {"id": "u2", "name": "Vicente", "email": "vicente@kiboventures.com"},
+        ]
+        result = _format_team_members(users)
+        assert "Jose Gasalla (ID: u1) (aliases: jmg, Jose)" in result
+        assert "Vicente (ID: u2) (aliases: vicente)" in result
+
+    def test_empty_users(self):
+        assert _format_team_members([]) == "No team members available — use attendees only"
+
+    def test_no_email(self):
+        users = [{"id": "u1", "name": "Santiago", "email": ""}]
+        result = _format_team_members(users)
+        assert "Santiago (ID: u1)" in result
+
+
+class TestAssigneeFallback:
+    @patch("src.pipeline.TeamTaskTrackerWriter")
+    @patch("src.pipeline.AIExtractor")
+    @patch("src.pipeline.HierarchyLoader")
+    @patch("src.pipeline._fetch_page_text")
+    @patch("src.pipeline.SingleSource")
+    @patch("src.pipeline._load_categories")
+    def test_fallback_to_meeting_creator(
+        self, mock_load_cats, mock_source_cls, mock_fetch_text,
+        mock_hierarchy_cls, mock_extractor_cls, mock_writer_cls,
+    ):
+        """Tasks without assignee_id get the meeting creator as fallback."""
+        config = _make_config()
+        client = MagicMock()
+        client.list_users.return_value = [
+            {"id": "u1", "name": "Santiago", "type": "person", "person": {"email": "santiago@kibo.com"}},
+        ]
+
+        mock_load_cats.return_value = ["Operations", "Other"]
+        mock_source = mock_source_cls.return_value
+        mock_source.get_unprocessed_pages.return_value = [_make_page("p1", "Standup")]
+        mock_source.get_page_content.return_value = "Vicente - contacto con Clikalia"
+        mock_source.get_page_metadata.return_value = {
+            "title": "Standup",
+            "date": "2026-03-28",
+            "meeting_type": "Team sync",
+            "attendees": [],
+            "created_by": {"id": "creator-1", "name": "Reyes"},
+        }
+
+        mock_fetch_text.return_value = "template {{CATEGORIES}} {{HIERARCHY}} {{EXISTING_TASKS}} {{TEAM_MEMBERS}} {{ATTENDEES}} {{MEETING_CREATOR}}"
+        mock_hierarchy_cls.return_value.load.return_value = []
+        # AI returns a task WITHOUT assignee_id
+        mock_extractor_cls.return_value.extract.return_value = [
+            {"title": "Vicente - contacto con Clikalia", "priority": "Medium", "category": "Other"}
+        ]
+        mock_writer_cls.return_value.write_batch.return_value = [{"id": "new-task-1"}]
+        client.query_database.return_value = {"results": []}
+
+        run_sync(config, client)
+
+        tasks_written = mock_writer_cls.return_value.write_batch.call_args.args[0]
+        assert tasks_written[0]["assignee_id"] == "creator-1"

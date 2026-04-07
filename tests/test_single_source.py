@@ -3,8 +3,11 @@ from unittest.mock import MagicMock, call
 from src.sources.single_source import SingleSource
 
 
-def _make_meeting_page(page_id: str, title: str, date: str, meeting_type: str, attendees: list[dict]) -> dict:
-    return {
+def _make_meeting_page(
+    page_id: str, title: str, date: str, meeting_type: str,
+    attendees: list[dict], created_by: dict | None = None,
+) -> dict:
+    page = {
         "id": page_id,
         "properties": {
             "Meeting": {
@@ -26,6 +29,9 @@ def _make_meeting_page(page_id: str, title: str, date: str, meeting_type: str, a
             "Processed": {"type": "checkbox", "checkbox": False},
         },
     }
+    if created_by:
+        page["created_by"] = created_by
+    return page
 
 
 class TestSingleSource:
@@ -62,6 +68,7 @@ class TestSingleSource:
         page = _make_meeting_page(
             "page-1", "Q1 Review", "2026-03-15", "Team sync",
             [{"id": "user-1", "name": "Santiago"}],
+            created_by={"id": "user-1", "name": "Santiago"},
         )
         source = SingleSource(MagicMock(), "db-meetings")
 
@@ -71,6 +78,17 @@ class TestSingleSource:
         assert meta["date"] == "2026-03-15"
         assert meta["meeting_type"] == "Team sync"
         assert meta["attendees"] == [{"id": "user-1", "name": "Santiago"}]
+        assert meta["created_by"] == {"id": "user-1", "name": "Santiago"}
+
+    def test_get_page_metadata_missing_created_by(self):
+        page = _make_meeting_page(
+            "page-1", "Q1 Review", "2026-03-15", "Team sync", [],
+        )
+        source = SingleSource(MagicMock(), "db-meetings")
+
+        meta = source.get_page_metadata(page)
+
+        assert meta["created_by"] == {"id": "", "name": ""}
 
     def test_get_page_content_excludes_ai_blocks_by_default(self):
         client = MagicMock()
