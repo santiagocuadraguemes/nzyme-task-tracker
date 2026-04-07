@@ -95,7 +95,28 @@ CloudWatch cron (1 min) → Lambda: extraction_handler
   → for each ready page: extract tasks, mark Processed=true
 ```
 
-Key design: playbook, hierarchy, and category options are all read dynamically from Notion at runtime. Schema changes in Notion require no code changes.
+Key design: playbook, hierarchy, category options, and deal context are all read dynamically from Notion at runtime. Schema changes in Notion require no code changes.
+
+### Deal-aware extraction (Investment Team)
+
+When `DEAL_WORKPLANS_DB_ID` is set, the pipeline loads deal context from the Deal Workplans database:
+- Discovers each deal's inline Workplan and Action Items databases
+- Loads active workstreams (name, status, type, adviser) per deal
+- Injects deal context into the AI prompt via `{{DEAL_CONTEXT}}`
+- The AI can set `deal_page_id` on extracted tasks to populate the `Deal Relation` property
+- Meeting titles are scanned for deal name matches, adding hints to the user prompt
+- Hierarchy is exposed to depth 3 (categories → sub-categories → deal entities)
+
+This is fully optional — when `DEAL_WORKPLANS_DB_ID` is not set, the pipeline behaves exactly as before.
+
+### Semantic dedup (embedding-based)
+
+The pipeline uses a three-layer dedup strategy:
+1. **Meeting-level**: fingerprint `(normalized_title|date)` prevents re-processing the same meeting
+2. **Writer exact match**: `title.strip().lower()` catches identical task titles
+3. **Semantic embeddings**: OpenAI `text-embedding-3-small` compares new task titles against all existing titles by cosine similarity. Catches semantically equivalent tasks even when worded differently or in different languages (e.g., "revisar informe FDD" ≈ "send FDD comments").
+
+Threshold is configurable via `SEMANTIC_DEDUP_THRESHOLD` (default 0.85). When the embeddings API is unavailable (e.g., non-OpenAI provider), semantic dedup degrades gracefully to layers 1-2 only.
 
 ## Key Files
 
@@ -104,7 +125,8 @@ Key design: playbook, hierarchy, and category options are all read dynamically f
 | `src/pipeline.py` | Orchestrates the sync cycle |
 | `src/ai_extractor.py` | OpenAI prompt + function calling, parses tool_calls |
 | `src/playbook_loader.py` | Fetches playbook Notion page, converts to text, caches per run |
-| `src/hierarchy_loader.py` | Queries tracker DB, builds parent-child tree |
+| `src/hierarchy_loader.py` | Queries tracker DB, builds parent-child tree (depth 3, smart pruning) |
+| `src/deal_context.py` | Loads deal workplan context from Deal Workplans DB |
 | `src/template_injector.py` | Injects "Your own notes" section into new meeting pages |
 | `src/sources/single_source.py` | Polls Meeting Notes DB with buffer delay, fetches page content (AI block filtering) |
 | `src/tracker/team_writer.py` | Maps task dicts to Notion properties, creates pages |

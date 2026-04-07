@@ -92,6 +92,11 @@ class TeamTaskTrackerWriter:
                 "relation": [{"id": task["parent_task_id"]}]
             }
 
+        if task.get("deal_page_id"):
+            properties["Deal Relation (only for deal tasks)"] = {
+                "relation": [{"id": task["deal_page_id"]}]
+            }
+
         if task.get("meeting_page_id"):
             properties["Meeting - Relation"] = {
                 "relation": [{"id": task["meeting_page_id"]}]

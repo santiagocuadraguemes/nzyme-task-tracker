@@ -40,7 +40,8 @@ Instantiates all components with a shared `NotionClientWrapper`, then:
 1. **Load playbook** (required) — abort cycle on failure
 2. **Load hierarchy** (optional) — degrade gracefully on failure (tasks go to top level)
 3. **Load categories** dynamically from DB schema — fall back to `["Other"]` on failure
-4. **Poll unprocessed meetings** — `Date < (now - buffer_hours)` AND `Processed = false`
+4. **Load deal context** (optional) — if `DEAL_WORKPLANS_DB_ID` set, loads deals + workstreams from Deal Workplans DB
+5. **Poll unprocessed meetings** — `Date < (now - buffer_hours)` AND `Processed = false`
 5. **Build dedup fingerprints** — loads already-processed meetings for cross-cycle dedup
 6. **For each meeting page:**
    - Check fingerprint `(normalized_title|date)` against dedup set; skip duplicates
@@ -80,9 +81,22 @@ Helper functions:
 - **Output:** List of root nodes with nested children: `[{id, title, category, children: [...]}]`
 - Queries all non-Done tasks from the tracker
 - Builds parent-child tree from "Parent item" self-relation
-- Prunes to 2 levels (categories + entities, no leaf tasks)
+- Prunes to 3 levels (categories + sub-categories + entities). At depth 3, only keeps nodes that have children (organizational nodes like deals), filtering out leaf tasks
 - Removes nodes with empty titles
 - **Caches** result for the lifetime of the instance
+
+### DealContextLoader (`src/deal_context.py`)
+
+- **Input:** Deal Workplans database ID (optional, set via `DEAL_WORKPLANS_DB_ID`)
+- **Output:** List of `DealInfo` with name, page IDs, and workstreams
+- Queries Deal Workplans DB for all deals
+- For each deal, fetches the page's child blocks to discover inline databases (Workplan, Action Items) by title pattern
+- Loads active workstreams (Status != Done) from each deal's Workplan DB
+- Extracts workstream title, status, type, and adviser
+- Resolves each deal's Team Task Tracker page ID from the `🖇️ Team Task Tracker` relation
+- Gracefully handles missing inline DBs and per-deal failures
+- Deal context is formatted and injected into the system prompt as `{{DEAL_CONTEXT}}`
+- Meeting titles are scanned for deal name matches; detected deals are appended as hints to the user prompt
 
 ### SingleSource (`src/sources/single_source.py`)
 

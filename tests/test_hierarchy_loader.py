@@ -65,6 +65,50 @@ class TestHierarchyLoader:
 
         client.query_database.assert_called_once()
 
+    def test_depth_3_keeps_organizational_nodes(self):
+        """At max depth (3), only nodes with children are kept."""
+        pages = [
+            _make_page("cat", "Sourcing / Investing / Divesting", "Sourcing / Investing / Divesting"),
+            _make_page("sub", "Investing", "", parent_id="cat"),
+            _make_page("group", "Active Dealflow", "", parent_id="sub"),
+            # deal has children → kept at depth 3
+            _make_page("deal", "Citadel", "", parent_id="group"),
+            _make_page("task1", "Review report", "", parent_id="deal"),
+            # leaf directly under group → no children → pruned at depth 3
+            _make_page("leaf", "Some leaf task", "", parent_id="group"),
+        ]
+        client = self._make_client(pages)
+        loader = HierarchyLoader(client, "db-tracker")
+
+        result = loader.load()
+
+        assert len(result) == 1
+        cat = result[0]
+        assert cat["title"] == "Sourcing / Investing / Divesting"
+        sub = cat["children"][0]
+        assert sub["title"] == "Investing"
+        group = sub["children"][0]
+        assert group["title"] == "Active Dealflow"
+        # Citadel kept (has children), leaf task pruned
+        assert len(group["children"]) == 1
+        assert group["children"][0]["title"] == "Citadel"
+        # Citadel's children are pruned (beyond max depth)
+        assert group["children"][0]["children"] == []
+
+    def test_has_children_not_in_output(self):
+        """The internal has_children flag should be stripped from output."""
+        pages = [
+            _make_page("cat", "Operations", "Operations"),
+            _make_page("child", "Sub-op", "", parent_id="cat"),
+        ]
+        client = self._make_client(pages)
+        loader = HierarchyLoader(client, "db-tracker")
+
+        result = loader.load()
+
+        assert "has_children" not in result[0]
+        assert "has_children" not in result[0]["children"][0]
+
     def test_filters_done_tasks(self):
         client = self._make_client([])
         loader = HierarchyLoader(client, "db-tracker")

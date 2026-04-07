@@ -29,6 +29,10 @@ class SyncConfig(BaseModel):
     meeting_template_page_id: str | None = Field(None, description="Notion template page ID for meeting notes")
     watch_interval: int = Field(10, description="Seconds between template injection checks in watch mode")
     sync_interval: int = Field(300, description="Seconds between sync runs in watch mode")
+    # Deal context (Investment Team)
+    deal_workplans_db_id: str | None = Field(None, description="Deal Workplans DB ID (enables deal-aware extraction)")
+    # Semantic dedup
+    semantic_dedup_threshold: float = Field(0.85, description="Cosine similarity threshold for semantic dedup (0.0-1.0)")
     # Webhook / Lambda mode
     webhook_path_token: str | None = Field(None, description="Secret URL token for webhook auth")
     idle_minutes: int = Field(3, description="Minutes of inactivity before AI extraction triggers")
@@ -54,6 +58,8 @@ def load_config() -> SyncConfig:
         dry_run=os.getenv("DRY_RUN", "false").lower() in ("true", "1", "yes"),
         include_ai_notes=os.getenv("INCLUDE_AI_NOTES", "false").lower() in ("true", "1", "yes"),
         meeting_template_page_id=os.getenv("MEETING_TEMPLATE_PAGE_ID"),
+        deal_workplans_db_id=os.getenv("DEAL_WORKPLANS_DB_ID"),
+        semantic_dedup_threshold=float(os.getenv("SEMANTIC_DEDUP_THRESHOLD", "0.85")),
         watch_interval=int(os.getenv("WATCH_INTERVAL", "10")),
         sync_interval=int(os.getenv("SYNC_INTERVAL", "300")),
         webhook_path_token=os.getenv("WEBHOOK_PATH_TOKEN"),

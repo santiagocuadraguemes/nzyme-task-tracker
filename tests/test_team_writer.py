@@ -33,6 +33,36 @@ class TestTeamTaskTrackerWriter:
         assert props["Parent item"]["relation"][0]["id"] == "parent-1"
         assert props["Meeting - Relation"]["relation"][0]["id"] == "meeting-1"
 
+    def test_create_task_with_deal_relation(self):
+        client = MagicMock()
+        client.create_page.return_value = {"id": "new-page"}
+        writer = TeamTaskTrackerWriter(client, "db-tracker")
+
+        task = {
+            "title": "FDD: Send report to A&M",
+            "priority": "High",
+            "category": "Sourcing / Investing / Divesting",
+            "deal_page_id": "deal-citadel-123",
+            "parent_task_id": "tracker-citadel-456",
+            "meeting_page_id": "meeting-1",
+        }
+        writer.create_task(task)
+
+        props = client.create_page.call_args.args[1]
+        assert props["Deal Relation (only for deal tasks)"]["relation"][0]["id"] == "deal-citadel-123"
+        assert props["Parent item"]["relation"][0]["id"] == "tracker-citadel-456"
+
+    def test_create_task_without_deal_relation(self):
+        client = MagicMock()
+        client.create_page.return_value = {"id": "new-page"}
+        writer = TeamTaskTrackerWriter(client, "db-tracker")
+
+        task = {"title": "General task", "priority": "Low", "category": "Operations"}
+        writer.create_task(task)
+
+        props = client.create_page.call_args.args[1]
+        assert "Deal Relation (only for deal tasks)" not in props
+
     def test_create_task_minimal(self):
         client = MagicMock()
         client.create_page.return_value = {"id": "new-page-2"}

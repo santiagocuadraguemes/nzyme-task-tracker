@@ -47,6 +47,7 @@ class HierarchyLoader:
                 "category": self._get_category(page),
                 "parent_id": parent_id,
                 "children": [],
+                "has_children": False,
             }
 
         # Build tree
@@ -55,13 +56,14 @@ class HierarchyLoader:
             parent_id = node.pop("parent_id")
             if parent_id and parent_id in page_map:
                 page_map[parent_id]["children"].append(node)
+                page_map[parent_id]["has_children"] = True
             else:
                 roots.append(node)
 
-        # Prune: keep only top 2 levels (categories + entities).
-        # Remove leaf tasks at depth 2+ that have no children, and
-        # filter out nodes with empty titles.
-        pruned = self._prune(roots, max_depth=2)
+        # Prune: keep top 3 levels (categories + sub-categories + entities).
+        # At max depth, only keep nodes that have children (organizational
+        # nodes like deals), filtering out individual leaf tasks.
+        pruned = self._prune(roots, max_depth=3)
 
         self._cache = pruned
         logger.info(
@@ -72,7 +74,11 @@ class HierarchyLoader:
 
     @staticmethod
     def _prune(nodes: list[dict[str, Any]], max_depth: int, depth: int = 0) -> list[dict[str, Any]]:
-        """Keep only nodes down to max_depth, removing empty titles."""
+        """Keep only nodes down to max_depth, removing empty titles.
+
+        At max_depth, only keeps nodes that originally had children
+        (organizational nodes like deals), filtering out leaf tasks.
+        """
         result: list[dict[str, Any]] = []
         for node in nodes:
             if not node.get("title"):
@@ -82,7 +88,11 @@ class HierarchyLoader:
                     node["children"], max_depth, depth + 1
                 )
             else:
+                # At max depth: only keep organizational nodes (those with children)
+                if not node.get("has_children"):
+                    continue
                 node["children"] = []
+            node.pop("has_children", None)
             result.append(node)
         return result
 

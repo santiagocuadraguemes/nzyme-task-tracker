@@ -23,6 +23,8 @@ Globals:
         DRY_RUN: !Ref DryRun
         INCLUDE_AI_NOTES: !Ref IncludeAINotes
         BUFFER_HOURS: !Ref BufferHours
+        DEAL_WORKPLANS_DB_ID: !Ref DealWorkplansDbId
+        SEMANTIC_DEDUP_THRESHOLD: !Ref SemanticDedupThreshold
 
 Parameters:
   NotionApiToken:
@@ -60,6 +62,12 @@ Parameters:
   BufferHours:
     Type: String
     Default: '2'
+  DealWorkplansDbId:
+    Type: String
+    Default: ''
+  SemanticDedupThreshold:
+    Type: String
+    Default: '0.85'
 
 Resources:
   NzymeFunction:

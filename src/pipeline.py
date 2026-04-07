@@ -8,8 +8,12 @@ from datetime import datetime, timedelta, timezone
 
 import logfire
 
+from openai import OpenAI
+
 from src.config import SyncConfig
 from src.notion_client_wrapper import NotionClientWrapper
+from src.deal_context import DealContextLoader, DealInfo
+from src.semantic_dedup import SemanticDedup
 from src.hierarchy_loader import HierarchyLoader
 from src.ai_extractor import AIExtractor
 from src.sources.single_source import SingleSource
@@ -133,6 +137,59 @@ def _format_team_members(users: list[dict]) -> str:
         alias_suffix = f" (aliases: {', '.join(aliases)})" if aliases else ""
         lines.append(f"- {m['name']} (ID: {m['id']}){alias_suffix}")
     return "\n".join(lines)
+
+
+def _format_deal_context(deals: list[DealInfo]) -> str:
+    """Format deal context for AI prompt injection."""
+    if not deals:
+        return ""
+    lines: list[str] = []
+    for deal in deals:
+        tracker_id = deal.tracker_page_id or "not linked"
+        lines.append(
+            f"### {deal.name} (Deal page ID: {deal.deal_page_id}, "
+            f"Tracker page ID: {tracker_id})"
+        )
+        if deal.workstreams:
+            lines.append("Workstreams:")
+            for ws in deal.workstreams:
+                parts = [f"{ws.title} (Status: {ws.status}"]
+                if ws.workstream_type:
+                    parts.append(f", Type: {', '.join(ws.workstream_type)}")
+                if ws.adviser:
+                    parts.append(f", Adviser: {', '.join(ws.adviser)}")
+                parts.append(")")
+                lines.append(f"  - {''.join(parts)}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _detect_deals_from_title(title: str, deals: list[DealInfo]) -> list[DealInfo]:
+    """Quick heuristic: check if any deal name appears in the meeting title."""
+    title_lower = title.lower()
+    return [d for d in deals if d.name.lower() in title_lower]
+
+
+def _run_semantic_dedup(
+    tasks: list[dict], semantic_dedup: SemanticDedup | None,
+) -> list[dict]:
+    """Filter tasks through semantic dedup, returning only non-duplicates."""
+    if not semantic_dedup or not tasks:
+        return tasks
+    kept: list[dict] = []
+    for task in tasks:
+        is_dup, matched, score = semantic_dedup.is_duplicate(task["title"])
+        if is_dup:
+            logger.info(
+                "SEMANTIC DEDUP — skipping '%s' (%.2f match: '%s')",
+                task.get("title", "?")[:60], score, (matched or "")[:60],
+            )
+        else:
+            kept.append(task)
+            semantic_dedup.add_title(task["title"])
+    if len(kept) < len(tasks):
+        logger.info("Semantic dedup: %d → %d tasks", len(tasks), len(kept))
+    return kept
 
 
 def _meeting_fingerprint(title: str, date: str) -> str:
@@ -318,6 +375,30 @@ def _load_sync_context(
     # Recent tasks for AI dedup context
     existing_tasks = _load_existing_tasks(client, config.team_tracker_db_id, hierarchy)
 
+    # Deal context (optional — enables deal-aware extraction)
+    deals: list[DealInfo] = []
+    if config.deal_workplans_db_id:
+        try:
+            deal_loader = DealContextLoader(client, config.deal_workplans_db_id)
+            deals = deal_loader.load_deals()
+            logger.info("Loaded %d deals with context", len(deals))
+        except Exception:
+            logger.exception("Failed to load deal context — proceeding without")
+
+    writer = TeamTaskTrackerWriter(client, config.team_tracker_db_id, config.dry_run)
+
+    # Semantic dedup — compare new task titles against existing ones via embeddings
+    semantic_dedup: SemanticDedup | None = None
+    try:
+        openai_client = OpenAI(api_key=config.openai_api_key)
+        existing_title_list = list(writer._existing_titles)
+        semantic_dedup = SemanticDedup(
+            openai_client, existing_title_list, config.semantic_dedup_threshold,
+        )
+        logger.info("Semantic dedup initialized with %d existing titles", len(existing_title_list))
+    except Exception:
+        logger.exception("Failed to initialize semantic dedup — proceeding without")
+
     return {
         "system_prompt_template": system_prompt_template,
         "user_prompt_template": user_prompt_template,
@@ -325,8 +406,10 @@ def _load_sync_context(
         "categories": categories,
         "all_users": all_users,
         "existing_tasks": existing_tasks,
+        "deals": deals,
         "extractor": AIExtractor(config.openai_api_key, config.openai_model, config.openai_base_url),
-        "writer": TeamTaskTrackerWriter(client, config.team_tracker_db_id, config.dry_run),
+        "writer": writer,
+        "semantic_dedup": semantic_dedup,
     }
 
 
@@ -353,6 +436,7 @@ def run_sync(config: SyncConfig, client: NotionClientWrapper) -> None:
         hierarchy_text = json.dumps(ctx["hierarchy"], indent=2)
         existing_tasks_text = _format_existing_tasks(ctx["existing_tasks"])
         team_members_text = _format_team_members(ctx["all_users"])
+        deal_context_text = _format_deal_context(ctx["deals"])
 
         total_tasks = 0
         for page in pages:
@@ -395,6 +479,7 @@ def run_sync(config: SyncConfig, client: NotionClientWrapper) -> None:
                         TEAM_MEMBERS=team_members_text,
                         ATTENDEES=attendees_text,
                         MEETING_CREATOR=meeting_creator_text,
+                        DEAL_CONTEXT=deal_context_text,
                     )
                     user_prompt = _substitute_placeholders(
                         ctx["user_prompt_template"],
@@ -403,6 +488,13 @@ def run_sync(config: SyncConfig, client: NotionClientWrapper) -> None:
                         MEETING_TYPE=metadata["meeting_type"] or "Not specified",
                         MEETING_CONTENT=content,
                     )
+
+                    # Deal detection hint from meeting title
+                    if ctx["deals"]:
+                        detected = _detect_deals_from_title(title, ctx["deals"])
+                        if detected:
+                            deal_names = ", ".join(d.name for d in detected)
+                            user_prompt += f"\n\nNote: This meeting likely relates to deal(s): {deal_names}"
 
                     tasks = ctx["extractor"].extract(
                         system_prompt=system_prompt,
@@ -422,6 +514,9 @@ def run_sync(config: SyncConfig, client: NotionClientWrapper) -> None:
 
                     for task in tasks:
                         task["meeting_page_id"] = page_id
+
+                    # Semantic dedup: filter out tasks similar to existing ones
+                    tasks = _run_semantic_dedup(tasks, ctx.get("semantic_dedup"))
 
                     if tasks:
                         created = ctx["writer"].write_batch(tasks)
@@ -556,6 +651,7 @@ def run_sync_for_page(
                 TEAM_MEMBERS=team_members_text,
                 ATTENDEES=attendees_text,
                 MEETING_CREATOR=meeting_creator_text,
+                DEAL_CONTEXT=_format_deal_context(ctx["deals"]),
             )
             user_prompt = _substitute_placeholders(
                 ctx["user_prompt_template"],
@@ -564,6 +660,13 @@ def run_sync_for_page(
                 MEETING_TYPE=metadata["meeting_type"] or "Not specified",
                 MEETING_CONTENT=content,
             )
+
+            # Deal detection hint from meeting title
+            if ctx["deals"]:
+                detected = _detect_deals_from_title(title, ctx["deals"])
+                if detected:
+                    deal_names = ", ".join(d.name for d in detected)
+                    user_prompt += f"\n\nNote: This meeting likely relates to deal(s): {deal_names}"
 
             tasks = ctx["extractor"].extract(
                 system_prompt=system_prompt,
@@ -583,6 +686,9 @@ def run_sync_for_page(
 
             for task in tasks:
                 task["meeting_page_id"] = page_id
+
+            # Semantic dedup: filter out tasks similar to existing ones
+            tasks = _run_semantic_dedup(tasks, ctx.get("semantic_dedup"))
 
             if tasks:
                 ctx["writer"].write_batch(tasks)

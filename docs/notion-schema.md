@@ -59,6 +59,7 @@ sort: created_time descending
 | Category | select | Read dynamically from DB schema at runtime (see below) |
 | Parent item | relation | Self-relation to Team Task Tracker (hierarchy parent) |
 | Sub-item | relation | Self-relation (hierarchy children, inverse of Parent item) |
+| Deal Relation (only for deal tasks) | relation | Relation to Deal Workplans DB (set by pipeline when AI identifies a deal-related task) |
 | Meeting - Relation | relation | Relation to Meeting Notes DB (set automatically by pipeline on task creation) |
 
 **Category options** (7 values, read dynamically via `_load_categories()`):
@@ -77,12 +78,29 @@ sort: created_time descending
 The Team Task Tracker uses the "Parent item" self-relation to form a tree:
 
 ```
-Category (root level)
-  └── Entity (company, project, fund)
-        └── Task (leaf node — not loaded by hierarchy)
+Category (root level, e.g. "Sourcing / Investing / Divesting")
+  └── Sub-category (e.g. "Investing")
+        └── Group (e.g. "Active Dealflow")
+              └── Entity (e.g. "Citadel" — only if it has children)
+                    └── Task (leaf node — not loaded by hierarchy)
 ```
 
-`HierarchyLoader` queries all non-Done items, builds the tree, and prunes to 2 levels. The resulting JSON is passed to the AI extractor so it can set `parent_task_id` on new tasks.
+`HierarchyLoader` queries all non-Done items, builds the tree, and prunes to 3 levels. At depth 3, only organizational nodes (those with children) are kept — leaf tasks are filtered out. The resulting JSON is passed to the AI extractor so it can set `parent_task_id` on new tasks.
+
+## Deal Workplans DB (Investment Team)
+
+Used when `DEAL_WORKPLANS_DB_ID` is set. Contains one page per active deal.
+
+| Property | Type | Notes |
+|----------|------|-------|
+| Name | title | Deal name (e.g., "Citadel") |
+| 🖇️ Team Task Tracker | relation | Links to the deal's entry in Team Task Tracker |
+
+Each deal page contains inline databases discovered by title pattern:
+- **`{Deal} Workplan`** — workstreams with Status, Type (multi_select), Adviser (multi_select), Owner, Start/End dates
+- **`{Deal} Action Items`** — granular tasks with Assigned To, Deadline, Status, Workstream (relation)
+
+The `DealContextLoader` queries this DB, discovers inline databases per deal, and loads active workstreams for AI prompt enrichment.
 
 ## Playbook Page
 

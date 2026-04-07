@@ -1,10 +1,12 @@
 from unittest.mock import MagicMock, patch, call
 
 from src.config import SyncConfig
+from src.deal_context import DealInfo, DealWorkstream
 from src.pipeline import (
     run_inject_templates, run_sync, _archive_done_tasks,
     _inject_templates, _flatten_hierarchy, _load_existing_tasks,
     _substitute_placeholders, _format_existing_tasks, _format_team_members,
+    _format_deal_context, _detect_deals_from_title, _run_semantic_dedup,
 )
 
 
@@ -38,6 +40,8 @@ def _make_page(page_id: str, title: str) -> dict:
 
 
 class TestRunSync:
+    @patch("src.pipeline.SemanticDedup")
+    @patch("src.pipeline.OpenAI")
     @patch("src.pipeline.TeamTaskTrackerWriter")
     @patch("src.pipeline.AIExtractor")
     @patch("src.pipeline.HierarchyLoader")
@@ -47,6 +51,7 @@ class TestRunSync:
     def test_full_cycle(
         self, mock_load_cats, mock_source_cls, mock_fetch_text,
         mock_hierarchy_cls, mock_extractor_cls, mock_writer_cls,
+        mock_openai_cls, mock_dedup_cls,
     ):
         config = _make_config()
         client = MagicMock()
@@ -74,6 +79,8 @@ class TestRunSync:
             {"title": "Review doc", "assignee_id": "u1", "priority": "High", "category": "Operations"}
         ]
         mock_writer_cls.return_value.write_batch.return_value = [{"id": "new-task-1"}]
+        mock_writer_cls.return_value._existing_titles = set()
+        mock_dedup_cls.return_value.is_duplicate.return_value = (False, None, 0.0)
         # No recently-created tasks for dedup
         client.query_database.return_value = {"results": []}
 
@@ -93,6 +100,8 @@ class TestRunSync:
         mock_writer_cls.return_value.write_batch.assert_called_once()
         mock_source.mark_page_processed.assert_called_once_with("p1")
 
+    @patch("src.pipeline.SemanticDedup")
+    @patch("src.pipeline.OpenAI")
     @patch("src.pipeline.TeamTaskTrackerWriter")
     @patch("src.pipeline.AIExtractor")
     @patch("src.pipeline.HierarchyLoader")
@@ -102,6 +111,7 @@ class TestRunSync:
     def test_no_pages_does_nothing(
         self, mock_load_cats, mock_source_cls, mock_fetch_text,
         mock_hierarchy_cls, mock_extractor_cls, mock_writer_cls,
+        mock_openai_cls, mock_dedup_cls,
     ):
         config = _make_config()
         client = MagicMock()
@@ -111,12 +121,15 @@ class TestRunSync:
         mock_source_cls.return_value.get_unprocessed_pages.return_value = []
         mock_fetch_text.return_value = "template"
         mock_hierarchy_cls.return_value.load.return_value = []
+        mock_writer_cls.return_value._existing_titles = set()
         client.query_database.return_value = {"results": []}
 
         run_sync(config, client)
 
         mock_extractor_cls.return_value.extract.assert_not_called()
 
+    @patch("src.pipeline.SemanticDedup")
+    @patch("src.pipeline.OpenAI")
     @patch("src.pipeline.TeamTaskTrackerWriter")
     @patch("src.pipeline.AIExtractor")
     @patch("src.pipeline.HierarchyLoader")
@@ -126,6 +139,7 @@ class TestRunSync:
     def test_page_failure_continues_to_next(
         self, mock_load_cats, mock_source_cls, mock_fetch_text,
         mock_hierarchy_cls, mock_extractor_cls, mock_writer_cls,
+        mock_openai_cls, mock_dedup_cls,
     ):
         config = _make_config()
         client = MagicMock()
@@ -147,6 +161,7 @@ class TestRunSync:
         mock_fetch_text.return_value = "template"
         mock_hierarchy_cls.return_value.load.return_value = []
         mock_extractor_cls.return_value.extract.return_value = []
+        mock_writer_cls.return_value._existing_titles = set()
         client.query_database.return_value = {"results": []}
 
         run_sync(config, client)
@@ -415,7 +430,107 @@ class TestFormatTeamMembers:
         assert "Santiago (ID: u1)" in result
 
 
+class TestFormatDealContext:
+    def test_formats_deals_with_workstreams(self):
+        deals = [DealInfo(
+            name="Citadel",
+            deal_page_id="deal-1",
+            tracker_page_id="tracker-1",
+            workplan_db_id="wp-1",
+            workstreams=[
+                DealWorkstream(id="ws-1", title="FDD", status="In progress",
+                               workstream_type=["DD"], adviser=["A&M"]),
+                DealWorkstream(id="ws-2", title="Legal DD", status="Not started",
+                               workstream_type=["DD"], adviser=["DLA"]),
+            ],
+        )]
+        result = _format_deal_context(deals)
+        assert "Citadel" in result
+        assert "Deal page ID: deal-1" in result
+        assert "Tracker page ID: tracker-1" in result
+        assert "FDD (Status: In progress, Type: DD, Adviser: A&M)" in result
+        assert "Legal DD" in result
+
+    def test_empty_deals_returns_empty(self):
+        assert _format_deal_context([]) == ""
+
+    def test_deal_without_workstreams(self):
+        deals = [DealInfo(
+            name="SimpleDeal",
+            deal_page_id="deal-2",
+            tracker_page_id=None,
+        )]
+        result = _format_deal_context(deals)
+        assert "SimpleDeal" in result
+        assert "Tracker page ID: not linked" in result
+        assert "Workstreams" not in result
+
+
+class TestDetectDealsFromTitle:
+    def test_matches_deal_name_in_title(self):
+        deals = [
+            DealInfo(name="Citadel", deal_page_id="d1", tracker_page_id="t1"),
+            DealInfo(name="Phoenix", deal_page_id="d2", tracker_page_id="t2"),
+        ]
+        result = _detect_deals_from_title("Citadel Weekly Sync", deals)
+        assert len(result) == 1
+        assert result[0].name == "Citadel"
+
+    def test_case_insensitive(self):
+        deals = [DealInfo(name="Citadel", deal_page_id="d1", tracker_page_id="t1")]
+        result = _detect_deals_from_title("citadel dd review", deals)
+        assert len(result) == 1
+
+    def test_no_match(self):
+        deals = [DealInfo(name="Citadel", deal_page_id="d1", tracker_page_id="t1")]
+        result = _detect_deals_from_title("Weekly Standup", deals)
+        assert len(result) == 0
+
+    def test_multiple_deals_in_title(self):
+        deals = [
+            DealInfo(name="Citadel", deal_page_id="d1", tracker_page_id="t1"),
+            DealInfo(name="Phoenix", deal_page_id="d2", tracker_page_id="t2"),
+        ]
+        result = _detect_deals_from_title("Citadel + Phoenix review", deals)
+        assert len(result) == 2
+
+
+class TestRunSemanticDedup:
+    def test_filters_duplicates(self):
+        dedup = MagicMock()
+        dedup.is_duplicate.side_effect = [
+            (False, None, 0.3),   # task 1: not a dup
+            (True, "existing", 0.92),  # task 2: duplicate
+            (False, None, 0.1),   # task 3: not a dup
+        ]
+        tasks = [
+            {"title": "unique task"},
+            {"title": "duplicate task"},
+            {"title": "another unique"},
+        ]
+
+        result = _run_semantic_dedup(tasks, dedup)
+
+        assert len(result) == 2
+        assert result[0]["title"] == "unique task"
+        assert result[1]["title"] == "another unique"
+        # add_title called for kept tasks only
+        assert dedup.add_title.call_count == 2
+
+    def test_none_dedup_passes_all(self):
+        tasks = [{"title": "a"}, {"title": "b"}]
+        result = _run_semantic_dedup(tasks, None)
+        assert result == tasks
+
+    def test_empty_tasks_returns_empty(self):
+        dedup = MagicMock()
+        result = _run_semantic_dedup([], dedup)
+        assert result == []
+
+
 class TestAssigneeFallback:
+    @patch("src.pipeline.SemanticDedup")
+    @patch("src.pipeline.OpenAI")
     @patch("src.pipeline.TeamTaskTrackerWriter")
     @patch("src.pipeline.AIExtractor")
     @patch("src.pipeline.HierarchyLoader")
@@ -425,6 +540,7 @@ class TestAssigneeFallback:
     def test_fallback_to_meeting_creator(
         self, mock_load_cats, mock_source_cls, mock_fetch_text,
         mock_hierarchy_cls, mock_extractor_cls, mock_writer_cls,
+        mock_openai_cls, mock_dedup_cls,
     ):
         """Tasks without assignee_id get the meeting creator as fallback."""
         config = _make_config()
@@ -452,6 +568,8 @@ class TestAssigneeFallback:
             {"title": "Vicente - contacto con Clikalia", "priority": "Medium", "category": "Other"}
         ]
         mock_writer_cls.return_value.write_batch.return_value = [{"id": "new-task-1"}]
+        mock_writer_cls.return_value._existing_titles = set()
+        mock_dedup_cls.return_value.is_duplicate.return_value = (False, None, 0.0)
         client.query_database.return_value = {"results": []}
 
         run_sync(config, client)

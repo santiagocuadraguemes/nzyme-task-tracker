@@ -109,14 +109,16 @@ class TestRunSyncForPage:
         mock_writer = MagicMock()
         mock_writer.write_batch.return_value = [{"id": "task-1"}]
         mock_ctx.return_value = {
-            "system_prompt_template": "sys {{CATEGORIES}} {{HIERARCHY}} {{EXISTING_TASKS}} {{TEAM_MEMBERS}} {{ATTENDEES}}",
+            "system_prompt_template": "sys {{CATEGORIES}} {{HIERARCHY}} {{EXISTING_TASKS}} {{TEAM_MEMBERS}} {{ATTENDEES}} {{DEAL_CONTEXT}}",
             "user_prompt_template": "{{MEETING_TITLE}} {{MEETING_DATE}} {{MEETING_TYPE}} {{MEETING_CONTENT}}",
             "hierarchy": [],
             "categories": ["Other"],
             "all_users": [],
             "existing_tasks": [],
+            "deals": [],
             "extractor": mock_extractor,
             "writer": mock_writer,
+            "semantic_dedup": None,
         }
 
         run_sync_for_page(config, client, "page-1")
@@ -174,8 +176,8 @@ class TestRunSyncForPage:
         mock_ctx.return_value = {
             "system_prompt_template": "template", "user_prompt_template": "template",
             "hierarchy": [], "categories": ["Other"],
-            "all_users": [], "existing_tasks": [],
-            "extractor": MagicMock(), "writer": MagicMock(),
+            "all_users": [], "existing_tasks": [], "deals": [],
+            "extractor": MagicMock(), "writer": MagicMock(), "semantic_dedup": None,
         }
 
         run_sync_for_page(config, client, "page-1")
@@ -212,8 +214,8 @@ class TestRunSyncForPage:
         mock_ctx.return_value = {
             "system_prompt_template": "template", "user_prompt_template": "template",
             "hierarchy": [], "categories": ["Other"],
-            "all_users": [], "existing_tasks": [],
-            "extractor": MagicMock(), "writer": MagicMock(),
+            "all_users": [], "existing_tasks": [], "deals": [],
+            "extractor": MagicMock(), "writer": MagicMock(), "semantic_dedup": None,
         }
 
         run_sync_for_page(config, client, "page-1")
