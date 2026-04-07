@@ -33,7 +33,8 @@ sam deploy \
         "OpenAIApiKey=${OPENAI_API_KEY}" \
         "MeetingNotesDbId=${MEETING_NOTES_DB_ID}" \
         "TeamTrackerDbId=${TEAM_TRACKER_DB_ID}" \
-        "PlaybookPageId=${PLAYBOOK_PAGE_ID}" \
+        "SystemPromptPageId=${SYSTEM_PROMPT_PAGE_ID}" \
+        "UserPromptPageId=${USER_PROMPT_PAGE_ID}" \
         "MeetingTemplatePageId=${MEETING_TEMPLATE_PAGE_ID:-}" \
         "WebhookPathToken=${WEBHOOK_PATH_TOKEN}" \
         "IdleMinutes=${IDLE_MINUTES:-3}" \
