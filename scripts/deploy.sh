@@ -42,6 +42,8 @@ sam deploy \
         "DryRun=${DRY_RUN:-false}" \
         "IncludeAINotes=${INCLUDE_AI_NOTES:-false}" \
         "BufferHours=${BUFFER_HOURS:-2}" \
+        "DealWorkplansDbId=${DEAL_WORKPLANS_DB_ID:-}" \
+        "SemanticDedupThreshold=${SEMANTIC_DEDUP_THRESHOLD:-0.85}" \
     "$@"
 
 echo ""
