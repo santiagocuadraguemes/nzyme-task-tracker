@@ -71,8 +71,7 @@ class AIExtractor:
     """Extracts tasks from meeting content using OpenAI function calling."""
 
     # TEMPORARY: base_url param allows using Gemini's OpenAI-compatible endpoint.
-    # Remove once we switch back to OpenAI (target model: gpt-5-mini).
-    def __init__(self, api_key: str, model: str = "gpt-4.1", base_url: str | None = None) -> None:
+    def __init__(self, api_key: str, model: str = "gpt-5-mini", base_url: str | None = None) -> None:
         self._client = OpenAI(api_key=api_key, base_url=base_url)
         self._model = model
 

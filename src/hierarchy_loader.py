@@ -60,10 +60,10 @@ class HierarchyLoader:
             else:
                 roots.append(node)
 
-        # Prune: keep top 3 levels (categories + sub-categories + entities).
+        # Prune: keep top 4 levels (categories + sub-categories + entities + deals).
         # At max depth, only keep nodes that have children (organizational
         # nodes like deals), filtering out individual leaf tasks.
-        pruned = self._prune(roots, max_depth=3)
+        pruned = self._prune(roots, max_depth=4)
 
         self._cache = pruned
         logger.info(
