@@ -14,7 +14,8 @@ Globals:
         OPENAI_API_KEY: !Ref OpenAIApiKey
         MEETING_NOTES_DB_ID: !Ref MeetingNotesDbId
         TEAM_TRACKER_DB_ID: !Ref TeamTrackerDbId
-        PLAYBOOK_PAGE_ID: !Ref PlaybookPageId
+        SYSTEM_PROMPT_PAGE_ID: !Ref SystemPromptPageId
+        USER_PROMPT_PAGE_ID: !Ref UserPromptPageId
         MEETING_TEMPLATE_PAGE_ID: !Ref MeetingTemplatePageId
         WEBHOOK_PATH_TOKEN: !Ref WebhookPathToken
         IDLE_MINUTES: !Ref IdleMinutes
@@ -34,7 +35,9 @@ Parameters:
     Type: String
   TeamTrackerDbId:
     Type: String
-  PlaybookPageId:
+  SystemPromptPageId:
+    Type: String
+  UserPromptPageId:
     Type: String
   MeetingTemplatePageId:
     Type: String
@@ -67,6 +70,10 @@ Resources:
       CodeUri: .
       MemorySize: 512
       Timeout: 120
+      LoggingConfig:
+        LogFormat: JSON
+        ApplicationLogLevel: !Ref LogLevel
+        SystemLogLevel: WARN
       Events:
         WebhookPost:
           Type: HttpApi

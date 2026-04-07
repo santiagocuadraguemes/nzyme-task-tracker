@@ -115,6 +115,15 @@ Key design: playbook, hierarchy, and category options are all read dynamically f
 | `src/webhook/lambda_handler.py` | Unified AWS Lambda entry point (routes webhook + cron) |
 | `template.yaml` | SAM template for AWS infrastructure |
 
+## Team Task Tracker: Parent Items vs Extracted Tasks
+
+The tracker contains two types of items — never delete or archive parent items.
+
+- **Parent/hierarchy items** (e.g. "Investing", "Nzyme Operations", "Value Creation") have **no "Meeting - Relation"** set. They form the organizational structure used by `hierarchy_loader.py` to give the AI context for categorizing tasks. Deleting them breaks the hierarchy.
+- **Extracted tasks** are created by the AI pipeline and **always have "Meeting - Relation"** set (linking back to the source meeting page).
+
+When cleaning up test data, only archive items that have a "Meeting - Relation" value.
+
 ## Conventions
 
 - **Python 3.11+** with type hints (`from __future__ import annotations`)

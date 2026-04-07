@@ -1,7 +1,11 @@
 from unittest.mock import MagicMock, patch, call
 
 from src.config import SyncConfig
-from src.pipeline import run_inject_templates, run_sync, _archive_done_tasks, _inject_templates
+from src.pipeline import (
+    run_inject_templates, run_sync, _archive_done_tasks,
+    _inject_templates, _flatten_hierarchy, _load_existing_tasks,
+    _substitute_placeholders, _format_existing_tasks,
+)
 
 
 def _make_config(**overrides) -> SyncConfig:
@@ -10,7 +14,8 @@ def _make_config(**overrides) -> SyncConfig:
         "openai_api_key": "sk-abc",
         "meeting_notes_db_id": "db-meetings",
         "team_tracker_db_id": "db-tracker",
-        "playbook_page_id": "page-playbook",
+        "system_prompt_page_id": "page-system-prompt",
+        "user_prompt_page_id": "page-user-prompt",
         "buffer_hours": 2,
         "dry_run": False,
     }
@@ -35,11 +40,11 @@ class TestRunSync:
     @patch("src.pipeline.TeamTaskTrackerWriter")
     @patch("src.pipeline.AIExtractor")
     @patch("src.pipeline.HierarchyLoader")
-    @patch("src.pipeline.PlaybookLoader")
+    @patch("src.pipeline._fetch_page_text")
     @patch("src.pipeline.SingleSource")
     @patch("src.pipeline._load_categories")
     def test_full_cycle(
-        self, mock_load_cats, mock_source_cls, mock_playbook_cls,
+        self, mock_load_cats, mock_source_cls, mock_fetch_text,
         mock_hierarchy_cls, mock_extractor_cls, mock_writer_cls,
     ):
         config = _make_config()
@@ -61,21 +66,25 @@ class TestRunSync:
             "attendees": [{"id": "u1", "name": "Santiago"}],
         }
 
-        mock_playbook_cls.return_value.load.return_value = "playbook rules"
+        mock_fetch_text.return_value = "prompt template with {{CATEGORIES}} {{HIERARCHY}} {{EXISTING_TASKS}} {{TEAM_MEMBERS}} {{ATTENDEES}}"
         mock_hierarchy_cls.return_value.load.return_value = [{"id": "cat1", "title": "Ops"}]
         mock_extractor_cls.return_value.extract.return_value = [
             {"title": "Review doc", "assignee_id": "u1", "priority": "High", "category": "Operations"}
         ]
         mock_writer_cls.return_value.write_batch.return_value = [{"id": "new-task-1"}]
+        # No recently-created tasks for dedup
+        client.query_database.return_value = {"results": []}
 
         run_sync(config, client)
 
         mock_source.get_unprocessed_pages.assert_called_once_with(2)
         extract_kwargs = mock_extractor_cls.return_value.extract.call_args.kwargs
-        assert extract_kwargs["team_members"] == [
-            {"id": "u1", "name": "Santiago"},
-            {"id": "u2", "name": "Reyes"},
-        ]
+        assert "system_prompt" in extract_kwargs
+        assert "user_prompt" in extract_kwargs
+        assert "categories" in extract_kwargs
+        # Verify placeholders were substituted
+        assert "{{CATEGORIES}}" not in extract_kwargs["system_prompt"]
+        assert "Santiago" in extract_kwargs["system_prompt"]  # team member
         write_call_args = mock_writer_cls.return_value.write_batch.call_args
         tasks_written = write_call_args.args[0]
         assert tasks_written[0]["meeting_page_id"] == "p1"
@@ -85,11 +94,11 @@ class TestRunSync:
     @patch("src.pipeline.TeamTaskTrackerWriter")
     @patch("src.pipeline.AIExtractor")
     @patch("src.pipeline.HierarchyLoader")
-    @patch("src.pipeline.PlaybookLoader")
+    @patch("src.pipeline._fetch_page_text")
     @patch("src.pipeline.SingleSource")
     @patch("src.pipeline._load_categories")
     def test_no_pages_does_nothing(
-        self, mock_load_cats, mock_source_cls, mock_playbook_cls,
+        self, mock_load_cats, mock_source_cls, mock_fetch_text,
         mock_hierarchy_cls, mock_extractor_cls, mock_writer_cls,
     ):
         config = _make_config()
@@ -98,8 +107,9 @@ class TestRunSync:
 
         mock_load_cats.return_value = ["Other"]
         mock_source_cls.return_value.get_unprocessed_pages.return_value = []
-        mock_playbook_cls.return_value.load.return_value = "rules"
+        mock_fetch_text.return_value = "template"
         mock_hierarchy_cls.return_value.load.return_value = []
+        client.query_database.return_value = {"results": []}
 
         run_sync(config, client)
 
@@ -108,11 +118,11 @@ class TestRunSync:
     @patch("src.pipeline.TeamTaskTrackerWriter")
     @patch("src.pipeline.AIExtractor")
     @patch("src.pipeline.HierarchyLoader")
-    @patch("src.pipeline.PlaybookLoader")
+    @patch("src.pipeline._fetch_page_text")
     @patch("src.pipeline.SingleSource")
     @patch("src.pipeline._load_categories")
     def test_page_failure_continues_to_next(
-        self, mock_load_cats, mock_source_cls, mock_playbook_cls,
+        self, mock_load_cats, mock_source_cls, mock_fetch_text,
         mock_hierarchy_cls, mock_extractor_cls, mock_writer_cls,
     ):
         config = _make_config()
@@ -131,9 +141,10 @@ class TestRunSync:
             "meeting_type": "Other", "attendees": [],
         }
 
-        mock_playbook_cls.return_value.load.return_value = "rules"
+        mock_fetch_text.return_value = "template"
         mock_hierarchy_cls.return_value.load.return_value = []
         mock_extractor_cls.return_value.extract.return_value = []
+        client.query_database.return_value = {"results": []}
 
         run_sync(config, client)
 
@@ -278,3 +289,105 @@ class TestRunInjectTemplates:
         run_inject_templates(config, client)
 
         mock_fetch.assert_not_called()
+
+
+class TestFlattenHierarchy:
+    def test_flat(self):
+        nodes = [
+            {"id": "a", "title": "Root A", "children": []},
+            {"id": "b", "title": "Root B", "children": []},
+        ]
+        assert _flatten_hierarchy(nodes) == {"a": "Root A", "b": "Root B"}
+
+    def test_nested(self):
+        nodes = [
+            {"id": "a", "title": "Root", "children": [
+                {"id": "b", "title": "Child", "children": [
+                    {"id": "c", "title": "Grandchild", "children": []},
+                ]},
+            ]},
+        ]
+        result = _flatten_hierarchy(nodes)
+        assert result == {"a": "Root", "b": "Child", "c": "Grandchild"}
+
+    def test_empty(self):
+        assert _flatten_hierarchy([]) == {}
+
+
+class TestLoadExistingTasks:
+    def test_loads_recent_tasks_with_parent_titles(self):
+        client = MagicMock()
+        client.query_database.return_value = {
+            "results": [
+                {
+                    "properties": {
+                        "Task": {"type": "title", "title": [{"plain_text": "Call investor"}]},
+                        "Parent item": {"relation": [{"id": "parent-1"}]},
+                    }
+                },
+                {
+                    "properties": {
+                        "Task": {"type": "title", "title": [{"plain_text": "Review doc"}]},
+                        "Parent item": {"relation": []},
+                    }
+                },
+            ]
+        }
+        hierarchy = [{"id": "parent-1", "title": "Fundraising", "children": []}]
+
+        tasks = _load_existing_tasks(client, "db-tracker", hierarchy)
+
+        assert len(tasks) == 2
+        assert tasks[0] == {"title": "Call investor", "parent_title": "Fundraising"}
+        assert tasks[1] == {"title": "Review doc", "parent_title": ""}
+
+    def test_returns_empty_on_api_failure(self):
+        client = MagicMock()
+        client.query_database.side_effect = Exception("API error")
+
+        tasks = _load_existing_tasks(client, "db-tracker", [])
+
+        assert tasks == []
+
+    def test_skips_blank_titles(self):
+        client = MagicMock()
+        client.query_database.return_value = {
+            "results": [
+                {"properties": {"Task": {"type": "title", "title": []}}},
+            ]
+        }
+
+        tasks = _load_existing_tasks(client, "db-tracker", [])
+
+        assert tasks == []
+
+
+class TestSubstitutePlaceholders:
+    def test_replaces_placeholders(self):
+        template = "Hello {{NAME}}, your category is {{CATEGORY}}."
+        result = _substitute_placeholders(template, NAME="Santiago", CATEGORY="Ops")
+        assert result == "Hello Santiago, your category is Ops."
+
+    def test_leaves_unknown_placeholders(self):
+        template = "{{KNOWN}} and {{UNKNOWN}}"
+        result = _substitute_placeholders(template, KNOWN="yes")
+        assert result == "yes and {{UNKNOWN}}"
+
+    def test_empty_value(self):
+        result = _substitute_placeholders("before{{X}}after", X="")
+        assert result == "beforeafter"
+
+
+class TestFormatExistingTasks:
+    def test_formats_tasks_with_parents(self):
+        tasks = [
+            {"title": "Call X", "parent_title": "Fundraising"},
+            {"title": "Review Y", "parent_title": ""},
+        ]
+        result = _format_existing_tasks(tasks)
+        assert "DO NOT duplicate" in result
+        assert "Call X (under: Fundraising)" in result
+        assert "- Review Y\n" in result
+
+    def test_empty_returns_empty_string(self):
+        assert _format_existing_tasks([]) == ""

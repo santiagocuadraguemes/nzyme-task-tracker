@@ -11,7 +11,8 @@ def _make_config(**overrides) -> SyncConfig:
         "openai_api_key": "sk-abc",
         "meeting_notes_db_id": "db-meetings",
         "team_tracker_db_id": "db-tracker",
-        "playbook_page_id": "page-playbook",
+        "system_prompt_page_id": "page-system-prompt",
+        "user_prompt_page_id": "page-user-prompt",
         "meeting_template_page_id": "tmpl-123",
     }
     defaults.update(overrides)
@@ -108,10 +109,12 @@ class TestRunSyncForPage:
         mock_writer = MagicMock()
         mock_writer.write_batch.return_value = [{"id": "task-1"}]
         mock_ctx.return_value = {
-            "playbook": "rules",
+            "system_prompt_template": "sys {{CATEGORIES}} {{HIERARCHY}} {{EXISTING_TASKS}} {{TEAM_MEMBERS}} {{ATTENDEES}}",
+            "user_prompt_template": "{{MEETING_TITLE}} {{MEETING_DATE}} {{MEETING_TYPE}} {{MEETING_CONTENT}}",
             "hierarchy": [],
             "categories": ["Other"],
             "all_users": [],
+            "existing_tasks": [],
             "extractor": mock_extractor,
             "writer": mock_writer,
         }
@@ -119,6 +122,9 @@ class TestRunSyncForPage:
         run_sync_for_page(config, client, "page-1")
 
         mock_extractor.extract.assert_called_once()
+        extract_kwargs = mock_extractor.extract.call_args.kwargs
+        assert "system_prompt" in extract_kwargs
+        assert "user_prompt" in extract_kwargs
         mock_writer.write_batch.assert_called_once()
         mock_source.mark_page_processed.assert_called_once_with("page-1")
 
@@ -166,8 +172,10 @@ class TestRunSyncForPage:
         }
 
         mock_ctx.return_value = {
-            "playbook": "rules", "hierarchy": [], "categories": ["Other"],
-            "all_users": [], "extractor": MagicMock(), "writer": MagicMock(),
+            "system_prompt_template": "template", "user_prompt_template": "template",
+            "hierarchy": [], "categories": ["Other"],
+            "all_users": [], "existing_tasks": [],
+            "extractor": MagicMock(), "writer": MagicMock(),
         }
 
         run_sync_for_page(config, client, "page-1")
@@ -202,8 +210,10 @@ class TestRunSyncForPage:
         }
 
         mock_ctx.return_value = {
-            "playbook": "rules", "hierarchy": [], "categories": ["Other"],
-            "all_users": [], "extractor": MagicMock(), "writer": MagicMock(),
+            "system_prompt_template": "template", "user_prompt_template": "template",
+            "hierarchy": [], "categories": ["Other"],
+            "all_users": [], "existing_tasks": [],
+            "extractor": MagicMock(), "writer": MagicMock(),
         }
 
         run_sync_for_page(config, client, "page-1")

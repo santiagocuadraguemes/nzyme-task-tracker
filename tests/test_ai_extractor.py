@@ -35,14 +35,8 @@ class TestAIExtractor:
 
         extractor = AIExtractor(api_key="sk-test", model="gpt-4.1")
         tasks = extractor.extract(
-            meeting_title="Deal Review - Acme",
-            meeting_date="2026-03-28",
-            meeting_type="Deal review",
-            meeting_content="@Santiago to review term sheet by April 1",
-            attendees=[{"id": "user-1", "name": "Santiago"}],
-            team_members=[{"id": "user-1", "name": "Santiago"}, {"id": "user-2", "name": "Reyes"}],
-            playbook="Extract action items from to-do blocks",
-            hierarchy=[{"id": "cat1", "title": "Dealflow", "children": []}],
+            system_prompt="You are an assistant.",
+            user_prompt="Extract tasks from: @Santiago review term sheet",
             categories=["Sourcing / Investing / Divesting", "Other"],
         )
 
@@ -59,14 +53,8 @@ class TestAIExtractor:
 
         extractor = AIExtractor(api_key="sk-test")
         tasks = extractor.extract(
-            meeting_title="Standup",
-            meeting_date="2026-03-28",
-            meeting_type="Standup",
-            meeting_content="No action items today",
-            attendees=[],
-            team_members=[],
-            playbook="rules",
-            hierarchy=[],
+            system_prompt="You are an assistant.",
+            user_prompt="No action items today",
             categories=["Other"],
         )
 
@@ -83,14 +71,8 @@ class TestAIExtractor:
 
         extractor = AIExtractor(api_key="sk-test")
         tasks = extractor.extract(
-            meeting_title="Test",
-            meeting_date="2026-03-28",
-            meeting_type="Other",
-            meeting_content="content",
-            attendees=[],
-            team_members=[],
-            playbook="rules",
-            hierarchy=[],
+            system_prompt="system",
+            user_prompt="user",
             categories=["Other"],
         )
 
@@ -104,14 +86,8 @@ class TestAIExtractor:
 
         extractor = AIExtractor(api_key="sk-test")
         extractor.extract(
-            meeting_title="Test",
-            meeting_date="2026-03-28",
-            meeting_type="Other",
-            meeting_content="content",
-            attendees=[],
-            team_members=[],
-            playbook="rules",
-            hierarchy=[],
+            system_prompt="system",
+            user_prompt="user",
             categories=["Cat A", "Cat B"],
         )
 
@@ -119,3 +95,21 @@ class TestAIExtractor:
         tool_def = call_kwargs["tools"][0]["function"]["parameters"]
         assert "Cat A" in tool_def["properties"]["category"]["enum"]
         assert "Cat B" in tool_def["properties"]["category"]["enum"]
+
+    @patch("src.ai_extractor.OpenAI")
+    def test_prompts_passed_to_openai(self, mock_openai_cls):
+        mock_client = MagicMock()
+        mock_openai_cls.return_value = mock_client
+        mock_client.chat.completions.create.return_value = _mock_response(None)
+
+        extractor = AIExtractor(api_key="sk-test")
+        extractor.extract(
+            system_prompt="My system prompt with rules",
+            user_prompt="My user prompt with meeting content",
+            categories=["Other"],
+        )
+
+        call_kwargs = mock_client.chat.completions.create.call_args.kwargs
+        messages = call_kwargs["messages"]
+        assert messages[0]["content"] == "My system prompt with rules"
+        assert messages[1]["content"] == "My user prompt with meeting content"

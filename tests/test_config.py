@@ -13,7 +13,8 @@ class TestSyncConfig:
             openai_api_key="sk-abc",
             meeting_notes_db_id="db-meetings",
             team_tracker_db_id="db-tracker",
-            playbook_page_id="page-playbook",
+            system_prompt_page_id="page-system-prompt",
+            user_prompt_page_id="page-user-prompt",
         )
         assert config.openai_model == "gpt-4.1"
         assert config.buffer_hours == 2
@@ -26,7 +27,8 @@ class TestSyncConfig:
                 # missing openai_api_key
                 meeting_notes_db_id="db-meetings",
                 team_tracker_db_id="db-tracker",
-                playbook_page_id="page-playbook",
+                system_prompt_page_id="page-system-prompt",
+                user_prompt_page_id="page-user-prompt",
             )
 
 
@@ -36,7 +38,8 @@ class TestLoadConfig:
         "OPENAI_API_KEY": "sk-abc",
         "MEETING_NOTES_DB_ID": "db-meetings",
         "TEAM_TRACKER_DB_ID": "db-tracker",
-        "PLAYBOOK_PAGE_ID": "page-playbook",
+        "SYSTEM_PROMPT_PAGE_ID": "page-system-prompt",
+        "USER_PROMPT_PAGE_ID": "page-user-prompt",
         "BUFFER_HOURS": "3",
         "DRY_RUN": "true",
     }, clear=False)

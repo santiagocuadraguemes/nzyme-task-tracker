@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 
 from notion_client import Client as NotionClient
 
@@ -14,12 +13,6 @@ from src.sources.single_source import SingleSource
 from src.webhook.handler import handle_automation_webhook
 
 logger = logging.getLogger(__name__)
-
-# Lambda pre-configures the root logger. Set level on root so all our
-# loggers (src.webhook, src.sources, src.pipeline, etc.) actually emit.
-_log_level = getattr(logging, os.getenv("LOG_LEVEL", "INFO"), logging.INFO)
-logging.getLogger().setLevel(_log_level)
-logging.getLogger("src").setLevel(_log_level)
 
 
 def _init():
@@ -39,13 +32,12 @@ def handler(event, context):
     """
     # CloudWatch Events cron
     if event.get("source") == "aws.events":
-        print("[nzyme] Event routed to: extraction (CloudWatch cron)")
-        logger.info("Event routed to: extraction (CloudWatch cron)")
+        logger.info("Event routed to: extraction", extra={"event_type": "cron"})
         return _handle_extraction(event, context)
 
     # API Gateway (has requestContext or pathParameters)
     if event.get("requestContext") or event.get("pathParameters"):
-        logger.info("Event routed to: webhook (API Gateway)")
+        logger.info("Event routed to: webhook", extra={"event_type": "webhook"})
         return _handle_webhook(event, context)
 
     logger.warning("Unknown event source: %s", json.dumps(event)[:200])
@@ -92,7 +84,7 @@ def _handle_extraction(event, context):
     Triggered by CloudWatch Events rule (every 1 minute).
     """
     config, client = _init()
-    logger.info("Extraction tick — db=%s, idle_minutes=%s", config.meeting_notes_db_id, config.idle_minutes)
+    logger.info("Extraction tick — db=%s, idle_minutes=%s", config.meeting_notes_db_id, config.idle_minutes, extra={"event_type": "cron"})
     source = SingleSource(client, config.meeting_notes_db_id)
 
     pages = source.get_ready_pages(idle_minutes=config.idle_minutes)
@@ -117,5 +109,5 @@ def _handle_extraction(event, context):
     except Exception:
         logger.exception("Failed to archive done tasks")
 
-    logger.info("Extraction cycle complete: %d pages processed", processed)
+    logger.info("Extraction cycle complete: %d pages processed", processed, extra={"event_type": "cron"})
     return {"statusCode": 200, "body": json.dumps({"processed": processed})}

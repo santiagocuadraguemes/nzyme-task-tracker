@@ -8,48 +8,6 @@ from openai import OpenAI
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT_TEMPLATE = """You are a task extraction assistant for a PE/VC fund team.
-Your job is to extract action items from meeting notes and create tasks.
-
-## Rules (Playbook)
-{playbook}
-
-## Team Task Tracker Schema
-- Task (title): string
-- Status: "Not Started" | "In Progress" | "Done"
-- Assignee: Notion user ID (from team members list — prefer attendees when ambiguous)
-- Due Date: ISO date string (YYYY-MM-DD) or null
-- Priority: "High" | "Medium" | "Low"
-- Category: {categories}
-- Parent item: page ID of parent task from hierarchy (optional)
-
-## Existing Hierarchy
-
-Below is the current Team Task Tracker hierarchy as JSON. Each node has an "id", "title", and "children" array.
-
-When creating tasks, you MUST set "parent_task_id" to the "id" of the most specific matching node:
-- If the task relates to a specific entity (company, project, fund), find that entity in the hierarchy and use its "id"
-- If no specific entity matches, find the best-matching category node and use its "id"
-- Only set "parent_task_id" to null if absolutely nothing in the hierarchy is relevant
-
-IMPORTANT: Always try to place tasks in the hierarchy. Most tasks should have a parent_task_id.
-
-{hierarchy}
-
-## Team Members (available assignees)
-{team_members}
-
-## Attendees in this meeting
-{attendees}"""
-
-USER_PROMPT_TEMPLATE = """Extract action items from this meeting:
-
-Meeting: {title}
-Date: {date}
-Type: {meeting_type}
-
-{content}"""
-
 
 def _build_tool_definition(categories: list[str]) -> dict:
     """Build the create_task tool definition with dynamic category enum."""
@@ -108,44 +66,20 @@ class AIExtractor:
 
     def extract(
         self,
-        meeting_title: str,
-        meeting_date: str,
-        meeting_type: str,
-        meeting_content: str,
-        attendees: list[dict],
-        team_members: list[dict],
-        playbook: str,
-        hierarchy: list[dict],
+        system_prompt: str,
+        user_prompt: str,
         categories: list[str],
     ) -> list[dict]:
-        """Call OpenAI and return a list of task dicts extracted from the meeting."""
-        attendees_text = "\n".join(
-            f"- {a['name']} (ID: {a['id']})" for a in attendees
-        ) or "No attendees listed"
+        """Call OpenAI with pre-built prompts and return extracted task dicts.
 
-        team_members_text = "\n".join(
-            f"- {m['name']} (ID: {m['id']})" for m in team_members
-        ) or "No team members available — use attendees only"
-
-        system_msg = SYSTEM_PROMPT_TEMPLATE.format(
-            playbook=playbook,
-            hierarchy=json.dumps(hierarchy, indent=2),
-            attendees=attendees_text,
-            team_members=team_members_text,
-            categories=" | ".join(f'"{c}"' for c in categories),
-        )
-        user_msg = USER_PROMPT_TEMPLATE.format(
-            title=meeting_title,
-            date=meeting_date,
-            meeting_type=meeting_type or "Not specified",
-            content=meeting_content,
-        )
-
+        The prompts are built by the pipeline from Notion-hosted templates
+        with placeholders substituted at runtime.
+        """
         response = self._client.chat.completions.create(
             model=self._model,
             messages=[
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": user_msg},
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
             ],
             tools=[_build_tool_definition(categories)],
             tool_choice="auto",
@@ -165,9 +99,7 @@ class AIExtractor:
                             tc.function.arguments[:200],
                         )
 
-        logger.info(
-            "AI extracted %d tasks from '%s'", len(tasks), meeting_title[:60]
-        )
+        logger.info("AI extracted %d tasks", len(tasks))
         for task in tasks:
             logger.info(
                 "  Task: '%s' | parent: %s | category: %s",
