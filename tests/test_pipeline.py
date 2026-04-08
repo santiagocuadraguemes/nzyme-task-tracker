@@ -446,8 +446,8 @@ class TestFormatDealContext:
         )]
         result = _format_deal_context(deals)
         assert "Citadel" in result
-        assert "Deal page ID: deal-1" in result
-        assert "Tracker page ID: tracker-1" in result
+        assert "deal_page_id: deal-1" in result
+        assert "parent_task_id (Tracker page ID): tracker-1" in result
         assert "FDD (Status: In progress, Type: DD, Adviser: A&M)" in result
         assert "Legal DD" in result
 
@@ -462,7 +462,7 @@ class TestFormatDealContext:
         )]
         result = _format_deal_context(deals)
         assert "SimpleDeal" in result
-        assert "Tracker page ID: not linked" in result
+        assert "parent_task_id (Tracker page ID): not linked" in result
         assert "Workstreams" not in result
 
 
@@ -576,3 +576,65 @@ class TestAssigneeFallback:
 
         tasks_written = mock_writer_cls.return_value.write_batch.call_args.args[0]
         assert tasks_written[0]["assignee_id"] == "creator-1"
+
+
+class TestCrossMeetingDedupContext:
+    @patch("src.pipeline.SemanticDedup")
+    @patch("src.pipeline.OpenAI")
+    @patch("src.pipeline.TeamTaskTrackerWriter")
+    @patch("src.pipeline.AIExtractor")
+    @patch("src.pipeline.HierarchyLoader")
+    @patch("src.pipeline._fetch_page_text")
+    @patch("src.pipeline.SingleSource")
+    @patch("src.pipeline._load_categories")
+    def test_second_meeting_prompt_includes_first_meeting_tasks(
+        self, mock_load_cats, mock_source_cls, mock_fetch_text,
+        mock_hierarchy_cls, mock_extractor_cls, mock_writer_cls,
+        mock_openai_cls, mock_dedup_cls,
+    ):
+        """After processing meeting 1, meeting 2's prompt should include
+        meeting 1's tasks in {{EXISTING_TASKS}}."""
+        config = _make_config()
+        client = MagicMock()
+        client.list_users.return_value = []
+
+        mock_load_cats.return_value = ["Operations"]
+        mock_source = mock_source_cls.return_value
+        mock_source.get_unprocessed_pages.return_value = [
+            _make_page("p1", "Meeting A"),
+            _make_page("p2", "Meeting B"),
+        ]
+        mock_source.get_page_content.return_value = "some content"
+
+        # Each meeting returns different metadata (different titles for fingerprinting)
+        mock_source.get_page_metadata.side_effect = [
+            {"title": "Meeting A", "date": "2026-03-28", "meeting_type": "Other",
+             "attendees": [], "created_by": {"id": "u1", "name": "Santiago"}},
+            {"title": "Meeting B", "date": "2026-03-28", "meeting_type": "Other",
+             "attendees": [], "created_by": {"id": "u1", "name": "Santiago"}},
+        ]
+
+        mock_fetch_text.return_value = "template {{CATEGORIES}} {{HIERARCHY}} {{EXISTING_TASKS}} {{TEAM_MEMBERS}} {{ATTENDEES}} {{MEETING_CREATOR}}"
+        mock_hierarchy_cls.return_value.load.return_value = [
+            {"id": "cat1", "title": "Ops", "children": []}
+        ]
+        # Meeting A extracts 1 task; Meeting B extracts 1 task
+        mock_extractor = mock_extractor_cls.return_value
+        mock_extractor.extract.side_effect = [
+            [{"title": "Task from Meeting A", "priority": "High", "category": "Operations",
+              "parent_task_id": "cat1"}],
+            [{"title": "Task from Meeting B", "priority": "Medium", "category": "Operations"}],
+        ]
+        mock_writer_cls.return_value.write_batch.return_value = [{"id": "new-1"}]
+        mock_writer_cls.return_value._existing_titles = set()
+        mock_dedup_cls.return_value.is_duplicate.return_value = (False, None, 0.0)
+        client.query_database.return_value = {"results": []}
+
+        run_sync(config, client)
+
+        # The second call to extract should have the first meeting's task in prompt
+        assert mock_extractor.extract.call_count == 2
+        second_call_kwargs = mock_extractor.extract.call_args_list[1].kwargs
+        system_prompt_2 = second_call_kwargs["system_prompt"]
+        assert "Task from Meeting A" in system_prompt_2
+        assert "(under: Ops)" in system_prompt_2

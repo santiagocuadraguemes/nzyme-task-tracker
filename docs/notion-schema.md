@@ -85,7 +85,7 @@ Category (root level, e.g. "Sourcing / Investing / Divesting")
                     └── Task (leaf node — not loaded by hierarchy)
 ```
 
-`HierarchyLoader` queries all non-Done items, builds the tree, and prunes to 3 levels. At depth 3, only organizational nodes (those with children) are kept — leaf tasks are filtered out. The resulting JSON is passed to the AI extractor so it can set `parent_task_id` on new tasks.
+`HierarchyLoader` queries all non-Done items, builds the tree, and prunes to 4 levels (categories → sub-categories → entities → deals). At max depth, only organizational nodes (those with children) are kept — leaf tasks are filtered out. The resulting JSON is passed to the AI extractor so it can set `parent_task_id` on new tasks.
 
 ## Deal Workplans DB (Investment Team)
 

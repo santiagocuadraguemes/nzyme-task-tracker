@@ -2,7 +2,7 @@
 
 ## Project
 
-Nzyme is an AI-driven sync engine that extracts action items from Notion meeting notes and writes them to a Team Task Tracker database. It uses OpenAI GPT-4.1 with function calling, guided by a natural-language playbook stored as a Notion page.
+Nzyme is an AI-driven sync engine that extracts action items from Notion meeting notes and writes them to a Team Task Tracker database. It uses OpenAI gpt-5-mini with function calling, guided by a natural-language playbook stored as a Notion page.
 
 Built for Kibo Ventures (PE/VC fund, ~10-20 people). Meeting notes may be in English, Spanish, or mixed.
 
@@ -105,7 +105,7 @@ When `DEAL_WORKPLANS_DB_ID` is set, the pipeline loads deal context from the Dea
 - Injects deal context into the AI prompt via `{{DEAL_CONTEXT}}`
 - The AI can set `deal_page_id` on extracted tasks to populate the `Deal Relation` property
 - Meeting titles are scanned for deal name matches, adding hints to the user prompt
-- Hierarchy is exposed to depth 3 (categories → sub-categories → deal entities)
+- Hierarchy is exposed to depth 4 (categories → sub-categories → entities → deals)
 
 This is fully optional — when `DEAL_WORKPLANS_DB_ID` is not set, the pipeline behaves exactly as before.
 
@@ -125,7 +125,7 @@ Threshold is configurable via `SEMANTIC_DEDUP_THRESHOLD` (default 0.85). When th
 | `src/pipeline.py` | Orchestrates the sync cycle |
 | `src/ai_extractor.py` | OpenAI prompt + function calling, parses tool_calls |
 | `src/playbook_loader.py` | Fetches playbook Notion page, converts to text, caches per run |
-| `src/hierarchy_loader.py` | Queries tracker DB, builds parent-child tree (depth 3, smart pruning) |
+| `src/hierarchy_loader.py` | Queries tracker DB, builds parent-child tree (depth 4, smart pruning) |
 | `src/deal_context.py` | Loads deal workplan context from Deal Workplans DB |
 | `src/template_injector.py` | Injects "Your own notes" section into new meeting pages |
 | `src/sources/single_source.py` | Polls Meeting Notes DB with buffer delay, fetches page content (AI block filtering) |

@@ -113,7 +113,13 @@ def _format_existing_tasks(tasks: list[dict]) -> str:
         return ""
     lines = [
         "## Existing Tasks (DO NOT duplicate)",
-        "Do NOT create any task that duplicates one below, even if worded differently or in another language.",
+        "CRITICAL: Do NOT create any task that duplicates one below.",
+        "Two tasks are duplicates if they describe the same core action, even if:",
+        "- Worded differently or using synonyms",
+        "- In a different language (e.g., Spanish vs English)",
+        "- One is more detailed than the other",
+        "- They have different deadlines or assignees",
+        "If in doubt, do NOT create the task.",
         "",
     ]
     for t in tasks:
@@ -146,10 +152,9 @@ def _format_deal_context(deals: list[DealInfo]) -> str:
     lines: list[str] = []
     for deal in deals:
         tracker_id = deal.tracker_page_id or "not linked"
-        lines.append(
-            f"### {deal.name} (Deal page ID: {deal.deal_page_id}, "
-            f"Tracker page ID: {tracker_id})"
-        )
+        lines.append(f"### {deal.name}")
+        lines.append(f"  - deal_page_id: {deal.deal_page_id}")
+        lines.append(f"  - parent_task_id (Tracker page ID): {tracker_id}")
         if deal.workstreams:
             lines.append("Workstreams:")
             for ws in deal.workstreams:
@@ -437,6 +442,7 @@ def run_sync(config: SyncConfig, client: NotionClientWrapper) -> None:
         existing_tasks_text = _format_existing_tasks(ctx["existing_tasks"])
         team_members_text = _format_team_members(ctx["all_users"])
         deal_context_text = _format_deal_context(ctx["deals"])
+        parent_titles_map = _flatten_hierarchy(ctx["hierarchy"])
 
         total_tasks = 0
         for page in pages:
@@ -524,6 +530,15 @@ def run_sync(config: SyncConfig, client: NotionClientWrapper) -> None:
                         logger.info(
                             "Page '%s': %d tasks extracted", title, len(tasks)
                         )
+
+                        # Accumulate for cross-meeting AI dedup context
+                        for task in tasks:
+                            pid = task.get("parent_task_id")
+                            ctx["existing_tasks"].append({
+                                "title": task["title"],
+                                "parent_title": parent_titles_map.get(pid, "") if pid else "",
+                            })
+                        existing_tasks_text = _format_existing_tasks(ctx["existing_tasks"])
                     else:
                         logger.info("Page '%s': no tasks found", title)
 

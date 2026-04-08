@@ -53,7 +53,12 @@ def _build_tool_definition(categories: list[str]) -> dict:
                     },
                     "deal_page_id": {
                         "type": ["string", "null"],
-                        "description": "Page ID of the deal from the Active Deals context (for deal-related tasks), or null",
+                        "description": (
+                            "The Deal page ID from the deal context (labeled 'deal_page_id'). "
+                            "Links the task to the Deal Workplans database. "
+                            "Do NOT use the Tracker page ID here — that goes in parent_task_id. "
+                            "Set null for non-deal tasks."
+                        ),
                     },
                     "status": {
                         "type": "string",

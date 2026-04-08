@@ -62,7 +62,7 @@ All configuration is via environment variables (`.env` file). Never commit `.env
 | `MEETING_NOTES_DB_ID` | Yes | -- | Meeting Notes database ID |
 | `TEAM_TRACKER_DB_ID` | Yes | -- | Team Task Tracker database ID |
 | `PLAYBOOK_PAGE_ID` | Yes | -- | Notion page ID containing extraction rules |
-| `OPENAI_MODEL` | No | `gpt-4.1` | Model name |
+| `OPENAI_MODEL` | No | `gpt-5-mini` | Model name |
 | `OPENAI_BASE_URL` | No | -- | Override for OpenAI-compatible endpoints (e.g., Gemini) |
 | `BUFFER_HOURS` | No | `2` | Hours to wait after meeting date before processing |
 | `LOG_LEVEL` | No | `INFO` | Logging level |

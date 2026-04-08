@@ -81,7 +81,7 @@ Helper functions:
 - **Output:** List of root nodes with nested children: `[{id, title, category, children: [...]}]`
 - Queries all non-Done tasks from the tracker
 - Builds parent-child tree from "Parent item" self-relation
-- Prunes to 3 levels (categories + sub-categories + entities). At depth 3, only keeps nodes that have children (organizational nodes like deals), filtering out leaf tasks
+- Prunes to 4 levels (categories → sub-categories → entities → deals). At max depth, only keeps nodes that have children (organizational nodes), filtering out leaf tasks
 - Removes nodes with empty titles
 - **Caches** result for the lifetime of the instance
 
