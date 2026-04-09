@@ -137,6 +137,75 @@ Threshold is configurable via `SEMANTIC_DEDUP_THRESHOLD` (default 0.85). When th
 | `src/webhook/lambda_handler.py` | Unified AWS Lambda entry point (routes webhook + cron) |
 | `template.yaml` | SAM template for AWS infrastructure |
 
+## Transcript Pipeline (WIP)
+
+A **separate module** (`src/transcript_pipeline/`) for post-processing Notion meeting transcripts. Notion AI Meeting Notes has poor voice recognition for domain-specific terms — this pipeline corrects them using an LLM + a terminology dictionary.
+
+**Important:** This module uses Notion API version `2026-03-11` (for `meeting_notes` block support) via its own client instance. Do NOT change the main codebase's Notion client version (`2025-09-03`).
+
+### 5-step architecture
+
+1. **Fetch** raw transcript from Notion `meeting_notes` block ← *implemented*
+2. **Load context** from Terminology DB + Org Chart DB + Google Calendar attendees ← *implemented (GCal has bugs, see below)*
+3. **LLM correction** (OpenAI) using dictionary + org chart + attendee context ← *MVP implemented*
+4. **Extract structured data** (action items, decisions, topics) ← *MVP implemented* (`--extract` flag)
+5. **Write back** corrected transcript + structured data to Notion — *not yet*
+
+### Running
+
+```bash
+# Fetch raw transcript only
+python -m src.transcript_pipeline <page_id> [--verbose]
+
+# Fetch + show terminology/org chart context
+python -m src.transcript_pipeline <page_id> --context
+
+# Full correction pipeline (fetch + context + LLM correction)
+python -m src.transcript_pipeline <page_id> --correct --openai
+
+# Correct + extract tasks (prints formatted task list to stdout)
+python -m src.transcript_pipeline <page_id> --extract --openai
+
+# Override model
+python -m src.transcript_pipeline <page_id> --extract --openai --model gpt-5-mini
+```
+
+**Flag chain:** `--extract` implies `--correct`, which implies `--context`. The `--openai` flag forces the OpenAI endpoint (needed when `OPENAI_BASE_URL` points to Gemini).
+
+### Google Calendar integration (WIP — has bugs to fix)
+
+The pipeline queries Google Calendar for meeting attendees to supplement Notion's incomplete list. Uses OAuth (`credentials.json` → `token.json`). Setup: Google Cloud project with Calendar API enabled + Desktop OAuth credentials.
+
+**Known bugs to fix next:**
+1. **Title mismatch**: Notion meeting titles include a timestamp (e.g., `NzX SteerCo 2026-04-08T12:00:00.000+02:00`) but Google Calendar titles don't (`NzX SteerCo`). The GCal search finds nothing because it searches the full string. **Fix needed:** strip the ISO datetime suffix from the title before searching GCal.
+2. **Empty displayName**: Google Calendar returns empty `displayName` for all attendees (only emails). The email-prefix-to-name matching fails when two people share a first name (e.g., two Juans). **Fix needed:** add an `Email` property to the Org Chart DB, or use a more robust matching strategy.
+3. **Date fallback**: The Notion "Date" property is empty for meeting pages — currently falls back to `created_time` which may not match the actual meeting time.
+
+### Task extraction
+
+The `--extract` flag runs a second LLM call on the corrected transcript to extract action items. Uses commitment-aware prompting (hard/conditional/soft/group commitments), org chart context for role-based assignee resolution, and meeting metadata for relative date resolution. Outputs: title, assignee, priority, due date, confidence level, and supporting transcript quote.
+
+### Key files
+
+| File | Responsibility |
+|------|---------------|
+| `src/transcript_pipeline/__main__.py` | CLI entry point |
+| `src/transcript_pipeline/fetch_transcript.py` | Find meeting_notes block, extract transcript, resolve attendees, extract page metadata |
+| `src/transcript_pipeline/transcript_client.py` | Factory: creates a Notion client with API v2026-03-11 |
+| `src/transcript_pipeline/context_loader.py` | Load terminology dictionary + org chart from Notion DBs |
+| `src/transcript_pipeline/transcript_corrector.py` | LLM-based transcript correction (OpenAI) |
+| `src/transcript_pipeline/task_extractor.py` | LLM-based action item extraction from corrected transcript |
+| `src/transcript_pipeline/gcal_attendees.py` | Google Calendar OAuth + attendee lookup |
+
+### Notion databases (env vars in `.env`)
+
+- **Terminology DB** (`TERMINOLOGY_DB_ID`): Term, Phonetic Variants, Category, Context, Active
+- **Org Chart DB** (`ORG_CHART_DB_ID`): Name, Role, Department, Seniority, Typical Topics, Active
+
+### Logfire
+
+Both LLM calls (correction + extraction) are tracked via logfire under service name `nzyme-transcript`. Token usage is automatic via `logfire.instrument_openai()`.
+
 ## Team Task Tracker: Parent Items vs Extracted Tasks
 
 The tracker contains two types of items — never delete or archive parent items.

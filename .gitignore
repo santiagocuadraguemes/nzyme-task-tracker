@@ -12,6 +12,10 @@ build/
 # Environment variables
 .env
 
+# Google OAuth credentials
+credentials.json
+token.json
+
 # IDE / editor settings
 .vscode/
 .idea/
