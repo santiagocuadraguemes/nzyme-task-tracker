@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -15,7 +14,10 @@ from googleapiclient.discovery import build
 
 logger = logging.getLogger(__name__)
 
-SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"]
+SCOPES = [
+    "https://www.googleapis.com/auth/calendar.readonly",
+    "https://www.googleapis.com/auth/directory.readonly",
+]
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 CREDENTIALS_FILE = PROJECT_ROOT / "credentials.json"
 TOKEN_FILE = PROJECT_ROOT / "token.json"
@@ -52,20 +54,28 @@ def _get_credentials() -> Credentials:
 def get_gcal_attendees(
     meeting_title: str,
     meeting_date: str,
-    org_chart_names: list[str] | None = None,
 ) -> list[dict[str, str]]:
     """Query Google Calendar for a meeting and return its attendees.
+
+    Uses Google Workspace directory (People API) to resolve emails to full names.
 
     Args:
         meeting_title: Meeting title to search for.
         meeting_date: ISO datetime string from Notion (e.g. "2026-04-08T12:00:00.000+02:00").
-        org_chart_names: Optional list of org chart names to help resolve emails to names.
 
     Returns:
         List of {"email": ..., "name": ...} dicts for all attendees including organizer.
     """
+    from src.transcript_pipeline.fetch_transcript import strip_title_datetime
+
     creds = _get_credentials()
     service = build("calendar", "v3", credentials=creds)
+
+    # Build email→name lookup from Google Workspace directory
+    directory = _build_directory_lookup(creds)
+
+    # Strip ISO datetime suffix that Notion appends to meeting titles
+    meeting_title = strip_title_datetime(meeting_title)
 
     # Parse the meeting date and search in a 24-hour window around it
     dt = datetime.fromisoformat(meeting_date)
@@ -98,11 +108,11 @@ def get_gcal_attendees(
 
     # Collect attendees
     gcal_attendees = event.get("attendees", [])
-    print(f"  Google Calendar attendees for '{event.get('summary')}':", file=sys.stderr)
+    logger.info("Google Calendar attendees for '%s':", event.get("summary"))
     for att in gcal_attendees:
-        print(f"    {att.get('email')} (displayName: {att.get('displayName', '—')})", file=sys.stderr)
+        logger.debug("  %s (displayName: %s)", att.get("email"), att.get("displayName", "—"))
     organizer = event.get("organizer", {})
-    print(f"    Organizer: {organizer.get('email')} (displayName: {organizer.get('displayName', '—')})", file=sys.stderr)
+    logger.debug("  Organizer: %s (displayName: %s)", organizer.get("email"), organizer.get("displayName", "—"))
 
     result: list[dict[str, str]] = []
     seen_emails: set[str] = set()
@@ -112,43 +122,52 @@ def get_gcal_attendees(
         if not email or email in seen_emails:
             continue
         seen_emails.add(email)
-        display_name = att.get("displayName", "")
-        # Try to match email prefix to org chart names
-        if not display_name and org_chart_names:
-            display_name = _match_email_to_name(email, org_chart_names)
+        display_name = att.get("displayName", "") or directory.get(email.lower(), "")
         result.append({"email": email, "name": display_name or email.split("@")[0]})
 
     # Include organizer if not already in attendee list
     org_email = organizer.get("email", "")
     if org_email and org_email not in seen_emails:
-        display_name = organizer.get("displayName", "")
-        if not display_name and org_chart_names:
-            display_name = _match_email_to_name(org_email, org_chart_names)
+        display_name = organizer.get("displayName", "") or directory.get(org_email.lower(), "")
         result.append({"email": org_email, "name": display_name or org_email.split("@")[0]})
 
     return result
 
 
-def _match_email_to_name(email: str, org_chart_names: list[str]) -> str:
-    """Try to match an email prefix to an org chart name.
+def _build_directory_lookup(creds: Credentials) -> dict[str, str]:
+    """Fetch Google Workspace directory and return {email: full_name} map."""
+    service = build("people", "v1", credentials=creds)
+    lookup: dict[str, str] = {}
+    page_token: str | None = None
 
-    Only matches when there's exactly one candidate — ambiguous matches
-    (e.g., two Juans) return empty to avoid picking the wrong person.
-    """
-    prefix = email.split("@")[0].lower()
-    candidates: list[str] = []
-    for name in org_chart_names:
-        name_lower = name.lower()
-        first_name = name_lower.split()[0] if name.split() else ""
-        if prefix == first_name or prefix in name_lower.replace(" ", ""):
-            candidates.append(name)
-
-    if len(candidates) == 1:
-        return candidates[0]
-
-    if len(candidates) > 1:
-        logger.info(
-            "Ambiguous email match: %s matches %d org chart names: %s — using email prefix instead",
-            email, len(candidates), candidates,
+    while True:
+        result = (
+            service.people()
+            .listDirectoryPeople(
+                readMask="names,emailAddresses",
+                sources=["DIRECTORY_SOURCE_TYPE_DOMAIN_PROFILE"],
+                pageSize=200,
+                pageToken=page_token,
+            )
+            .execute()
         )
-    return ""
+
+        for person in result.get("people", []):
+            names = person.get("names", [])
+            emails = person.get("emailAddresses", [])
+            if not names or not emails:
+                continue
+            full_name = names[0].get("displayName", "")
+            if not full_name:
+                continue
+            for email_entry in emails:
+                email = email_entry.get("value", "").lower()
+                if email:
+                    lookup[email] = full_name
+
+        page_token = result.get("nextPageToken")
+        if not page_token:
+            break
+
+    logger.info("Loaded %d people from Google Workspace directory", len(lookup))
+    return lookup

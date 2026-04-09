@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from typing import Any
 
@@ -87,6 +88,15 @@ def extract_page_metadata(page: dict[str, Any]) -> dict[str, str]:
         date = page.get("created_time", "")
 
     return {"title": title, "date": date}
+
+
+def strip_title_datetime(title: str) -> str:
+    """Strip trailing ISO datetime suffix from a Notion meeting title.
+
+    Notion titles include the event datetime (e.g. "NzX SteerCo 2026-04-08T12:00:00.000+02:00")
+    but Google Calendar titles don't. Strip the trailing ISO pattern so GCal search works.
+    """
+    return re.sub(r"\s+\d{4}-\d{2}-\d{2}(T\S+)?$", "", title).strip()
 
 
 def fetch_transcript(

@@ -146,7 +146,7 @@ A **separate module** (`src/transcript_pipeline/`) for post-processing Notion me
 ### 5-step architecture
 
 1. **Fetch** raw transcript from Notion `meeting_notes` block ← *implemented*
-2. **Load context** from Terminology DB + Org Chart DB + Google Calendar attendees ← *implemented (GCal has bugs, see below)*
+2. **Load context** from Terminology DB + Org Chart DB + Google Calendar attendees ← *implemented*
 3. **LLM correction** (OpenAI) using dictionary + org chart + attendee context ← *MVP implemented*
 4. **Extract structured data** (action items, decisions, topics) ← *MVP implemented* (`--extract` flag)
 5. **Write back** corrected transcript + structured data to Notion — *not yet*
@@ -168,18 +168,24 @@ python -m src.transcript_pipeline <page_id> --extract --openai
 
 # Override model
 python -m src.transcript_pipeline <page_id> --extract --openai --model gpt-5-mini
+
+# Test GCal attendee lookup only (no transcript fetch)
+python -m src.transcript_pipeline <page_id> --gcal
+python -m src.transcript_pipeline <page_id> --gcal --verbose
 ```
 
 **Flag chain:** `--extract` implies `--correct`, which implies `--context`. The `--openai` flag forces the OpenAI endpoint (needed when `OPENAI_BASE_URL` points to Gemini).
 
-### Google Calendar integration (WIP — has bugs to fix)
+### Google Calendar integration
 
-The pipeline queries Google Calendar for meeting attendees to supplement Notion's incomplete list. Uses OAuth (`credentials.json` → `token.json`). Setup: Google Cloud project with Calendar API enabled + Desktop OAuth credentials.
+GCal is the **authoritative attendee source** when a matching calendar event exists. The pipeline searches GCal by cleaned meeting title (ISO datetime suffix stripped via `strip_title_datetime()`), and when found, **replaces** Notion's attendee list entirely. Falls back to Notion attendees only when no GCal event is found.
 
-**Known bugs to fix next:**
-1. **Title mismatch**: Notion meeting titles include a timestamp (e.g., `NzX SteerCo 2026-04-08T12:00:00.000+02:00`) but Google Calendar titles don't (`NzX SteerCo`). The GCal search finds nothing because it searches the full string. **Fix needed:** strip the ISO datetime suffix from the title before searching GCal.
-2. **Empty displayName**: Google Calendar returns empty `displayName` for all attendees (only emails). The email-prefix-to-name matching fails when two people share a first name (e.g., two Juans). **Fix needed:** add an `Email` property to the Org Chart DB, or use a more robust matching strategy.
-3. **Date fallback**: The Notion "Date" property is empty for meeting pages — currently falls back to `created_time` which may not match the actual meeting time.
+Name resolution uses the **Google People API** (`listDirectoryPeople`) to fetch the full Workspace directory, building an `{email → full_name}` lookup. This is reliable across the whole org — no email-prefix guessing.
+
+**Setup:** Google Cloud project with Calendar API + People API enabled + Desktop OAuth credentials (`credentials.json` → `token.json`). OAuth scopes: `calendar.readonly` + `directory.readonly`.
+
+**Known issue:**
+- **Date fallback**: The Notion "Date" property is empty for some meeting pages — currently falls back to `created_time` which may not match the actual meeting time.
 
 ### Task extraction
 
@@ -190,12 +196,12 @@ The `--extract` flag runs a second LLM call on the corrected transcript to extra
 | File | Responsibility |
 |------|---------------|
 | `src/transcript_pipeline/__main__.py` | CLI entry point |
-| `src/transcript_pipeline/fetch_transcript.py` | Find meeting_notes block, extract transcript, resolve attendees, extract page metadata |
+| `src/transcript_pipeline/fetch_transcript.py` | Find meeting_notes block, extract transcript, resolve attendees, page metadata, `strip_title_datetime()` |
 | `src/transcript_pipeline/transcript_client.py` | Factory: creates a Notion client with API v2026-03-11 |
 | `src/transcript_pipeline/context_loader.py` | Load terminology dictionary + org chart from Notion DBs |
 | `src/transcript_pipeline/transcript_corrector.py` | LLM-based transcript correction (OpenAI) |
 | `src/transcript_pipeline/task_extractor.py` | LLM-based action item extraction from corrected transcript |
-| `src/transcript_pipeline/gcal_attendees.py` | Google Calendar OAuth + attendee lookup |
+| `src/transcript_pipeline/gcal_attendees.py` | Google Calendar OAuth + attendee lookup + People API directory resolution |
 
 ### Notion databases (env vars in `.env`)
 
