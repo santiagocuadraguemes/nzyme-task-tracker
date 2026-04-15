@@ -17,6 +17,7 @@ Globals:
         SYSTEM_PROMPT_PAGE_ID: !Ref SystemPromptPageId
         USER_PROMPT_PAGE_ID: !Ref UserPromptPageId
         MEETING_TEMPLATE_PAGE_ID: !Ref MeetingTemplatePageId
+        INJECT_TEMPLATE: !Ref InjectTemplate
         WEBHOOK_PATH_TOKEN: !Ref WebhookPathToken
         IDLE_MINUTES: !Ref IdleMinutes
         LOG_LEVEL: !Ref LogLevel
@@ -44,6 +45,9 @@ Parameters:
   MeetingTemplatePageId:
     Type: String
     Default: ''
+  InjectTemplate:
+    Type: String
+    Default: 'true'
   WebhookPathToken:
     Type: String
     NoEcho: true

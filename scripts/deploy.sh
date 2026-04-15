@@ -36,6 +36,7 @@ sam deploy \
         "SystemPromptPageId=${SYSTEM_PROMPT_PAGE_ID}" \
         "UserPromptPageId=${USER_PROMPT_PAGE_ID}" \
         "MeetingTemplatePageId=${MEETING_TEMPLATE_PAGE_ID:-}" \
+        "InjectTemplate=${INJECT_TEMPLATE:-true}" \
         "WebhookPathToken=${WEBHOOK_PATH_TOKEN}" \
         "IdleMinutes=${IDLE_MINUTES:-3}" \
         "LogLevel=${LOG_LEVEL:-INFO}" \

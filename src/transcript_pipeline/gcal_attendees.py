@@ -11,6 +11,7 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
+from rapidfuzz import fuzz
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,8 @@ SCOPES = [
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 CREDENTIALS_FILE = PROJECT_ROOT / "credentials.json"
 TOKEN_FILE = PROJECT_ROOT / "token.json"
+
+MIN_FUZZY_SCORE = 60
 
 
 def _get_credentials() -> Credentials:
@@ -51,11 +54,96 @@ def _get_credentials() -> Credentials:
     return creds
 
 
+def _parse_event_bounds(event: dict[str, Any]) -> tuple[datetime, datetime] | None:
+    """Return (start, end) as tz-aware datetimes, or None for all-day/missing bounds."""
+    start_dt = event.get("start", {}).get("dateTime")
+    end_dt = event.get("end", {}).get("dateTime")
+    if not start_dt or not end_dt:
+        return None
+    try:
+        return (datetime.fromisoformat(start_dt), datetime.fromisoformat(end_dt))
+    except ValueError:
+        return None
+
+
+def _event_contains(notion_dt: datetime, event: dict[str, Any]) -> bool:
+    """True if notion_dt falls within the event's [start, end] interval."""
+    bounds = _parse_event_bounds(event)
+    if bounds is None:
+        return False
+    start, end = bounds
+    return start <= notion_dt <= end
+
+
+def _pick_best_event(
+    events: list[dict[str, Any]],
+    cleaned_title: str,
+    notion_dt: datetime,
+) -> dict[str, Any] | None:
+    """Pick the best GCal event for the given Notion meeting.
+
+    Prefers events whose [start, end] contains notion_dt. Ties broken by
+    rapidfuzz token_set_ratio against the cleaned title. If no event contains
+    the timestamp, still returns the highest-scoring event if its score is at
+    least MIN_FUZZY_SCORE; otherwise returns None.
+    """
+    if not events:
+        return None
+
+    containing = [e for e in events if _event_contains(notion_dt, e)]
+    pool = containing if containing else events
+
+    def score(event: dict[str, Any]) -> float:
+        summary = (event.get("summary") or "").lower()
+        return fuzz.token_set_ratio(cleaned_title.lower(), summary)
+
+    best = max(pool, key=score)
+    if containing:
+        return best
+    return best if score(best) >= MIN_FUZZY_SCORE else None
+
+
+def _flatten_attendees(
+    event: dict[str, Any],
+    directory: dict[str, str],
+) -> list[dict[str, str]]:
+    """Resolve an event's attendees + organizer to {email, name} dicts."""
+    result: list[dict[str, str]] = []
+    seen_emails: set[str] = set()
+
+    for att in event.get("attendees", []):
+        email = att.get("email", "")
+        if not email or email in seen_emails:
+            continue
+        seen_emails.add(email)
+        display_name = att.get("displayName", "") or directory.get(email.lower(), "")
+        result.append({"email": email, "name": display_name or email.split("@")[0]})
+
+    organizer = event.get("organizer", {})
+    org_email = organizer.get("email", "")
+    if org_email and org_email not in seen_emails:
+        display_name = organizer.get("displayName", "") or directory.get(
+            org_email.lower(), ""
+        )
+        result.append(
+            {"email": org_email, "name": display_name or org_email.split("@")[0]}
+        )
+
+    return result
+
+
 def get_gcal_attendees(
     meeting_title: str,
     meeting_date: str,
 ) -> list[dict[str, str]]:
     """Query Google Calendar for a meeting and return its attendees.
+
+    Matches in two passes:
+    1. Keyword search (q=<title>) with the current ±12 h window, best-ranked.
+    2. Time-containment fallback: re-query without q=, pick the event whose
+       [start, end] contains the Notion timestamp. Title drift between Notion
+       and GCal (e.g. "Commercial Weekly - WV" vs "Int.call seguimiento
+       comercial WV") is handled because matching falls through to time.
 
     Uses Google Workspace directory (People API) to resolve emails to full names.
 
@@ -70,68 +158,78 @@ def get_gcal_attendees(
 
     creds = _get_credentials()
     service = build("calendar", "v3", credentials=creds)
-
-    # Build email→name lookup from Google Workspace directory
     directory = _build_directory_lookup(creds)
 
-    # Strip ISO datetime suffix that Notion appends to meeting titles
-    meeting_title = strip_title_datetime(meeting_title)
+    cleaned_title = strip_title_datetime(meeting_title)
+    notion_dt = datetime.fromisoformat(meeting_date)
+    time_min = (notion_dt - timedelta(hours=12)).isoformat()
+    time_max = (notion_dt + timedelta(hours=12)).isoformat()
 
-    # Parse the meeting date and search in a 24-hour window around it
-    dt = datetime.fromisoformat(meeting_date)
-    time_min = (dt - timedelta(hours=12)).isoformat()
-    time_max = (dt + timedelta(hours=12)).isoformat()
-
-    logger.info("Searching Google Calendar for '%s' around %s", meeting_title, meeting_date)
-
-    events_result = (
+    # Pass 1: keyword search
+    logger.info(
+        "Searching Google Calendar (keyword) for '%s' around %s",
+        cleaned_title,
+        meeting_date,
+    )
+    pass1 = (
         service.events()
         .list(
             calendarId="primary",
-            q=meeting_title,
+            q=cleaned_title,
             timeMin=time_min,
             timeMax=time_max,
             singleEvents=True,
             orderBy="startTime",
         )
         .execute()
+        .get("items", [])
     )
+    match = _pick_best_event(pass1, cleaned_title, notion_dt)
+    if match is not None:
+        logger.info(
+            "Matched by keyword: '%s' (%s)",
+            match.get("summary"),
+            match.get("start", {}).get("dateTime"),
+        )
+        return _flatten_attendees(match, directory)
 
-    events = events_result.get("items", [])
-    if not events:
-        logger.warning("No Google Calendar event found for '%s'", meeting_title)
-        return []
+    # Pass 2: time-containment fallback
+    logger.info(
+        "No keyword match; falling back to time-range scan for '%s'", cleaned_title
+    )
+    pass2 = (
+        service.events()
+        .list(
+            calendarId="primary",
+            timeMin=time_min,
+            timeMax=time_max,
+            singleEvents=True,
+            orderBy="startTime",
+        )
+        .execute()
+        .get("items", [])
+    )
+    containing = [e for e in pass2 if _event_contains(notion_dt, e)]
+    match = _pick_best_event(containing, cleaned_title, notion_dt)
+    if match is not None:
+        logger.info(
+            "Matched by time containment: '%s' (%s)",
+            match.get("summary"),
+            match.get("start", {}).get("dateTime"),
+        )
+        return _flatten_attendees(match, directory)
 
-    # Pick the best match (first result from search)
-    event = events[0]
-    logger.info("Found event: '%s' (%s)", event.get("summary"), event.get("start", {}).get("dateTime"))
-
-    # Collect attendees
-    gcal_attendees = event.get("attendees", [])
-    logger.info("Google Calendar attendees for '%s':", event.get("summary"))
-    for att in gcal_attendees:
-        logger.debug("  %s (displayName: %s)", att.get("email"), att.get("displayName", "—"))
-    organizer = event.get("organizer", {})
-    logger.debug("  Organizer: %s (displayName: %s)", organizer.get("email"), organizer.get("displayName", "—"))
-
-    result: list[dict[str, str]] = []
-    seen_emails: set[str] = set()
-
-    for att in gcal_attendees:
-        email = att.get("email", "")
-        if not email or email in seen_emails:
-            continue
-        seen_emails.add(email)
-        display_name = att.get("displayName", "") or directory.get(email.lower(), "")
-        result.append({"email": email, "name": display_name or email.split("@")[0]})
-
-    # Include organizer if not already in attendee list
-    org_email = organizer.get("email", "")
-    if org_email and org_email not in seen_emails:
-        display_name = organizer.get("displayName", "") or directory.get(org_email.lower(), "")
-        result.append({"email": org_email, "name": display_name or org_email.split("@")[0]})
-
-    return result
+    considered = [
+        f"'{e.get('summary')}' @ {e.get('start', {}).get('dateTime') or e.get('start', {}).get('date')}"
+        for e in pass2
+    ]
+    logger.warning(
+        "No Google Calendar event matched '%s' at %s. Considered: %s",
+        cleaned_title,
+        notion_dt,
+        considered,
+    )
+    return []
 
 
 def _build_directory_lookup(creds: Credentials) -> dict[str, str]:

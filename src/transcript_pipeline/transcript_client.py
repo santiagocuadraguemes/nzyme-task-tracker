@@ -26,3 +26,15 @@ def create_transcript_client() -> NotionClientWrapper:
         notion_version=TRANSCRIPT_API_VERSION,
     )
     return NotionClientWrapper(notion)
+
+
+def create_main_client() -> NotionClientWrapper:
+    """Create a NotionClientWrapper using the default API version.
+
+    Used for writing to Team Task Tracker, which does not need
+    the 2026-03-11 meeting_notes block support.
+    """
+    load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
+
+    notion = NotionClient(auth=os.environ["NOTION_API_TOKEN"])
+    return NotionClientWrapper(notion)

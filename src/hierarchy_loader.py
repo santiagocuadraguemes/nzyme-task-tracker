@@ -27,7 +27,14 @@ class HierarchyLoader:
 
         response = self._client.query_database(
             database_id=self._db_id,
-            filter={"property": "Status", "status": {"does_not_equal": "Done"}},
+            filter={
+                "and": [
+                    {"property": "Status", "status": {"does_not_equal": "Done"}},
+                    # Exclude extracted tasks — only keep organizational/hierarchy items.
+                    # Extracted tasks have "Meeting - Relation" set; hierarchy items don't.
+                    {"property": "Meeting - Relation", "relation": {"is_empty": True}},
+                ],
+            },
         )
         pages = response.get("results", [])
 

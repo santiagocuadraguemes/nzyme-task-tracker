@@ -33,6 +33,25 @@ def extract_transcript_block_id(mn_block: dict[str, Any]) -> str:
         ) from exc
 
 
+def fetch_notes_text(
+    mn_block: dict[str, Any],
+    client: NotionClientWrapper,
+) -> str:
+    """Fetch human-written notes from the meeting_notes block.
+
+    Returns empty string if no notes block exists or notes are empty.
+    """
+    notes_block_id = (
+        mn_block.get("meeting_notes", {}).get("children", {}).get("notes_block_id")
+    )
+    if not notes_block_id:
+        return ""
+    notes_blocks = client.get_block_children(notes_block_id)
+    if not notes_blocks:
+        return ""
+    return blocks_to_text(notes_blocks, client)
+
+
 def extract_attendee_ids(mn_block: dict[str, Any]) -> list[str]:
     """Extract attendee user IDs from a meeting_notes block.
 
@@ -65,6 +84,28 @@ def build_user_lookup(client: NotionClientWrapper) -> dict[str, str]:
     return lookup
 
 
+def extract_governance_attendees(page: dict[str, Any]) -> list[dict[str, str]]:
+    """Read the 'Governance: Edit & View Access' people property from a page.
+
+    Used as a last-resort attendee fallback when Google Calendar finds no event
+    and Notion's meeting_notes block has no attendees. People entries on this
+    property already carry `id` and `name` inline, so no user-lookup call is
+    needed.
+    """
+    prop = page.get("properties", {}).get("Governance: Edit & View Access", {})
+    people = prop.get("people", []) if prop.get("type") == "people" else []
+    result: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for person in people:
+        uid = person.get("id", "")
+        if not uid or uid in seen:
+            continue
+        seen.add(uid)
+        name = person.get("name") or person.get("person", {}).get("email", uid)
+        result.append({"id": uid, "name": name})
+    return result
+
+
 def extract_page_metadata(page: dict[str, Any]) -> dict[str, str]:
     """Extract meeting title and date from a Notion page's properties.
 
@@ -87,7 +128,17 @@ def extract_page_metadata(page: dict[str, Any]) -> dict[str, str]:
     if not date:
         date = page.get("created_time", "")
 
-    return {"title": title, "date": date}
+    # Creator — for assignee fallback
+    creator = page.get("created_by", {})
+    created_by_id = creator.get("id", "")
+    created_by_name = creator.get("name", "")
+
+    return {
+        "title": title,
+        "date": date,
+        "created_by_id": created_by_id,
+        "created_by_name": created_by_name,
+    }
 
 
 def strip_title_datetime(title: str) -> str:
@@ -103,17 +154,20 @@ def fetch_transcript(
     page_id: str,
     client: NotionClientWrapper,
     verbose: bool = False,
-) -> tuple[str, list[dict[str, str]], dict[str, str]]:
-    """Fetch raw transcript text, resolved attendees, and page metadata.
+) -> tuple[str, list[dict[str, str]], dict[str, str], str, list[dict[str, str]]]:
+    """Fetch raw transcript text, resolved attendees, page metadata, notes, and
+    governance-access attendees.
 
     Returns:
-        (transcript_text, attendees, metadata) where attendees is a list of
-        {"id": user_id, "name": display_name} dicts, and metadata is
-        {"title": ..., "date": ...}.
+        (transcript_text, attendees, metadata, notes_text, governance_attendees).
+        `governance_attendees` comes from the page's "Governance: Edit & View
+        Access" people property and is meant as a last-resort fallback when
+        neither GCal nor the meeting_notes block provides attendees.
     """
-    # 1. Get page metadata (title, date)
+    # 1. Get page metadata (title, date) + governance attendees
     page = client.get_page(page_id)
     metadata = extract_page_metadata(page)
+    governance_attendees = extract_governance_attendees(page)
 
     # 2. Get all blocks on the page
     blocks = client.get_block_children(page_id)
@@ -139,9 +193,12 @@ def fetch_transcript(
 
     if not transcript_blocks:
         print("WARNING: Transcript block has no children (recording may not be processed yet).", file=sys.stderr)
-        return ("", [], metadata)
+        return ("", [], metadata, "", governance_attendees)
 
     transcript_text = blocks_to_text(transcript_blocks, client)
+
+    # 3b. Fetch human-written notes (optional — some meetings have none)
+    notes_text = fetch_notes_text(mn_block, client)
 
     # 4. Resolve attendees
     attendee_ids = extract_attendee_ids(mn_block)
@@ -154,4 +211,4 @@ def fetch_transcript(
     else:
         attendees = []
 
-    return (transcript_text, attendees, metadata)
+    return (transcript_text, attendees, metadata, notes_text, governance_attendees)

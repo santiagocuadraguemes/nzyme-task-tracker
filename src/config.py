@@ -13,6 +13,7 @@ class SyncConfig(BaseModel):
 
     notion_api_token: str = Field(..., description="Notion integration token")
     openai_api_key: str = Field(..., description="OpenAI API key")
+    gemini_api_key: str | None = Field(None, description="Google Gemini API key (used when base_url points to Gemini)")
     openai_model: str = Field("gpt-4.1", description="OpenAI model name")
     # TEMPORARY: base_url allows using Gemini's OpenAI-compatible endpoint for testing.
     # Remove once we switch back to OpenAI (target model: gpt-5-mini).
@@ -27,6 +28,7 @@ class SyncConfig(BaseModel):
     dry_run: bool = Field(False, description="Log tasks but don't write to Notion")
     include_ai_notes: bool = Field(False, description="Include AI-generated meeting notes in extraction")
     meeting_template_page_id: str | None = Field(None, description="Notion template page ID for meeting notes")
+    inject_template: bool = Field(True, description="Whether to inject the meeting note template into new pages")
     watch_interval: int = Field(10, description="Seconds between template injection checks in watch mode")
     sync_interval: int = Field(300, description="Seconds between sync runs in watch mode")
     # Deal context (Investment Team)
@@ -36,6 +38,7 @@ class SyncConfig(BaseModel):
     # Transcript pipeline
     terminology_db_id: str | None = Field(None, description="Terminology Dictionary DB ID (transcript correction)")
     org_chart_db_id: str | None = Field(None, description="Org Chart DB ID (transcript speaker identification)")
+    classifier_prompt_page_id: str | None = Field(None, description="Notion page ID for transcript classifier prompt")
     # Webhook / Lambda mode
     webhook_path_token: str | None = Field(None, description="Secret URL token for webhook auth")
     idle_minutes: int = Field(3, description="Minutes of inactivity before AI extraction triggers")
@@ -49,6 +52,7 @@ def load_config() -> SyncConfig:
     return SyncConfig(
         notion_api_token=os.environ["NOTION_API_TOKEN"],
         openai_api_key=os.environ["OPENAI_API_KEY"],
+        gemini_api_key=os.getenv("GEMINI_API_KEY"),
         openai_model=os.getenv("OPENAI_MODEL", "gpt-4.1"),
         openai_base_url=os.getenv("OPENAI_BASE_URL"),  # TEMPORARY: for Gemini testing
         meeting_notes_db_id=os.environ["MEETING_NOTES_DB_ID"],
@@ -61,10 +65,12 @@ def load_config() -> SyncConfig:
         dry_run=os.getenv("DRY_RUN", "false").lower() in ("true", "1", "yes"),
         include_ai_notes=os.getenv("INCLUDE_AI_NOTES", "false").lower() in ("true", "1", "yes"),
         meeting_template_page_id=os.getenv("MEETING_TEMPLATE_PAGE_ID"),
+        inject_template=os.getenv("INJECT_TEMPLATE", "true").lower() in ("true", "1", "yes"),
         deal_workplans_db_id=os.getenv("DEAL_WORKPLANS_DB_ID"),
         semantic_dedup_threshold=float(os.getenv("SEMANTIC_DEDUP_THRESHOLD", "0.80")),
         terminology_db_id=os.getenv("TERMINOLOGY_DB_ID"),
         org_chart_db_id=os.getenv("ORG_CHART_DB_ID"),
+        classifier_prompt_page_id=os.getenv("CLASSIFIER_PROMPT_PAGE_ID"),
         watch_interval=int(os.getenv("WATCH_INTERVAL", "10")),
         sync_interval=int(os.getenv("SYNC_INTERVAL", "300")),
         webhook_path_token=os.getenv("WEBHOOK_PATH_TOKEN"),

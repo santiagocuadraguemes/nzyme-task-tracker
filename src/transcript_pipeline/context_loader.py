@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import unicodedata
 from typing import Any
 
 from src.notion_client_wrapper import NotionClientWrapper
@@ -80,38 +81,100 @@ def load_org_chart(client: NotionClientWrapper, db_id: str) -> str:
           Role: Managing Partner & CIO
           Typical topics: deal execution, fundraising, portfolio
     """
-    resp = client.query_database(
-        database_id=db_id,
-        filter={"property": "Active", "checkbox": {"equals": True}},
-    )
-    rows = resp.get("results", [])
+    rows = load_org_chart_rows(client, db_id)
     if not rows:
         return ""
 
     entries: list[str] = []
     for row in rows:
-        props = row.get("properties", {})
-        name = _get_title(props.get("Name", {}))
-        if not name:
-            continue
-
-        seniority = _get_select(props.get("Seniority", {}))
-        department = _get_select(props.get("Department", {}))
-        role = _get_text(props.get("Role", {}))
-        topics = _get_multi_select(props.get("Typical Topics", {}))
-
-        # Header line: Person: Name — Seniority, Department
-        header = f"Person: {name}"
-        qualifiers = [q for q in (seniority, department) if q]
+        header = f"Person: {row['name']}"
+        qualifiers = [q for q in (row["seniority"], row["department"]) if q]
         if qualifiers:
             header += f" — {', '.join(qualifiers)}"
 
         lines = [header]
-        if role:
-            lines.append(f"  Role: {role}")
-        if topics:
-            lines.append(f"  Typical topics: {', '.join(topics)}")
+        if row["role"]:
+            lines.append(f"  Role: {row['role']}")
+        if row["topics"]:
+            lines.append(f"  Typical topics: {', '.join(row['topics'])}")
 
         entries.append("\n".join(lines))
 
     return "\n\n".join(entries)
+
+
+def load_org_chart_rows(
+    client: NotionClientWrapper, db_id: str
+) -> list[dict[str, Any]]:
+    """Load active members from the Org Chart as structured dicts.
+
+    Returns list of {"name", "seniority", "department", "role", "topics"}.
+    """
+    resp = client.query_database(
+        database_id=db_id,
+        filter={"property": "Active", "checkbox": {"equals": True}},
+    )
+    results = resp.get("results", [])
+    rows: list[dict[str, Any]] = []
+    for r in results:
+        props = r.get("properties", {})
+        name = _get_title(props.get("Name", {}))
+        if not name:
+            continue
+        rows.append({
+            "name": name,
+            "seniority": _get_select(props.get("Seniority", {})),
+            "department": _get_select(props.get("Department", {})),
+            "role": _get_text(props.get("Role", {})),
+            "topics": _get_multi_select(props.get("Typical Topics", {})),
+        })
+    return rows
+
+
+def _normalize(name: str) -> str:
+    """Lowercase, strip accents and whitespace for fuzzy name matching."""
+    name = name.strip().lower()
+    # Decompose accented chars and strip combining marks
+    nfkd = unicodedata.normalize("NFKD", name)
+    return "".join(c for c in nfkd if not unicodedata.combining(c))
+
+
+def _match_attendee_to_org(
+    attendee_name: str, org_rows: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    """Find the best org chart match for an attendee name."""
+    norm_att = _normalize(attendee_name)
+    for row in org_rows:
+        norm_org = _normalize(row["name"])
+        # Exact match or one is a substring of the other
+        if norm_att == norm_org or norm_att in norm_org or norm_org in norm_att:
+            return row
+    return None
+
+
+def build_enriched_attendee_str(
+    attendees: list[dict[str, str]],
+    org_chart_rows: list[dict[str, Any]],
+) -> str:
+    """Build a structured attendee string with inline role context.
+
+    Returns something like:
+        - Santiago Cuadra Güemes [Technology — Head of Technology]
+          Typical topics: automation, Notion integration
+        - Reyes Rubio [Investment — Managing Partner & CIO]
+          Typical topics: deal execution, fundraising
+        - External Guest (no org chart match)
+    """
+    lines: list[str] = []
+    for att in attendees:
+        name = att["name"]
+        match = _match_attendee_to_org(name, org_chart_rows)
+        if match:
+            qualifiers = [q for q in (match["seniority"], match["department"]) if q]
+            annotation = f" [{' — '.join(qualifiers)}]" if qualifiers else ""
+            lines.append(f"- {name}{annotation}")
+            if match["topics"]:
+                lines.append(f"  Typical topics: {', '.join(match['topics'])}")
+        else:
+            lines.append(f"- {name}")
+    return "\n".join(lines)

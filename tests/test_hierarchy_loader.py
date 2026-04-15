@@ -109,10 +109,16 @@ class TestHierarchyLoader:
         assert "has_children" not in result[0]
         assert "has_children" not in result[0]["children"][0]
 
-    def test_filters_done_tasks(self):
+    def test_filters_done_tasks_and_extracted_tasks(self):
         client = self._make_client([])
         loader = HierarchyLoader(client, "db-tracker")
         loader.load()
 
         call_kwargs = client.query_database.call_args
-        assert call_kwargs.kwargs["filter"]["property"] == "Status"
+        db_filter = call_kwargs.kwargs["filter"]
+        # Compound filter: exclude Done tasks + exclude extracted tasks (with Meeting - Relation)
+        assert "and" in db_filter
+        conditions = db_filter["and"]
+        props = [c["property"] for c in conditions]
+        assert "Status" in props
+        assert "Meeting - Relation" in props

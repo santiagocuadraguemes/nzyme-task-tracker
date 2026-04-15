@@ -7,6 +7,8 @@ import logging
 
 from openai import OpenAI
 
+from src.transcript_pipeline.token_usage import log_token_usage
+
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """\
@@ -21,8 +23,35 @@ Classify each commitment type you find:
 - **Hard commitment**: "I will do X by Friday" → extract as action item, confidence: high
 - **Conditional commitment**: "If Y happens, I'll do X" → extract with condition noted, confidence: medium
 - **Soft delegation**: "Maybe Sarah could look at this" → extract with named assignee, confidence: medium
-- **Group commitment**: "We should do X" / "We need to do X" → extract, assign to "Team", confidence: low
+- **Group commitment**: "We should do X" / "We need to do X" → extract with confidence: low. \
+Try to identify the 2-3 most likely responsible people based on topic alignment \
+and roles. Use comma-separated names (e.g., "Santiago, Jacob"). Only use "Team" \
+as a last resort when no specific people can be inferred.
 - **Vague / follow-up**: "Let's circle back on X" → do NOT extract as a task
+
+## Speaker & Assignee Resolution (CRITICAL)
+
+Before assigning any task, determine the assignee using these signals (priority order):
+1. Explicit speaker label from the transcript ("Santiago:" prefix)
+2. Topic alignment: match the task's subject to each attendee's role, department, and typical_topics
+3. Conversational flow: who was addressed in the preceding sentences?
+
+**CONSISTENCY**: If multiple tasks relate to the same domain or initiative (e.g., several \
+Notion-related tasks, or several deal-related tasks), they should be assigned to the \
+same person unless there is explicit evidence of different assignees. Group related \
+tasks mentally before assigning.
+
+For each task, include a "speaker_reasoning" field (1 sentence) explaining your assignment logic.
+NEVER default all ambiguous tasks to the same person — use topic alignment to distribute.
+
+## Human Notes (HIGH PRIORITY)
+
+If human notes are provided, they represent the note-taker's ground truth understanding \
+of what happened in the meeting. Use them to:
+- Confirm or disambiguate task assignments
+- Identify action items the note-taker explicitly captured
+- Resolve speaker identity when transcript labels are ambiguous
+Human notes take priority over inferences from the transcript when they conflict.
 
 ## Rules
 
@@ -31,10 +60,12 @@ Classify each commitment type you find:
 - If you cannot find supporting evidence in the transcript, do NOT create the task
 - The transcript may be in English, Spanish, or mixed — extract tasks regardless of language
 - Write task titles in the same language they were discussed in
-- If multiple people are assigned the same task, create separate tasks for each
+- If multiple people are responsible for the same task, list them comma-separated in the \
+assignee field (e.g., "Santiago, Jacob") — do NOT create separate tasks
 - If a speaker refers to themselves ("I'll do it", "yo me encargo"), use speaker attribution \
 or attendee context to determine who they are
-- Use the org chart to resolve role-based references ("the tech team should...", "operations needs to...")
+- Use the org chart and attendee roles to resolve role-based references \
+("the tech team should...", "operations needs to...")
 
 ## Output
 
@@ -42,11 +73,13 @@ Return a JSON object: {{"tasks": [...]}}
 
 Each task object:
 - "title": clear, actionable description (one sentence)
-- "assignee": person responsible (name from attendees/org chart, or "Team" if group commitment)
+- "assignee": person(s) responsible — comma-separated names from attendees/org chart. \
+Only use "Team" if absolutely no specific person can be inferred.
 - "priority": "High" | "Medium" | "Low" based on urgency signals
 - "due_date": ISO date (YYYY-MM-DD) if a deadline is mentioned, otherwise null
 - "confidence": "high" | "medium" | "low"
 - "context": short transcript quote (1-2 sentences) that justifies this task
+- "speaker_reasoning": 1 sentence explaining why this task is assigned to this person
 
 If no tasks are found, return {{"tasks": []}}.
 """
@@ -72,14 +105,18 @@ class TaskExtractor:
         terminology: str = "",
         meeting_title: str = "",
         meeting_date: str = "",
+        enriched_attendee_str: str = "",
+        notes_text: str = "",
     ) -> list[dict]:
         """Extract tasks from a corrected transcript.
 
         Returns:
-            List of dicts with keys: title, assignee, priority, due_date, confidence, context.
+            List of dicts with keys: title, assignee, priority, due_date,
+            confidence, context, speaker_reasoning.
         """
-        attendee_names = [a["name"] for a in attendees]
-        attendee_str = ", ".join(attendee_names) if attendee_names else "(unknown)"
+        if not enriched_attendee_str:
+            attendee_names = [a["name"] for a in attendees]
+            enriched_attendee_str = ", ".join(attendee_names) if attendee_names else "(unknown)"
 
         sections = []
 
@@ -96,7 +133,12 @@ class TaskExtractor:
                 f"('tomorrow', 'next week', 'el viernes') relative to this date."
             )
 
-        sections.append(f"=== MEETING ATTENDEES ===\n{attendee_str}")
+        sections.append(f"=== MEETING ATTENDEES ===\n{enriched_attendee_str}")
+
+        if notes_text:
+            sections.append(
+                f"=== HUMAN NOTES (high-priority context from the note-taker) ===\n{notes_text}"
+            )
 
         if org_chart:
             sections.append(f"=== ORG CHART (team roles & responsibilities) ===\n{org_chart}")
@@ -125,6 +167,9 @@ class TaskExtractor:
         )
 
         raw = response.choices[0].message.content or "{}"
+
+        log_token_usage(self._model, response.usage)
+
         data = json.loads(raw)
         tasks = data.get("tasks", [])
 

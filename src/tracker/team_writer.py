@@ -72,9 +72,10 @@ class TeamTaskTrackerWriter:
         }
 
         if task.get("assignee_id"):
-            properties["Assignee (edit access)"] = {
-                "people": [{"id": task["assignee_id"]}]
-            }
+            ids = task["assignee_id"] if isinstance(task["assignee_id"], list) else [task["assignee_id"]]
+            people = [{"id": uid} for uid in ids if uid]
+            if people:
+                properties["Assignee (edit access)"] = {"people": people}
 
         if task.get("due_date"):
             properties["Due Date"] = {

@@ -312,6 +312,9 @@ def _inject_templates(
 
 def run_inject_templates(config: SyncConfig, client: NotionClientWrapper) -> None:
     """Inject meeting note template into new pages (standalone command)."""
+    if not config.inject_template:
+        logger.info("INJECT_TEMPLATE disabled — skipping template injection")
+        return
     if not config.meeting_template_page_id:
         logger.warning("MEETING_TEMPLATE_PAGE_ID not set — skipping template injection")
         return
@@ -573,6 +576,9 @@ def run_inject_templates_for_page(
 
     Returns True if the template was injected, False if skipped.
     """
+    if not config.inject_template:
+        logger.info("INJECT_TEMPLATE disabled — skipping template injection")
+        return False
     if not config.meeting_template_page_id:
         logger.warning("MEETING_TEMPLATE_PAGE_ID not set — skipping template injection")
         return False
