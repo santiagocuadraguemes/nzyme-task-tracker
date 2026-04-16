@@ -79,8 +79,8 @@ class NotionClientWrapper:
     def _resolve_data_source_id(self, database_id: str) -> str:
         """Resolve a database ID to its primary data source ID.
 
-        notion-client v3 / Notion API 2025-09-03 replaced databases.query
-        with data_sources.query. This method fetches the database schema
+        Notion API 2025-09-03+ replaced databases.query with
+        data_sources.query. This method fetches the database schema
         to find the data source ID, then caches it.
         """
         if database_id in self._ds_id_cache:
@@ -216,7 +216,7 @@ class NotionClientWrapper:
         )
 
     def retrieve_database(self, database_id: str) -> dict[str, Any]:
-        """Retrieve a Notion database by ID (no properties in API 2025-09-03)."""
+        """Retrieve a Notion database by ID."""
         return self._call_with_retry(
             self._client.databases.retrieve, database_id=database_id
         )

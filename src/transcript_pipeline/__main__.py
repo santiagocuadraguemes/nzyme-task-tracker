@@ -8,173 +8,20 @@ import sys
 
 import logfire
 
+from dotenv import load_dotenv
+from notion_client import Client as NotionClient
+from pathlib import Path
+
+from src.notion_client_wrapper import NotionClientWrapper
 from src.transcript_pipeline.fetch_transcript import fetch_transcript
-from src.transcript_pipeline.transcript_client import create_transcript_client
 
 
-def _classify_and_write(
-    tasks: list[dict],
-    args: argparse.Namespace,
-    cfg: object,
-    model: str,
-    base_url: str | None,
-    metadata: dict[str, str],
-    api_key: str | None = None,
-    enriched_attendees: str = "",
-    notes_text: str = "",
-) -> None:
-    """Classify extracted tasks and write them to the Team Task Tracker."""
-    logger = logging.getLogger(__name__)
-
-    from src.hierarchy_loader import HierarchyLoader
-    from src.transcript_pipeline.task_classifier import TaskClassifier
-    from src.transcript_pipeline.transcript_client import create_main_client
-    from src.tracker.team_writer import TeamTaskTrackerWriter
-    from src.utils.blocks_to_text import blocks_to_text
-
-    main_client = create_main_client()
-
-    # Load classifier prompt from Notion
-    page_blocks = main_client.get_block_children(cfg.classifier_prompt_page_id)
-    classifier_prompt = blocks_to_text(page_blocks, main_client)
-    if not classifier_prompt.strip():
-        print("ERROR: Classifier prompt page is empty", file=sys.stderr)
-        sys.exit(1)
-
-    # Load hierarchy
-    hierarchy = HierarchyLoader(main_client, cfg.team_tracker_db_id).load()
-
-    # Load categories from DB schema
-    ds = main_client.retrieve_data_source(cfg.team_tracker_db_id)
-    cat_prop = ds.get("properties", {}).get("Category", {})
-    categories = [opt["name"] for opt in cat_prop.get("select", {}).get("options", [])]
-    if not categories:
-        categories = ["Other"]
-
-    # Load workspace users
-    all_users = [
-        {
-            "id": u["id"],
-            "name": u.get("name", ""),
-            "email": u.get("person", {}).get("email", ""),
-        }
-        for u in main_client.list_users()
-        if u.get("type") == "person"
-    ]
-
-    # Load deal context (optional)
-    deal_context = ""
-    if cfg.deal_workplans_db_id:
-        try:
-            from src.deal_context import DealContextLoader
-
-            deal_loader = DealContextLoader(main_client, cfg.deal_workplans_db_id)
-            deals = deal_loader.load_deals()
-            if deals:
-                deal_context = _format_deal_context(deals)
-        except Exception:
-            logging.getLogger(__name__).exception(
-                "Failed to load deal context — proceeding without"
-            )
-
-    # Classify tasks
-    print()
-    print("Classifying tasks with", model, "...", file=sys.stderr)
-    classifier = TaskClassifier(
-        api_key=api_key or cfg.openai_api_key,
-        model=model,
-        base_url=base_url,
-    )
-    tasks = classifier.classify(
-        tasks,
-        classifier_prompt,
-        categories,
-        hierarchy,
-        all_users,
-        deal_context,
-        meeting_title=metadata.get("title", ""),
-        meeting_date=metadata.get("date", ""),
-        enriched_attendees=enriched_attendees,
-        notes_text=notes_text,
-    )
-
-    # Assignee fallback: default to meeting creator
-    creator_id = metadata.get("created_by_id")
-    creator_name = metadata.get("created_by_name", "Unknown")
-    for task in tasks:
-        if not task.get("assignee_id") and creator_id:
-            task["assignee_id"] = [creator_id]
-            logger.info(
-                "Assignee fallback -> meeting creator (%s) for: %s",
-                creator_name,
-                task.get("title", "?")[:60],
-            )
-
-    # Display classified tasks
-    print()
-    print(f"=== CLASSIFIED TASKS ({len(tasks)}) ===")
-    for i, t in enumerate(tasks, 1):
-        title = t.get("title", "(no title)")
-        assignee_name = t.get("assignee", "Unassigned")
-        ids = t.get("assignee_id", [])
-        id_str = ", ".join(ids) if ids else f"(creator: {creator_name})"
-        category = t.get("category", "?")
-        parent_id = t.get("parent_task_id") or "top-level"
-        print()
-        print(f"  {i}. {title}")
-        print(f"     Category: {category}")
-        print(f"     Assignee: {assignee_name} -> ID: {id_str}")
-        ext = t.get("external_assignees") or []
-        if ext:
-            print(f"     External: {', '.join(ext)}  (will be prepended to title)")
-        print(f"     Parent: {parent_id}")
-        if t.get("deal_page_id"):
-            print(f"     Deal: {t['deal_page_id']}")
-
-    # Set meeting_page_id on all tasks
-    for task in tasks:
-        task["meeting_page_id"] = args.page_id
-
-    # Write to Notion
-    print()
-    if args.dry_run:
-        print("=== DRY RUN: would write tasks ===")
-    else:
-        print("=== WRITING TASKS TO NOTION ===")
-
-    writer = TeamTaskTrackerWriter(
-        main_client, cfg.team_tracker_db_id, dry_run=args.dry_run,
-    )
-    created = writer.write_batch(tasks)
-
-    print()
-    if args.dry_run:
-        print(f"DRY RUN complete: {len(tasks)} tasks would be written")
-    else:
-        skipped = len(tasks) - len(created)
-        print(f"Done: {len(created)} tasks created, {skipped} skipped (dedup)")
-
-
-def _format_deal_context(deals: list) -> str:
-    """Format deal context for prompt injection."""
-    lines: list[str] = []
-    for deal in deals:
-        tracker_id = deal.tracker_page_id or "not linked"
-        lines.append(f"### {deal.name}")
-        lines.append(f"  - deal_page_id: {deal.deal_page_id}")
-        lines.append(f"  - parent_task_id (Tracker page ID): {tracker_id}")
-        if deal.workstreams:
-            lines.append("Workstreams:")
-            for ws in deal.workstreams:
-                parts = [f"{ws.title} (Status: {ws.status}"]
-                if ws.workstream_type:
-                    parts.append(f", Type: {', '.join(ws.workstream_type)}")
-                if ws.adviser:
-                    parts.append(f", Adviser: {', '.join(ws.adviser)}")
-                parts.append(")")
-                lines.append(f"  - {''.join(parts)}")
-        lines.append("")
-    return "\n".join(lines)
+def _create_client() -> NotionClientWrapper:
+    """Create a NotionClientWrapper with API v2026-03-11."""
+    load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
+    import os
+    notion = NotionClient(auth=os.environ["NOTION_API_TOKEN"], notion_version="2026-03-11")
+    return NotionClientWrapper(notion)
 
 
 def _run_gcal_test(args: argparse.Namespace) -> None:
@@ -192,7 +39,7 @@ def _run_gcal_test(args: argparse.Namespace) -> None:
     )
     from src.transcript_pipeline.gcal_attendees import get_gcal_attendees
 
-    client = create_transcript_client()
+    client = _create_client()
 
     # 1. Page metadata + governance attendees (tertiary fallback)
     page = client.get_page(args.page_id)
@@ -232,7 +79,7 @@ def _run_gcal_test(args: argparse.Namespace) -> None:
         print("  (none)")
 
     # 3. Google Calendar lookup (People API resolves emails → names)
-    print(f"\n=== GCAL SEARCH ===")
+    print("\n=== GCAL SEARCH ===")
     print(f'  Query:  "{clean_title}"')
     print(f"  Window: ±12h around {date}")
 
@@ -302,32 +149,23 @@ def main() -> None:
         _run_gcal_test(args)
         return
 
-    # --write implies --extract, --extract implies --correct, --correct implies --context
+    # --write routes through the unified pipeline
     if args.write:
-        args.extract = True
+        _run_write_mode(args)
+        return
+
+    # --extract implies --correct, --correct implies --context
     if args.extract:
         args.correct = True
     load_context = args.context or args.correct
 
-    if args.dry_run and not args.write:
+    if args.dry_run:
         print("Note: --dry-run has no effect without --write", file=sys.stderr)
 
-    # Early validation for --write mode
-    if args.write:
-        from src.config import load_config as _early_cfg
-        _cfg_check = _early_cfg()
-        if not _cfg_check.team_tracker_db_id:
-            print("ERROR: --write requires TEAM_TRACKER_DB_ID in .env", file=sys.stderr)
-            sys.exit(1)
-        if not _cfg_check.classifier_prompt_page_id:
-            print("ERROR: --write requires CLASSIFIER_PROMPT_PAGE_ID in .env", file=sys.stderr)
-            sys.exit(1)
-        del _cfg_check, _early_cfg
-
-    client = create_transcript_client()
+    client = _create_client()
     transcript_text, attendees, metadata, notes_text, governance_attendees = fetch_transcript(args.page_id, client, verbose=args.verbose)
 
-    # Load context from Notion DBs (needed for GCal name resolution + corrector + extractor)
+    # Load context from Notion DBs
     terminology = ""
     org_chart = ""
     org_chart_rows: list[dict] = []
@@ -348,10 +186,7 @@ def main() -> None:
             org_chart = load_org_chart(client, cfg.org_chart_db_id)
             org_chart_rows = load_org_chart_rows(client, cfg.org_chart_db_id)
 
-    # Attendee resolution chain:
-    #   1. Google Calendar (authoritative when available)
-    #   2. Notion meeting_notes.calendar_event.attendees (already in `attendees`)
-    #   3. Page's "Governance: Edit & View Access" people property
+    # Attendee resolution chain
     if metadata.get("title") and metadata.get("date"):
         from src.transcript_pipeline.gcal_attendees import get_gcal_attendees
 
@@ -367,7 +202,7 @@ def main() -> None:
             file=sys.stderr,
         )
 
-    # Build enriched attendee string (with inline roles from org chart)
+    # Build enriched attendee string
     enriched_attendee_str = ""
     if org_chart_rows and attendees:
         from src.transcript_pipeline.context_loader import build_enriched_attendee_str
@@ -379,7 +214,6 @@ def main() -> None:
         print(f"=== MEETING: {metadata['title']} ({metadata.get('date', '?')}) ===")
     print("=== ATTENDEES ===")
     if enriched_attendee_str:
-        # Print enriched attendee list with roles so user can verify
         for line in enriched_attendee_str.splitlines():
             print(f"  {line}")
     elif attendees:
@@ -415,9 +249,7 @@ def main() -> None:
         from src.transcript_pipeline.transcript_corrector import TranscriptCorrector
 
         model = args.model or cfg.openai_model
-        # --openai forces the OpenAI endpoint (useful when OPENAI_BASE_URL points to Gemini)
         base_url = "https://api.openai.com/v1" if args.openai else cfg.openai_base_url
-        # Pick the right API key for the endpoint
         api_key = cfg.openai_api_key if args.openai else (cfg.gemini_api_key or cfg.openai_api_key)
 
         corrector = TranscriptCorrector(
@@ -484,24 +316,6 @@ def main() -> None:
                         print(f'     Context: "{context}"')
             else:
                 print("  (no tasks found)")
-
-            # Classification + write step
-            if args.write and tasks:
-                classifier_model = args.classifier_model or model
-                use_classifier_openai = args.classifier_openai or args.openai
-                classifier_base_url = "https://api.openai.com/v1" if use_classifier_openai else cfg.openai_base_url
-                classifier_api_key = cfg.openai_api_key if use_classifier_openai else (cfg.gemini_api_key or cfg.openai_api_key)
-                _classify_and_write(
-                    tasks,
-                    args,
-                    cfg,
-                    classifier_model,
-                    classifier_base_url,
-                    metadata,
-                    classifier_api_key,
-                    enriched_attendees=enriched_attendee_str,
-                    notes_text=notes_text,
-                )
     else:
         print()
         print("=== TRANSCRIPT ===")
@@ -509,6 +323,56 @@ def main() -> None:
             print(transcript_text)
         else:
             print("  (empty — recording may not be processed yet)")
+
+
+def _run_write_mode(args: argparse.Namespace) -> None:
+    """Run the full pipeline for a single page (correct → extract → classify → write).
+
+    Routes through pipeline.run_sync_for_page() to use the unified pipeline
+    with transcript-first extraction and all post-processing (dedup, etc.).
+    """
+    from src.config import load_config
+
+    cfg = load_config()
+
+    # Validate required config
+    if not cfg.team_tracker_db_id:
+        print("ERROR: --write requires TEAM_TRACKER_DB_ID in .env", file=sys.stderr)
+        sys.exit(1)
+    if not cfg.classifier_prompt_page_id:
+        print("ERROR: --write requires CLASSIFIER_PROMPT_PAGE_ID in .env", file=sys.stderr)
+        sys.exit(1)
+
+    # Apply CLI overrides to config
+    overrides: dict = {}
+    if args.dry_run:
+        overrides["dry_run"] = True
+    if args.model:
+        overrides["openai_model"] = args.model
+    if args.openai:
+        overrides["openai_base_url"] = "https://api.openai.com/v1"
+    if overrides:
+        cfg = cfg.model_copy(update=overrides)
+
+    logfire.configure(token=cfg.logfire_token, service_name="nzyme-transcript")
+    logfire.instrument_openai()
+
+    log_level = logging.DEBUG if args.verbose else logging.INFO
+    logging.basicConfig(level=log_level, format="%(levelname)s: %(message)s")
+
+    client = _create_client()
+
+    from src.pipeline import run_sync_for_page
+
+    print(f"Processing page {args.page_id} via unified pipeline...")
+    if args.dry_run:
+        print("(dry-run mode — no writes)")
+    print()
+
+    run_sync_for_page(cfg, client, args.page_id, use_gcal=True, force=True)
+
+    print()
+    print("Done.")
 
 
 if __name__ == "__main__":

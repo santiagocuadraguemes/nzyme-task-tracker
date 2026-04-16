@@ -2,16 +2,26 @@
 
 ## Pipeline Overview
 
+The pipeline is transcript-first: if a meeting page has a `meeting_notes` block (Notion AI recording), it uses the 3-LLM-call transcript path. Otherwise, it falls back to the notes-based extraction.
+
 ```
 main.py → pipeline.run_sync():
-  0. template_injector → inject "Your own notes" section into new meeting pages
+  0. template_injector → inject "Your own notes" section (if enabled)
   then for each unprocessed meeting:
-    1. playbook_loader  → fetch playbook rules from Notion page
-    2. hierarchy_loader → snapshot Team Task Tracker parent-child tree
-    3. single_source    → fetch meeting content as plain text (filtered by INCLUDE_AI_NOTES)
-    4. ai_extractor     → call OpenAI with playbook + hierarchy + content
-    5. team_writer      → create task pages in Team Task Tracker
-    6. single_source    → mark meeting page as Processed
+    1. Load shared context (hierarchy, categories, users, deals, terminology, org chart, classifier prompt)
+    2. Check for meeting_notes block on page
+    IF transcript exists:
+      a. Resolve attendees (GCal → Notion → governance fallback)
+      b. Correct transcript (LLM call 1)
+      c. Extract tasks (LLM call 2)
+      d. Classify tasks (LLM call 3)
+    ELSE (notes fallback):
+      a. Fetch page content as plain text
+      b. AI extract + classify (1 LLM call)
+    3. Semantic dedup → filter duplicates
+    4. Assignee fallback → default to meeting creator
+    5. team_writer → create task pages in Team Task Tracker
+    6. Mark meeting page as Processed
 ```
 
 ## Entry Point (`src/main.py`)
@@ -37,25 +47,25 @@ Fetches the meeting note template from Notion (`MEETING_TEMPLATE_PAGE_ID`), then
 
 Instantiates all components with a shared `NotionClientWrapper`, then:
 
-1. **Load playbook** (required) — abort cycle on failure
-2. **Load hierarchy** (optional) — degrade gracefully on failure (tasks go to top level)
-3. **Load categories** dynamically from DB schema — fall back to `["Other"]` on failure
-4. **Load deal context** (optional) — if `DEAL_WORKPLANS_DB_ID` set, loads deals + workstreams from Deal Workplans DB
-5. **Poll unprocessed meetings** — `Date < (now - buffer_hours)` AND `Processed = false`
-5. **Build dedup fingerprints** — loads already-processed meetings for cross-cycle dedup
-6. **For each meeting page:**
+1. **Load shared context** (`_load_sync_context()`) — prompts, hierarchy, categories, users, deals, semantic dedup, terminology, org chart, classifier prompt. Abort on prompt load failure (required). Other context degrades gracefully.
+2. **Poll unprocessed meetings** — `Date < (now - buffer_hours)` AND `Processed = false`
+3. **Build dedup fingerprints** — loads already-processed meetings for cross-cycle dedup
+4. **For each meeting page:**
    - Check fingerprint `(normalized_title|date)` against dedup set; skip duplicates
-   - Fetch page content (blocks to text, filtered by `include_ai_notes` config); skip if empty
-   - Call AI extractor with full context
-   - Write extracted tasks via team writer
-   - Mark page as Processed
-7. **Log summary** — total tasks processed
+   - Check for `meeting_notes` block → transcript path or notes fallback
+   - **Transcript path:** resolve attendees → correct → extract → classify (3 LLM calls)
+   - **Notes fallback:** fetch content → AI extract + classify (1 LLM call)
+   - Semantic dedup → assignee fallback → write tasks → mark Processed
+5. **Archive done tasks** (3-day grace period)
+6. **Log summary** — total tasks processed
 
 Helper functions:
+- `_process_via_transcript()` — transcript extraction path (correct → extract → classify)
+- `_process_via_notes()` — notes extraction path (AIExtractor, fallback)
+- `_resolve_attendees()` — GCal → Notion → governance attendee chain
 - `_meeting_fingerprint()` — strips Notion's `(1)`, `(2)` suffixes, lowercases, combines with date
 - `_load_categories()` — reads Category select options from DB schema
 - `_build_seen_fingerprints()` — collects fingerprints from processed meetings
-- `_inject_templates()` — injects "Your own notes" section into new meeting pages via `template_injector`
 
 ## Component Details
 
@@ -168,7 +178,8 @@ Internal behavior:
 - **Rate limiting:** Token-bucket at 3 req/s (Notion API limit)
 - **Retry:** Exponential backoff on 429/5xx errors, up to 3 retries
 - **Pagination:** Transparently handles multi-page responses via `start_cursor`
-- **Data source resolution:** Notion API 2025-09-03 replaced `databases.query` with `data_sources.query`. The wrapper resolves database IDs to data source IDs and caches the mapping.
+- **Data source resolution:** Notion API 2025-09-03+ replaced `databases.query` with `data_sources.query`. The wrapper resolves database IDs to data source IDs and caches the mapping.
+- **API version:** `2026-03-11` — supports `meeting_notes` blocks for transcript extraction.
 
 ### Utilities
 
@@ -178,23 +189,26 @@ Internal behavior:
 
 ## Data Flow
 
+### Transcript path (default)
 ```
 Meeting Notes DB page
-  → SingleSource.get_page_content(include_ai_notes) → plain text (human-only or full)
-  → SingleSource.get_page_metadata() → {title, date, meeting_type, attendees}
+  → find_meeting_notes_block() → meeting_notes block
+  → fetch transcript text + attendees + human notes
+  → _resolve_attendees() (GCal → Notion → governance)
+  → TranscriptCorrector.correct() → corrected transcript (LLM call 1)
+  → TaskExtractor.extract() → raw tasks (LLM call 2)
+  → TaskClassifier.classify() → classified tasks (LLM call 3)
+  → SemanticDedup + assignee fallback
+  → TeamTaskTrackerWriter.write_batch() → Notion pages
+```
 
-Playbook Notion page
-  → PlaybookLoader.load() → plain text (cached)
-
-Team Task Tracker DB
-  → HierarchyLoader.load() → [{id, title, category, children}] (cached)
-  → _load_categories() → ["Category1", "Category2", ...]
-
-All of the above
-  → AIExtractor.extract() → [{title, assignee_id, due_date, priority, category, parent_task_id, status}]
-
-Task dicts
-  → TeamTaskTrackerWriter.write_batch() → Notion pages in Team Task Tracker
+### Notes fallback path
+```
+Meeting Notes DB page (no meeting_notes block)
+  → SingleSource.get_page_content() → plain text
+  → AIExtractor.extract() → tasks with category/parent (1 LLM call)
+  → SemanticDedup + assignee fallback
+  → TeamTaskTrackerWriter.write_batch() → Notion pages
 ```
 
 ## Error Handling
@@ -245,8 +259,8 @@ CloudWatch Events (every 1 min) → Lambda: extraction_handler
 ### Single-Page Entry Points (`src/pipeline.py`)
 
 - `run_inject_templates_for_page(config, client, page_id)` — Inject template into one page, set `Template Injected = true`
-- `run_sync_for_page(config, client, page_id)` — Extract tasks from one page; guards on `Processed=false` and `Date<=now`
-- `_load_sync_context(config, client)` — Shared helper that loads playbook, hierarchy, categories, users
+- `run_sync_for_page(config, client, page_id, use_gcal, force)` — Extract tasks from one page (transcript-first, notes fallback). Guards on `Processed=false` unless `force=True`. `use_gcal=True` enables Google Calendar attendee lookup (CLI only).
+- `_load_sync_context(config, client)` — Shared helper that loads prompts, hierarchy, categories, users, deals, terminology, org chart, classifier prompt
 
 ### Why Not Webhook on Content Updates?
 
@@ -267,6 +281,6 @@ See `template.yaml` (SAM) for infrastructure definition and `scripts/deploy.sh` 
 1. **AI notes filtering** — `INCLUDE_AI_NOTES` (default `false`) controls whether Notion AI meeting notes blocks are sent to the extractor. When off, only human-written blocks (to-dos, paragraphs, headings, etc.) are included, using a whitelist of known content block types.
 2. **Stateless cycles** — Each sync cycle is independent. No persistent state between runs.
 3. **Graceful degradation** — Non-critical failures (hierarchy, categories, individual meetings/tasks) don't abort the cycle.
-4. **Two-layer dedup** — Meeting-level (title+date fingerprint) and task-level (title match in tracker).
+4. **Three-layer dedup** — Meeting-level (title+date fingerprint), semantic embeddings (cosine similarity), and task-level (exact title match in tracker).
 5. **Rate limiting** — All Notion API calls go through the wrapper with 3 req/s pacing and retry.
 6. **Observability** — Logfire spans around each meeting, structured logging throughout.

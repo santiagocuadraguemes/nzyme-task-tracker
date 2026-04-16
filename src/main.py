@@ -96,7 +96,7 @@ def main() -> None:
     logfire.configure(token=config.logfire_token, service_name="nzyme")
     logfire.instrument_openai()
 
-    notion = NotionClient(auth=config.notion_api_token)
+    notion = NotionClient(auth=config.notion_api_token, notion_version="2026-03-11")
     client = NotionClientWrapper(notion)
 
     if args.watch:

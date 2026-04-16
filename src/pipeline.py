@@ -19,6 +19,20 @@ from src.ai_extractor import AIExtractor
 from src.sources.single_source import SingleSource
 from src.template_injector import fetch_template, inject_notes_section
 from src.tracker.team_writer import TeamTaskTrackerWriter
+from src.transcript_pipeline.context_loader import (
+    load_terminology,
+    load_org_chart,
+    load_org_chart_rows,
+    build_enriched_attendee_str,
+)
+from src.transcript_pipeline.fetch_transcript import (
+    find_meeting_notes_block,
+    extract_transcript_block_id,
+    extract_attendee_ids,
+    extract_governance_attendees,
+    build_user_lookup,
+    fetch_notes_text,
+)
 from src.utils.blocks_to_text import blocks_to_text
 
 logger = logging.getLogger(__name__)
@@ -195,6 +209,222 @@ def _run_semantic_dedup(
     if len(kept) < len(tasks):
         logger.info("Semantic dedup: %d → %d tasks", len(tasks), len(kept))
     return kept
+
+
+def _resolve_attendees(
+    client: NotionClientWrapper,
+    mn_block: dict | None,
+    page: dict,
+    metadata: dict,
+    *,
+    use_gcal: bool = False,
+) -> list[dict[str, str]]:
+    """Resolve meeting attendees via the priority chain.
+
+    Priority:
+    1. Google Calendar (when use_gcal=True and available)
+    2. Notion meeting_notes.calendar_event.attendees
+    3. Page's "Governance: Edit & View Access" people property
+
+    Returns list of {"id": ..., "name": ...} dicts.
+    """
+    attendees: list[dict[str, str]] = []
+
+    # Source 2: Notion meeting_notes attendees
+    if mn_block is not None:
+        attendee_ids = extract_attendee_ids(mn_block)
+        if attendee_ids:
+            user_lookup = build_user_lookup(client)
+            attendees = [
+                {"id": uid, "name": user_lookup.get(uid, uid)}
+                for uid in attendee_ids
+            ]
+
+    # Source 1: Google Calendar (CLI only, overrides Notion if found)
+    if use_gcal and metadata.get("title") and metadata.get("date"):
+        try:
+            from src.transcript_pipeline.gcal_attendees import get_gcal_attendees
+
+            gcal_attendees = get_gcal_attendees(metadata["title"], metadata["date"])
+            if gcal_attendees:
+                attendees = [
+                    {"id": ga["email"], "name": ga["name"]}
+                    for ga in gcal_attendees
+                ]
+                logger.info("GCal attendees resolved: %d", len(attendees))
+        except Exception:
+            logger.warning("GCal lookup failed — using Notion attendees", exc_info=True)
+
+    # Source 3: Governance fallback
+    if not attendees:
+        governance = extract_governance_attendees(page)
+        if governance:
+            attendees = governance
+            logger.info(
+                "Using governance-access fallback (%d attendees)", len(attendees),
+            )
+
+    return attendees
+
+
+def _process_via_transcript(
+    client: NotionClientWrapper,
+    config: SyncConfig,
+    ctx: dict,
+    page_id: str,
+    page: dict,
+    blocks: list[dict],
+    mn_block: dict,
+    metadata: dict,
+    attendees: list[dict[str, str]],
+) -> list[dict]:
+    """Extract tasks from a meeting transcript (correct → extract → classify).
+
+    Returns list of task dicts with category, parent_task_id, assignee_id,
+    deal_page_id already set by the classifier.
+    """
+    from src.transcript_pipeline.transcript_corrector import TranscriptCorrector
+    from src.transcript_pipeline.task_extractor import TaskExtractor
+    from src.transcript_pipeline.task_classifier import TaskClassifier
+
+    # Fetch transcript text
+    transcript_block_id = extract_transcript_block_id(mn_block)
+    transcript_blocks = client.get_block_children(transcript_block_id)
+    if not transcript_blocks:
+        logger.warning("Transcript block has no children — no tasks to extract")
+        return []
+    transcript_text = blocks_to_text(transcript_blocks, client)
+    if not transcript_text.strip():
+        logger.warning("Transcript text is empty — no tasks to extract")
+        return []
+
+    # Fetch human notes from meeting_notes block
+    notes_text = fetch_notes_text(mn_block, client)
+
+    # Build enriched attendee string
+    enriched_attendee_str = ""
+    if ctx["org_chart_rows"] and attendees:
+        enriched_attendee_str = build_enriched_attendee_str(attendees, ctx["org_chart_rows"])
+
+    # Step 1: Correct transcript
+    corrector = TranscriptCorrector(
+        api_key=config.openai_api_key,
+        model=config.openai_model,
+        base_url=config.openai_base_url,
+    )
+    corrected = corrector.correct(
+        transcript_text,
+        ctx["terminology"],
+        attendees,
+        enriched_attendee_str=enriched_attendee_str,
+        notes_text=notes_text,
+    )
+    logger.info("Transcript corrected (%d → %d chars)", len(transcript_text), len(corrected))
+
+    # Step 2: Extract tasks
+    extractor = TaskExtractor(
+        api_key=config.openai_api_key,
+        model=config.openai_model,
+        base_url=config.openai_base_url,
+    )
+    tasks = extractor.extract(
+        corrected,
+        attendees,
+        org_chart=ctx["org_chart_text"],
+        terminology=ctx["terminology"],
+        meeting_title=metadata.get("title", ""),
+        meeting_date=metadata.get("date", ""),
+        enriched_attendee_str=enriched_attendee_str,
+        notes_text=notes_text,
+    )
+    if not tasks:
+        logger.info("No tasks extracted from transcript")
+        return []
+    logger.info("Extracted %d tasks from transcript", len(tasks))
+
+    # Step 3: Classify tasks (category, parent, assignee, deal)
+    if not ctx["classifier_prompt"]:
+        logger.warning("No classifier prompt — skipping classification, tasks will have no category/parent")
+        return tasks
+
+    classifier = TaskClassifier(
+        api_key=config.openai_api_key,
+        model=config.openai_model,
+        base_url=config.openai_base_url,
+    )
+    tasks = classifier.classify(
+        tasks,
+        ctx["classifier_prompt"],
+        ctx["categories"],
+        ctx["hierarchy"],
+        ctx["all_users"],
+        _format_deal_context(ctx["deals"]),
+        meeting_title=metadata.get("title", ""),
+        meeting_date=metadata.get("date", ""),
+        enriched_attendees=enriched_attendee_str,
+        notes_text=notes_text,
+    )
+    logger.info("Classified %d tasks", len(tasks))
+    return tasks
+
+
+def _process_via_notes(
+    config: SyncConfig,
+    ctx: dict,
+    page_id: str,
+    metadata: dict,
+    content: str,
+) -> list[dict]:
+    """Extract tasks from written meeting notes (original AIExtractor path).
+
+    Returns list of task dicts with assignee_id, category, parent_task_id, etc.
+    already set by the single-shot AI extractor.
+    """
+    categories_text = " | ".join(f'"{c}"' for c in ctx["categories"])
+    hierarchy_text = json.dumps(ctx["hierarchy"], indent=2)
+    existing_tasks_text = _format_existing_tasks(ctx["existing_tasks"])
+    team_members_text = _format_team_members(ctx["all_users"])
+    deal_context_text = _format_deal_context(ctx["deals"])
+
+    attendees_text = "\n".join(
+        f"- {a['name']} (ID: {a['id']})" for a in metadata["attendees"]
+    ) or "No attendees listed"
+    creator = metadata.get("created_by", {})
+    meeting_creator_text = (
+        f"{creator['name']} (ID: {creator['id']})"
+        if creator.get("id") else "Unknown"
+    )
+
+    system_prompt = _substitute_placeholders(
+        ctx["system_prompt_template"],
+        CATEGORIES=categories_text,
+        HIERARCHY=hierarchy_text,
+        EXISTING_TASKS=existing_tasks_text,
+        TEAM_MEMBERS=team_members_text,
+        ATTENDEES=attendees_text,
+        MEETING_CREATOR=meeting_creator_text,
+        DEAL_CONTEXT=deal_context_text,
+    )
+    user_prompt = _substitute_placeholders(
+        ctx["user_prompt_template"],
+        MEETING_TITLE=metadata["title"],
+        MEETING_DATE=metadata["date"],
+        MEETING_TYPE=metadata["meeting_type"] or "Not specified",
+        MEETING_CONTENT=content,
+    )
+
+    # Deal detection hint from meeting title
+    if ctx["deals"]:
+        detected = _detect_deals_from_title(metadata["title"], ctx["deals"])
+        if detected:
+            deal_names = ", ".join(d.name for d in detected)
+            user_prompt += f"\n\nNote: This meeting likely relates to deal(s): {deal_names}"
+
+    return ctx["extractor"].extract(
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        categories=ctx["categories"],
+    )
 
 
 def _meeting_fingerprint(title: str, date: str) -> str:
@@ -407,6 +637,40 @@ def _load_sync_context(
     except Exception:
         logger.exception("Failed to initialize semantic dedup — proceeding without")
 
+    # --- Transcript pipeline context (optional) ---
+
+    # Terminology dictionary for transcript correction
+    terminology = ""
+    if config.terminology_db_id:
+        try:
+            terminology = load_terminology(client, config.terminology_db_id)
+            logger.info("Loaded terminology dictionary (%d chars)", len(terminology))
+        except Exception:
+            logger.exception("Failed to load terminology — transcript correction will be less accurate")
+
+    # Org chart for attendee enrichment and speaker identification
+    org_chart_rows: list[dict] = []
+    org_chart_text = ""
+    if config.org_chart_db_id:
+        try:
+            org_chart_rows = load_org_chart_rows(client, config.org_chart_db_id)
+            org_chart_text = load_org_chart(client, config.org_chart_db_id)
+            logger.info("Loaded %d org chart members", len(org_chart_rows))
+        except Exception:
+            logger.exception("Failed to load org chart — proceeding without")
+
+    # Classifier prompt (required for transcript path, loaded once per cycle)
+    classifier_prompt = ""
+    if config.classifier_prompt_page_id:
+        try:
+            classifier_prompt = _fetch_page_text(client, config.classifier_prompt_page_id)
+            if classifier_prompt.strip():
+                logger.info("Loaded classifier prompt (%d chars)", len(classifier_prompt))
+            else:
+                logger.warning("Classifier prompt page is empty")
+        except Exception:
+            logger.exception("Failed to load classifier prompt — transcript classification will fall back to notes path")
+
     return {
         "system_prompt_template": system_prompt_template,
         "user_prompt_template": user_prompt_template,
@@ -418,11 +682,15 @@ def _load_sync_context(
         "extractor": AIExtractor(config.openai_api_key, config.openai_model, config.openai_base_url),
         "writer": writer,
         "semantic_dedup": semantic_dedup,
+        "terminology": terminology,
+        "org_chart_text": org_chart_text,
+        "org_chart_rows": org_chart_rows,
+        "classifier_prompt": classifier_prompt,
     }
 
 
 def run_sync(config: SyncConfig, client: NotionClientWrapper) -> None:
-    """Execute one full sync cycle (AI extraction + archiving)."""
+    """Execute one full sync cycle — transcript-first extraction + archiving."""
     source = SingleSource(client, config.meeting_notes_db_id)
 
     try:
@@ -438,13 +706,6 @@ def run_sync(config: SyncConfig, client: NotionClientWrapper) -> None:
     else:
         # Build meeting-level dedup set from already-processed meetings
         seen_meetings = _build_seen_fingerprints(source)
-
-        # Pre-compute per-cycle prompt substitutions
-        categories_text = " | ".join(f'"{c}"' for c in ctx["categories"])
-        hierarchy_text = json.dumps(ctx["hierarchy"], indent=2)
-        existing_tasks_text = _format_existing_tasks(ctx["existing_tasks"])
-        team_members_text = _format_team_members(ctx["all_users"])
-        deal_context_text = _format_deal_context(ctx["deals"])
         parent_titles_map = _flatten_hierarchy(ctx["hierarchy"])
 
         total_tasks = 0
@@ -464,63 +725,57 @@ def run_sync(config: SyncConfig, client: NotionClientWrapper) -> None:
 
             try:
                 with logfire.span("process_meeting", meeting_title=title, page_id=page_id):
-                    content = source.get_page_content(page_id, include_ai_notes=config.include_ai_notes)
-                    if not content.strip():
-                        logger.info("Page '%s' has no content — marking processed", title)
-                        if not config.dry_run:
-                            source.mark_page_processed(page_id)
-                        continue
+                    # Decision point: does this page have a transcript?
+                    blocks = client.get_block_children(page_id)
+                    mn_block = find_meeting_notes_block(blocks)
 
-                    attendees_text = "\n".join(
-                        f"- {a['name']} (ID: {a['id']})" for a in metadata["attendees"]
-                    ) or "No attendees listed"
-                    creator = metadata.get("created_by", {})
-                    meeting_creator_text = (
-                        f"{creator['name']} (ID: {creator['id']})"
-                        if creator.get("id") else "Unknown"
-                    )
+                    if mn_block is not None:
+                        # --- Transcript path ---
+                        logger.info("Page '%s': transcript found — using transcript extraction", title)
+                        attendees = _resolve_attendees(
+                            client, mn_block, page, metadata,
+                        )
+                        tasks = _process_via_transcript(
+                            client, config, ctx, page_id, page, blocks,
+                            mn_block, metadata, attendees,
+                        )
 
-                    system_prompt = _substitute_placeholders(
-                        ctx["system_prompt_template"],
-                        CATEGORIES=categories_text,
-                        HIERARCHY=hierarchy_text,
-                        EXISTING_TASKS=existing_tasks_text,
-                        TEAM_MEMBERS=team_members_text,
-                        ATTENDEES=attendees_text,
-                        MEETING_CREATOR=meeting_creator_text,
-                        DEAL_CONTEXT=deal_context_text,
-                    )
-                    user_prompt = _substitute_placeholders(
-                        ctx["user_prompt_template"],
-                        MEETING_TITLE=title,
-                        MEETING_DATE=metadata["date"],
-                        MEETING_TYPE=metadata["meeting_type"] or "Not specified",
-                        MEETING_CONTENT=content,
-                    )
+                        # Assignee fallback: default to meeting creator
+                        creator = metadata.get("created_by", {})
+                        creator_id = creator.get("id")
+                        for task in tasks:
+                            if not task.get("assignee_id") and creator_id:
+                                task["assignee_id"] = [creator_id]
+                                logger.info(
+                                    "Assignee fallback → meeting creator for: %s",
+                                    task.get("title", "?")[:60],
+                                )
+                    else:
+                        # --- Notes fallback ---
+                        logger.info("Page '%s': no transcript — falling back to notes extraction", title)
+                        content = source.get_page_content(
+                            page_id, include_ai_notes=config.include_ai_notes,
+                        )
+                        if not content.strip():
+                            logger.info("Page '%s' has no content — marking processed", title)
+                            if not config.dry_run:
+                                source.mark_page_processed(page_id)
+                            continue
 
-                    # Deal detection hint from meeting title
-                    if ctx["deals"]:
-                        detected = _detect_deals_from_title(title, ctx["deals"])
-                        if detected:
-                            deal_names = ", ".join(d.name for d in detected)
-                            user_prompt += f"\n\nNote: This meeting likely relates to deal(s): {deal_names}"
+                        tasks = _process_via_notes(config, ctx, page_id, metadata, content)
 
-                    tasks = ctx["extractor"].extract(
-                        system_prompt=system_prompt,
-                        user_prompt=user_prompt,
-                        categories=ctx["categories"],
-                    )
+                        # Assignee fallback: default to meeting creator
+                        creator = metadata.get("created_by", {})
+                        creator_id = creator.get("id")
+                        for task in tasks:
+                            if not task.get("assignee_id") and creator_id:
+                                task["assignee_id"] = creator_id
+                                logger.info(
+                                    "Assignee fallback → meeting creator for: %s",
+                                    task.get("title", "?")[:60],
+                                )
 
-                    # Assignee fallback: default to meeting creator
-                    creator_id = creator.get("id")
-                    for task in tasks:
-                        if not task.get("assignee_id") and creator_id:
-                            task["assignee_id"] = creator_id
-                            logger.info(
-                                "Assignee fallback → meeting creator for: %s",
-                                task.get("title", "?")[:60],
-                            )
-
+                    # Common post-processing for both paths
                     for task in tasks:
                         task["meeting_page_id"] = page_id
 
@@ -530,9 +785,7 @@ def run_sync(config: SyncConfig, client: NotionClientWrapper) -> None:
                     if tasks:
                         created = ctx["writer"].write_batch(tasks)
                         total_tasks += len(created) if not config.dry_run else len(tasks)
-                        logger.info(
-                            "Page '%s': %d tasks extracted", title, len(tasks)
-                        )
+                        logger.info("Page '%s': %d tasks created", title, len(tasks))
 
                         # Accumulate for cross-meeting AI dedup context
                         for task in tasks:
@@ -541,7 +794,6 @@ def run_sync(config: SyncConfig, client: NotionClientWrapper) -> None:
                                 "title": task["title"],
                                 "parent_title": parent_titles_map.get(pid, "") if pid else "",
                             })
-                        existing_tasks_text = _format_existing_tasks(ctx["existing_tasks"])
                     else:
                         logger.info("Page '%s': no tasks found", title)
 
@@ -603,12 +855,23 @@ def run_inject_templates_for_page(
 
 
 def run_sync_for_page(
-    config: SyncConfig, client: NotionClientWrapper, page_id: str,
+    config: SyncConfig,
+    client: NotionClientWrapper,
+    page_id: str,
+    *,
+    use_gcal: bool = False,
+    force: bool = False,
 ) -> None:
-    """Run AI extraction on a single page (webhook/cron entry point).
+    """Run extraction on a single page — transcript-first, notes fallback.
 
-    Guards: skips if page is already processed or if the meeting date is in
-    the future.
+    Guards: skips if page is already processed or currently being processed
+    (unless force=True).
+
+    Args:
+        use_gcal: If True, attempt Google Calendar attendee lookup (CLI only;
+            requires OAuth credentials). Skipped in Lambda.
+        force: If True, skip the "already processed" / "processing" guards.
+            Used by CLI to re-process pages.
     """
     source = SingleSource(client, config.meeting_notes_db_id)
 
@@ -616,24 +879,23 @@ def run_sync_for_page(
     page = client.get_page(page_id)
     props = page.get("properties", {})
 
-    processed = props.get("Processed", {}).get("checkbox", False)
-    if processed:
-        logger.info("Page %s already processed — skipping", page_id)
-        return
+    if not force:
+        processed = props.get("Processed", {}).get("checkbox", False)
+        if processed:
+            logger.info("Page %s already processed — skipping", page_id)
+            return
 
-    processing = props.get("Processing", {}).get("checkbox", False)
-    if processing:
-        logger.info("Page %s already being processed by another invocation — skipping", page_id)
-        return
+        processing = props.get("Processing", {}).get("checkbox", False)
+        if processing:
+            logger.info("Page %s already being processed by another invocation — skipping", page_id)
+            return
 
     # Claim the page (concurrency lock)
-    if not config.dry_run:
+    if not config.dry_run and not force:
         source.mark_processing(page_id)
 
     try:
-        # Load context and extract
         ctx = _load_sync_context(config, client)
-
         metadata = source.get_page_metadata(page)
         title = metadata["title"]
 
@@ -647,64 +909,61 @@ def run_sync_for_page(
             return
 
         with logfire.span("process_meeting", meeting_title=title, page_id=page_id):
-            content = source.get_page_content(page_id, include_ai_notes=config.include_ai_notes)
-            if not content.strip():
-                logger.info("Page '%s' has no content — marking processed", title)
-                if not config.dry_run:
-                    source.mark_page_processed(page_id)
-                return
+            # Decision point: does this page have a transcript?
+            blocks = client.get_block_children(page_id)
+            mn_block = find_meeting_notes_block(blocks)
 
-            attendees_text = "\n".join(
-                f"- {a['name']} (ID: {a['id']})" for a in metadata["attendees"]
-            ) or "No attendees listed"
-            team_members_text = _format_team_members(ctx["all_users"])
-            creator = metadata.get("created_by", {})
-            meeting_creator_text = (
-                f"{creator['name']} (ID: {creator['id']})"
-                if creator.get("id") else "Unknown"
-            )
+            if mn_block is not None:
+                # --- Transcript path ---
+                logger.info("Page '%s': transcript found — using transcript extraction", title)
 
-            system_prompt = _substitute_placeholders(
-                ctx["system_prompt_template"],
-                CATEGORIES=" | ".join(f'"{c}"' for c in ctx["categories"]),
-                HIERARCHY=json.dumps(ctx["hierarchy"], indent=2),
-                EXISTING_TASKS=_format_existing_tasks(ctx["existing_tasks"]),
-                TEAM_MEMBERS=team_members_text,
-                ATTENDEES=attendees_text,
-                MEETING_CREATOR=meeting_creator_text,
-                DEAL_CONTEXT=_format_deal_context(ctx["deals"]),
-            )
-            user_prompt = _substitute_placeholders(
-                ctx["user_prompt_template"],
-                MEETING_TITLE=title,
-                MEETING_DATE=metadata["date"],
-                MEETING_TYPE=metadata["meeting_type"] or "Not specified",
-                MEETING_CONTENT=content,
-            )
+                # Resolve attendees (GCal → Notion → governance)
+                attendees = _resolve_attendees(
+                    client, mn_block, page, metadata, use_gcal=use_gcal,
+                )
 
-            # Deal detection hint from meeting title
-            if ctx["deals"]:
-                detected = _detect_deals_from_title(title, ctx["deals"])
-                if detected:
-                    deal_names = ", ".join(d.name for d in detected)
-                    user_prompt += f"\n\nNote: This meeting likely relates to deal(s): {deal_names}"
+                tasks = _process_via_transcript(
+                    client, config, ctx, page_id, page, blocks,
+                    mn_block, metadata, attendees,
+                )
 
-            tasks = ctx["extractor"].extract(
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                categories=ctx["categories"],
-            )
+                # Assignee fallback: default to meeting creator
+                creator = metadata.get("created_by", {})
+                creator_id = creator.get("id")
+                for task in tasks:
+                    if not task.get("assignee_id") and creator_id:
+                        task["assignee_id"] = [creator_id]
+                        logger.info(
+                            "Assignee fallback → meeting creator for: %s",
+                            task.get("title", "?")[:60],
+                        )
+            else:
+                # --- Notes fallback ---
+                logger.info("Page '%s': no transcript — falling back to notes extraction", title)
 
-            # Assignee fallback: default to meeting creator
-            creator_id = creator.get("id")
-            for task in tasks:
-                if not task.get("assignee_id") and creator_id:
-                    task["assignee_id"] = creator_id
-                    logger.info(
-                        "Assignee fallback → meeting creator for: %s",
-                        task.get("title", "?")[:60],
-                    )
+                content = source.get_page_content(
+                    page_id, include_ai_notes=config.include_ai_notes,
+                )
+                if not content.strip():
+                    logger.info("Page '%s' has no content — marking processed", title)
+                    if not config.dry_run:
+                        source.mark_page_processed(page_id)
+                    return
 
+                tasks = _process_via_notes(config, ctx, page_id, metadata, content)
+
+                # Assignee fallback: default to meeting creator
+                creator = metadata.get("created_by", {})
+                creator_id = creator.get("id")
+                for task in tasks:
+                    if not task.get("assignee_id") and creator_id:
+                        task["assignee_id"] = creator_id
+                        logger.info(
+                            "Assignee fallback → meeting creator for: %s",
+                            task.get("title", "?")[:60],
+                        )
+
+            # Common post-processing for both paths
             for task in tasks:
                 task["meeting_page_id"] = page_id
 
@@ -713,15 +972,15 @@ def run_sync_for_page(
 
             if tasks:
                 ctx["writer"].write_batch(tasks)
-                logger.info("Page '%s': %d tasks extracted", title, len(tasks))
+                logger.info("Page '%s': %d tasks created", title, len(tasks))
             else:
                 logger.info("Page '%s': no tasks found", title)
 
-            if not config.dry_run:
+            if not config.dry_run and not force:
                 source.mark_page_processed(page_id)
     except Exception:
         # Release the lock so the page retries next cycle
-        if not config.dry_run:
+        if not config.dry_run and not force:
             try:
                 source.clear_processing(page_id)
             except Exception:

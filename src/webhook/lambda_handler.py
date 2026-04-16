@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 def _init():
     """Shared initialisation."""
     config = load_config()
-    notion = NotionClient(auth=config.notion_api_token)
+    notion = NotionClient(auth=config.notion_api_token, notion_version="2026-03-11")
     client = NotionClientWrapper(notion)
     return config, client
 

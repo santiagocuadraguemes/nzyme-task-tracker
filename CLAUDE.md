@@ -70,32 +70,46 @@ PATH="C:/Users/Santiago Cuadra/vscode_projects/venv/Scripts:$PATH" sam build
 
 ## Architecture
 
-### Local polling mode (--watch)
+### Unified pipeline flow (transcript-first)
+
+The pipeline processes every meeting transcript-first. If a meeting has a `meeting_notes` block (Notion AI recording), it uses the 3-LLM-call transcript path. Otherwise, it falls back to the notes-based extraction.
 
 ```
-main.py → pipeline.run_sync():
-  0. template_injector → inject "Your own notes" section into new meeting pages
+pipeline.run_sync() / run_sync_for_page():
+  0. template_injector → inject "Your own notes" section (if enabled)
   then for each unprocessed meeting:
-    1. playbook_loader  → fetch playbook rules from Notion page
-    2. hierarchy_loader → snapshot Team Task Tracker parent-child tree
-    3. single_source    → fetch meeting content as plain text (filtered by INCLUDE_AI_NOTES)
-    4. ai_extractor     → call OpenAI with playbook + hierarchy + content
-    5. team_writer      → create task pages in Team Task Tracker
-    6. single_source    → mark meeting page as Processed
+    1. Load shared context (hierarchy, categories, users, deals, terminology, org chart, classifier prompt)
+    2. Check for meeting_notes block on page
+    IF transcript exists:
+      a. Resolve attendees (GCal → Notion → governance fallback)
+      b. Correct transcript (LLM call 1: TranscriptCorrector)
+      c. Extract tasks (LLM call 2: TaskExtractor)
+      d. Classify tasks (LLM call 3: TaskClassifier)
+    ELSE (notes fallback):
+      a. Fetch page content as plain text
+      b. AI extract + classify (1 LLM call: AIExtractor)
+    3. Semantic dedup → filter duplicates
+    4. Assignee fallback → default to meeting creator
+    5. team_writer → create task pages in Team Task Tracker
+    6. Mark meeting page as Processed
 ```
 
 ### Webhook / Lambda mode (serverless)
 
 ```
 Notion automation (page created) → API Gateway → Lambda: webhook_handler
-  → inject template, set "Template Injected" = true
+  → inject template, set "Template Injected" = true (if enabled)
 
 CloudWatch cron (1 min) → Lambda: extraction_handler
   → query: Processed=false AND Date<=now AND last_edited_time < now-3min
-  → for each ready page: extract tasks, mark Processed=true
+  → for each ready page: run_sync_for_page (transcript-first, notes fallback)
 ```
 
-Key design: playbook, hierarchy, category options, and deal context are all read dynamically from Notion at runtime. Schema changes in Notion require no code changes.
+Key design: prompts, hierarchy, category options, deal context, terminology, and org chart are all read dynamically from Notion at runtime. Schema changes in Notion require no code changes.
+
+**GCal in Lambda:** Google Calendar attendee lookup requires OAuth credentials and is skipped in Lambda. Lambda falls back to Notion meeting_notes attendees or governance property. CLI mode uses GCal when available.
+
+**Notion API version:** The entire project uses API version `2026-03-11` (supports `meeting_notes` blocks).
 
 ### Deal-aware extraction (Investment Team)
 
@@ -122,59 +136,57 @@ Threshold is configurable via `SEMANTIC_DEDUP_THRESHOLD` (default 0.85). When th
 
 | File | Responsibility |
 |------|---------------|
-| `src/pipeline.py` | Orchestrates the sync cycle |
-| `src/ai_extractor.py` | OpenAI prompt + function calling, parses tool_calls |
-| `src/playbook_loader.py` | Fetches playbook Notion page, converts to text, caches per run |
+| `src/pipeline.py` | Orchestrates the unified sync cycle (transcript-first, notes fallback) |
+| `src/ai_extractor.py` | OpenAI prompt + function calling for notes-based extraction (fallback path) |
 | `src/hierarchy_loader.py` | Queries tracker DB, builds parent-child tree (depth 4, smart pruning) |
 | `src/deal_context.py` | Loads deal workplan context from Deal Workplans DB |
 | `src/template_injector.py` | Injects "Your own notes" section into new meeting pages |
-| `src/sources/single_source.py` | Polls Meeting Notes DB with buffer delay, fetches page content (AI block filtering) |
+| `src/sources/single_source.py` | Polls Meeting Notes DB with buffer delay, fetches page content |
 | `src/tracker/team_writer.py` | Maps task dicts to Notion properties, creates pages |
 | `src/utils/blocks_to_text.py` | Converts Notion block arrays to plain text |
 | `src/config.py` | Pydantic config from env vars |
-| `src/notion_client_wrapper.py` | Rate-limited (3 req/s), auto-retry Notion API client |
+| `src/notion_client_wrapper.py` | Rate-limited (3 req/s), auto-retry Notion API client (v2026-03-11) |
 | `src/webhook/handler.py` | Processes Notion automation webhook payloads |
 | `src/webhook/lambda_handler.py` | Unified AWS Lambda entry point (routes webhook + cron) |
 | `template.yaml` | SAM template for AWS infrastructure |
 
-## Transcript Pipeline (WIP)
+## Transcript Pipeline
 
-A **separate module** (`src/transcript_pipeline/`) for post-processing Notion meeting transcripts. Notion AI Meeting Notes has poor voice recognition for domain-specific terms — this pipeline corrects them using an LLM + a terminology dictionary.
+The transcript pipeline modules (`src/transcript_pipeline/`) handle transcript-based task extraction. These modules are integrated into the main pipeline orchestrator (`src/pipeline.py`) and are also available as a standalone CLI for diagnostics.
 
-**Important:** This module uses Notion API version `2026-03-11` (for `meeting_notes` block support) via its own client instance. Do NOT change the main codebase's Notion client version (`2025-09-03`).
+### Pipeline steps
 
-### 5-step architecture
+1. **Fetch** raw transcript from Notion `meeting_notes` block
+2. **Load context** from Terminology DB + Org Chart DB + Google Calendar attendees
+3. **Correct** transcript via LLM (fix domain terms, speaker identification)
+4. **Extract** action items via LLM (commitment-aware prompting)
+5. **Classify** tasks via LLM (category, parent, assignee, deal mapping)
+6. **Write** classified tasks to Team Task Tracker (via `TeamTaskTrackerWriter`)
 
-1. **Fetch** raw transcript from Notion `meeting_notes` block ← *implemented*
-2. **Load context** from Terminology DB + Org Chart DB + Google Calendar attendees ← *implemented*
-3. **LLM correction** (OpenAI) using dictionary + org chart + attendee context ← *MVP implemented*
-4. **Extract structured data** (action items, decisions, topics) ← *MVP implemented* (`--extract` flag)
-5. **Write back** corrected transcript + structured data to Notion — *not yet*
-
-### Running
+### CLI (diagnostics + manual runs)
 
 ```bash
-# Fetch raw transcript only
-python -m src.transcript_pipeline <page_id> [--verbose]
+# Full pipeline: correct → extract → classify → write
+python -m src.transcript_pipeline <page_id> --write
+python -m src.transcript_pipeline <page_id> --write --dry-run
 
-# Fetch + show terminology/org chart context
-python -m src.transcript_pipeline <page_id> --context
+# Diagnostic: just correct the transcript
+python -m src.transcript_pipeline <page_id> --correct
 
-# Full correction pipeline (fetch + context + LLM correction)
-python -m src.transcript_pipeline <page_id> --correct --openai
-
-# Correct + extract tasks (prints formatted task list to stdout)
-python -m src.transcript_pipeline <page_id> --extract --openai
+# Diagnostic: correct + extract (no write)
+python -m src.transcript_pipeline <page_id> --extract
 
 # Override model
-python -m src.transcript_pipeline <page_id> --extract --openai --model gpt-5-mini
+python -m src.transcript_pipeline <page_id> --write --model gpt-5-mini
 
-# Test GCal attendee lookup only (no transcript fetch)
+# Force OpenAI endpoint (when OPENAI_BASE_URL points to Gemini)
+python -m src.transcript_pipeline <page_id> --write --openai
+
+# Test GCal attendee lookup only
 python -m src.transcript_pipeline <page_id> --gcal
-python -m src.transcript_pipeline <page_id> --gcal --verbose
 ```
 
-**Flag chain:** `--extract` implies `--correct`, which implies `--context`. The `--openai` flag forces the OpenAI endpoint (needed when `OPENAI_BASE_URL` points to Gemini).
+**`--write` routes through `pipeline.run_sync_for_page()`** — the unified pipeline with dedup, classification, and all post-processing. Diagnostic flags (`--correct`, `--extract`) run standalone without the full pipeline.
 
 ### Google Calendar integration
 
@@ -195,12 +207,12 @@ The `--extract` flag runs a second LLM call on the corrected transcript to extra
 
 | File | Responsibility |
 |------|---------------|
-| `src/transcript_pipeline/__main__.py` | CLI entry point |
-| `src/transcript_pipeline/fetch_transcript.py` | Find meeting_notes block, extract transcript, resolve attendees, page metadata, `strip_title_datetime()` |
-| `src/transcript_pipeline/transcript_client.py` | Factory: creates a Notion client with API v2026-03-11 |
+| `src/transcript_pipeline/__main__.py` | CLI entry point (diagnostics + `--write` routes through pipeline) |
+| `src/transcript_pipeline/fetch_transcript.py` | Find meeting_notes block, extract transcript, resolve attendees, page metadata |
 | `src/transcript_pipeline/context_loader.py` | Load terminology dictionary + org chart from Notion DBs |
 | `src/transcript_pipeline/transcript_corrector.py` | LLM-based transcript correction (OpenAI) |
 | `src/transcript_pipeline/task_extractor.py` | LLM-based action item extraction from corrected transcript |
+| `src/transcript_pipeline/task_classifier.py` | LLM-based task classification (category, parent, assignee, deal) |
 | `src/transcript_pipeline/gcal_attendees.py` | Google Calendar OAuth + attendee lookup + People API directory resolution |
 
 ### Notion databases (env vars in `.env`)
@@ -210,7 +222,7 @@ The `--extract` flag runs a second LLM call on the corrected transcript to extra
 
 ### Logfire
 
-Both LLM calls (correction + extraction) are tracked via logfire under service name `nzyme-transcript`. Token usage is automatic via `logfire.instrument_openai()`.
+All LLM calls (correction, extraction, classification) are tracked via logfire. Token usage is automatic via `logfire.instrument_openai()`.
 
 ## Team Task Tracker: Parent Items vs Extracted Tasks
 
