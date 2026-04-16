@@ -71,12 +71,21 @@ class TaskClassifier:
         hierarchy: list[dict[str, Any]],
         team_members: list[dict[str, str]],
         deal_context: str = "",
+        meeting_title: str = "",
+        meeting_date: str = "",
+        enriched_attendees: str = "",
+        notes_text: str = "",
     ) -> list[dict[str, Any]]:
         """Classify tasks and merge category/parent/assignee into each dict.
 
+        Meeting context (title, date, attendees, notes) is injected into the
+        user message so the classifier can infer deal/entity parents and avoid
+        mapping external-party names to internal Notion users.
+
         Returns:
             The same task list with ``category``, ``parent_task_id``,
-            ``assignee_id``, and ``deal_page_id`` merged in.
+            ``assignee_id``, ``deal_page_id``, and ``external_assignees``
+            (pass-through from the extractor) merged in.
         """
         if not tasks:
             return tasks
@@ -94,18 +103,43 @@ class TaskClassifier:
             DEAL_CONTEXT=deal_context or "No active deals.",
         )
 
-        # Build user prompt: tasks as JSON
+        # Build user message: meeting context block + tasks JSON
         task_input = [
             {
                 "index": i,
                 "title": t.get("title", ""),
                 "assignee": t.get("assignee", ""),
+                "internal_assignees": t.get("internal_assignees", []),
+                "external_assignees": t.get("external_assignees", []),
                 "priority": t.get("priority", "Medium"),
                 "due_date": t.get("due_date"),
             }
             for i, t in enumerate(tasks)
         ]
-        user_prompt = json.dumps(task_input, indent=2, ensure_ascii=False)
+
+        user_sections: list[str] = []
+        if meeting_title or meeting_date:
+            meeting_block = "=== MEETING CONTEXT ==="
+            if meeting_title:
+                meeting_block += f"\nTitle: {meeting_title}"
+            if meeting_date:
+                meeting_block += f"\nDate: {meeting_date}"
+            user_sections.append(meeting_block)
+        if enriched_attendees:
+            user_sections.append(
+                f"=== ATTENDEES (with org-chart role annotations where available) ===\n"
+                f"{enriched_attendees}"
+            )
+        if notes_text:
+            user_sections.append(
+                f"=== HUMAN NOTES (note-taker's ground truth — highest priority) ===\n"
+                f"{notes_text}"
+            )
+        user_sections.append(
+            "=== TASKS TO CLASSIFY ===\n"
+            + json.dumps(task_input, indent=2, ensure_ascii=False)
+        )
+        user_prompt = "\n\n".join(user_sections)
 
         logger.info(
             "Classifying %d tasks with %s",
@@ -182,6 +216,24 @@ class TaskClassifier:
                         aid,
                         task.get("title", "?")[:60],
                     )
+
+            # External assignee safety net: if the extractor flagged external
+            # assignees and there are no internal ones for this task, drop any
+            # IDs the classifier might have guessed via first-name aliasing.
+            # This is the defence against e.g. "Miguel Serrano (external)"
+            # being mapped to the internal Miguel.
+            ext = task.get("external_assignees") or []
+            internal = task.get("internal_assignees") or []
+            if ext and not internal and valid_ids:
+                logger.info(
+                    "Dropping %d assignee_id(s) for task '%s' — only external "
+                    "assignees (%s) were named; creator fallback will apply",
+                    len(valid_ids),
+                    task.get("title", "?")[:60],
+                    ", ".join(ext),
+                )
+                valid_ids = []
+
             task["assignee_id"] = valid_ids
 
             # Deal page ID (no validation — trust the LLM here, Notion will

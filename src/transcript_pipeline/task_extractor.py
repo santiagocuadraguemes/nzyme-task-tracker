@@ -51,7 +51,31 @@ of what happened in the meeting. Use them to:
 - Confirm or disambiguate task assignments
 - Identify action items the note-taker explicitly captured
 - Resolve speaker identity when transcript labels are ambiguous
+- Detect whether the meeting involves external participants (portfolio companies, \
+advisers, banks, etc.). Note-takers often label these explicitly — e.g. "This is a \
+White Vega Meeting (external), here are the attendees: ...".
 Human notes take priority over inferences from the transcript when they conflict.
+
+## Insider vs. External assignees (CRITICAL)
+
+Kibo Ventures keeps its Team Task Tracker for **internal** team members only. People \
+from portfolio companies, advisers, or other external parties don't have Notion \
+profiles and must not be mapped to internal user IDs.
+
+For every task, classify each named assignee as either **internal** or **external**:
+- **Internal** = the person appears in the MEETING ATTENDEES section with role/department \
+info (meaning they're in the org chart), OR they otherwise clearly belong to Kibo's \
+internal team based on the transcript / org chart.
+- **External** = the person is mentioned in the human notes as an external attendee, OR \
+they appear in the MEETING ATTENDEES section but have NO role annotation (plain name \
+with no "[Department — Role]"), OR the transcript / notes describe them as working for \
+a portfolio company, adviser, bank, or any non-Kibo organization.
+- When the same first name could match both an internal and an external person (e.g. \
+"Miguel" when Miguel Serrano from a portfolio company is in the meeting), default to \
+**external** unless the surrounding context clearly points to the internal person.
+
+A single task may be assigned to any mix of internal and external people. Split them \
+into two arrays (see Output below).
 
 ## Rules
 
@@ -73,13 +97,20 @@ Return a JSON object: {{"tasks": [...]}}
 
 Each task object:
 - "title": clear, actionable description (one sentence)
-- "assignee": person(s) responsible — comma-separated names from attendees/org chart. \
-Only use "Team" if absolutely no specific person can be inferred.
+- "assignee": person(s) responsible as a human-readable display string. \
+Comma-separated names, e.g. "Miguel Serrano, Sakhee Joisher". Only use "Team" \
+if absolutely no specific person can be inferred.
+- "internal_assignees": JSON array of names the responsible internal team members. \
+Use the EXACT names as written in the MEETING ATTENDEES section or org chart. Empty \
+array if no internal person is responsible.
+- "external_assignees": JSON array of names of responsible external people (portfolio \
+staff, advisers, etc.). Empty array if all assignees are internal.
 - "priority": "High" | "Medium" | "Low" based on urgency signals
 - "due_date": ISO date (YYYY-MM-DD) if a deadline is mentioned, otherwise null
 - "confidence": "high" | "medium" | "low"
 - "context": short transcript quote (1-2 sentences) that justifies this task
-- "speaker_reasoning": 1 sentence explaining why this task is assigned to this person
+- "speaker_reasoning": 1 sentence explaining why this task is assigned to these people, \
+AND why each external assignee (if any) was classified as external
 
 If no tasks are found, return {{"tasks": []}}.
 """

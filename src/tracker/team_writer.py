@@ -57,14 +57,15 @@ class TeamTaskTrackerWriter:
 
         Skips if a task with the same title (case-insensitive) already exists.
         """
-        normalized = self._normalize_title(task["title"])
+        title = self._build_display_title(task)
+        normalized = self._normalize_title(title)
         if normalized in self._existing_titles:
-            logger.info("DEDUP — skipping duplicate: %s", task["title"][:80])
+            logger.info("DEDUP — skipping duplicate: %s", title[:80])
             return None
 
         properties: dict[str, Any] = {
             "Task": {
-                "title": [{"text": {"content": task["title"][:2000]}}]
+                "title": [{"text": {"content": title[:2000]}}]
             },
             "Status": {
                 "status": {"name": task.get("status", "Not Started")}
@@ -104,14 +105,32 @@ class TeamTaskTrackerWriter:
             }
 
         if self._dry_run:
-            logger.info("DRY RUN — would create: %s", task["title"][:80])
+            logger.info("DRY RUN — would create: %s", title[:80])
             self._existing_titles.add(normalized)
             return None
 
         result = self._client.create_page(self._db_id, properties)
         self._existing_titles.add(normalized)
-        logger.info("Created task: %s (id=%s)", task["title"][:80], result.get("id"))
+        logger.info("Created task: %s (id=%s)", title[:80], result.get("id"))
         return result
+
+    @staticmethod
+    def _build_display_title(task: dict[str, Any]) -> str:
+        """Prepend an `[Ext: Name1, Name2]` marker when the task is assigned to
+        external people (portfolio staff, advisers, etc.).
+
+        The marker surfaces who the task is really for while the Assignee
+        (edit access) field stays routable to an internal owner.
+        """
+        base_title = task.get("title", "")
+        externals = task.get("external_assignees") or []
+        externals = [name for name in externals if isinstance(name, str) and name.strip()]
+        if not externals:
+            return base_title
+        prefix = f"[Ext: {', '.join(externals)}] "
+        # Respect Notion's 2000-char title cap: prefix stays, base truncates.
+        max_base = max(0, 2000 - len(prefix))
+        return prefix + base_title[:max_base]
 
     def write_batch(self, tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Write multiple tasks. Failures on individual tasks don't abort the batch."""

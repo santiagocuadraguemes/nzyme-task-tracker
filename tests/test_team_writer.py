@@ -112,3 +112,55 @@ class TestTeamTaskTrackerWriter:
         results = writer.write_batch(tasks)
 
         assert len(results) == 1
+
+    def test_external_assignees_prepend_title(self):
+        client = MagicMock()
+        client.create_page.return_value = {"id": "new-page"}
+        writer = TeamTaskTrackerWriter(client, "db-tracker")
+
+        task = {
+            "title": "Call Enrique about SAREB",
+            "priority": "High",
+            "category": "Value Creation (Portfolio)",
+            "external_assignees": ["Miguel Serrano", "Alvaro"],
+        }
+        writer.create_task(task)
+
+        props = client.create_page.call_args.args[1]
+        written = props["Task"]["title"][0]["text"]["content"]
+        assert written == "[Ext: Miguel Serrano, Alvaro] Call Enrique about SAREB"
+
+    def test_external_assignees_empty_list_unchanged(self):
+        client = MagicMock()
+        client.create_page.return_value = {"id": "new-page"}
+        writer = TeamTaskTrackerWriter(client, "db-tracker")
+
+        task = {
+            "title": "Plain task",
+            "priority": "Low",
+            "category": "Other",
+            "external_assignees": [],
+        }
+        writer.create_task(task)
+
+        props = client.create_page.call_args.args[1]
+        assert props["Task"]["title"][0]["text"]["content"] == "Plain task"
+
+    def test_external_assignees_respect_title_length_cap(self):
+        client = MagicMock()
+        client.create_page.return_value = {"id": "new-page"}
+        writer = TeamTaskTrackerWriter(client, "db-tracker")
+
+        long_title = "A" * 3000
+        task = {
+            "title": long_title,
+            "priority": "Low",
+            "category": "Other",
+            "external_assignees": ["Ext Person"],
+        }
+        writer.create_task(task)
+
+        props = client.create_page.call_args.args[1]
+        written = props["Task"]["title"][0]["text"]["content"]
+        assert written.startswith("[Ext: Ext Person] ")
+        assert len(written) <= 2000

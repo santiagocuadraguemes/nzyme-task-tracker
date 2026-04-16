@@ -20,6 +20,8 @@ def _classify_and_write(
     base_url: str | None,
     metadata: dict[str, str],
     api_key: str | None = None,
+    enriched_attendees: str = "",
+    notes_text: str = "",
 ) -> None:
     """Classify extracted tasks and write them to the Team Task Tracker."""
     logger = logging.getLogger(__name__)
@@ -84,7 +86,16 @@ def _classify_and_write(
         base_url=base_url,
     )
     tasks = classifier.classify(
-        tasks, classifier_prompt, categories, hierarchy, all_users, deal_context,
+        tasks,
+        classifier_prompt,
+        categories,
+        hierarchy,
+        all_users,
+        deal_context,
+        meeting_title=metadata.get("title", ""),
+        meeting_date=metadata.get("date", ""),
+        enriched_attendees=enriched_attendees,
+        notes_text=notes_text,
     )
 
     # Assignee fallback: default to meeting creator
@@ -113,6 +124,9 @@ def _classify_and_write(
         print(f"  {i}. {title}")
         print(f"     Category: {category}")
         print(f"     Assignee: {assignee_name} -> ID: {id_str}")
+        ext = t.get("external_assignees") or []
+        if ext:
+            print(f"     External: {', '.join(ext)}  (will be prepended to title)")
         print(f"     Parent: {parent_id}")
         if t.get("deal_page_id"):
             print(f"     Deal: {t['deal_page_id']}")
@@ -477,7 +491,17 @@ def main() -> None:
                 use_classifier_openai = args.classifier_openai or args.openai
                 classifier_base_url = "https://api.openai.com/v1" if use_classifier_openai else cfg.openai_base_url
                 classifier_api_key = cfg.openai_api_key if use_classifier_openai else (cfg.gemini_api_key or cfg.openai_api_key)
-                _classify_and_write(tasks, args, cfg, classifier_model, classifier_base_url, metadata, classifier_api_key)
+                _classify_and_write(
+                    tasks,
+                    args,
+                    cfg,
+                    classifier_model,
+                    classifier_base_url,
+                    metadata,
+                    classifier_api_key,
+                    enriched_attendees=enriched_attendee_str,
+                    notes_text=notes_text,
+                )
     else:
         print()
         print("=== TRANSCRIPT ===")
