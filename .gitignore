@@ -48,3 +48,6 @@ venv/
 
 # .venv / venv intentionally excluded — the virtual environment lives at the
 # parent directory level and is shared across all workspace projects.
+
+# Git worktrees
+.worktrees/
