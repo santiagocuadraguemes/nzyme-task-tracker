@@ -12,12 +12,17 @@ class SyncConfig(BaseModel):
     """Validated runtime configuration."""
 
     notion_api_token: str = Field(..., description="Notion integration token")
-    openai_api_key: str = Field(..., description="OpenAI API key")
-    gemini_api_key: str | None = Field(None, description="Google Gemini API key (used when base_url points to Gemini)")
-    openai_model: str = Field("gpt-4.1", description="OpenAI model name")
-    # TEMPORARY: base_url allows using Gemini's OpenAI-compatible endpoint for testing.
-    # Remove once we switch back to OpenAI (target model: gpt-5-mini).
-    openai_base_url: str | None = Field(None, description="Custom base URL for OpenAI-compatible APIs")
+    # Light calls (classifier, fundraising summary, embeddings) → OpenAI
+    openai_api_key: str = Field(..., description="OpenAI API key — used for light calls (classifier, fundraising summary, embeddings)")
+    openai_model: str = Field("gpt-5-mini", description="OpenAI model for light calls (classifier + fundraising summary)")
+    openai_base_url: str | None = Field(None, description="Deprecated; unused by pipeline routing. Retained for backward compat.")
+    # Heavy calls (transcript correction, task extraction) → Gemini via OpenAI-compatible endpoint
+    gemini_api_key: str | None = Field(None, description="Google Gemini API key — used for heavy calls (transcript correction, task extraction)")
+    gemini_model: str = Field("gemini-3-flash-preview", description="Gemini model for heavy calls")
+    gemini_base_url: str = Field(
+        "https://generativelanguage.googleapis.com/v1beta/openai/",
+        description="Gemini OpenAI-compatible base URL for heavy calls",
+    )
     meeting_notes_db_id: str = Field(..., description="Meeting Notes DB ID")
     team_tracker_db_id: str = Field(..., description="Team Task Tracker DB ID")
     system_prompt_page_id: str = Field(..., description="Notion page ID for AI system prompt")
@@ -43,6 +48,47 @@ class SyncConfig(BaseModel):
     webhook_path_token: str | None = Field(None, description="Secret URL token for webhook auth")
     idle_minutes: int = Field(3, description="Minutes of inactivity before AI extraction triggers")
     aws_region: str = Field("eu-west-1", description="AWS region for Lambda deployment")
+    # Google Calendar (service account + Domain-Wide Delegation)
+    google_service_account_file: str | None = Field(
+        None,
+        description="Local path to service-account.json (dev). Mutually exclusive with secret ARN.",
+    )
+    google_service_account_secret_arn: str | None = Field(
+        None,
+        description="AWS Secrets Manager ARN holding the service-account JSON (Lambda).",
+    )
+    gcal_delegated_user_default: str | None = Field(
+        None,
+        description=(
+            "Default Workspace email for SA impersonation when the meeting creator "
+            "can't be resolved (e.g., bot-created pages, ex-employees)."
+        ),
+    )
+
+    @property
+    def gcal_enabled(self) -> bool:
+        """GCal lookup is active when a credential source AND a default user are configured."""
+        has_creds = bool(self.google_service_account_file or self.google_service_account_secret_arn)
+        return has_creds and bool(self.gcal_delegated_user_default)
+    # Fundraising → Affinity branch (optional; opt-in via FUNDRAISING_BRANCH_ENABLED)
+    fundraising_branch_enabled: bool = Field(
+        False,
+        description="Enable Affinity sync for meetings tagged 'Meeting type = Fundraising'",
+    )
+    affinity_api_key: str | None = Field(
+        None, description="Affinity API key (HTTP basic auth, empty username)",
+    )
+    affinity_lp_funnel_list_id: int = Field(
+        168609, description="Affinity list ID for the Nzyme - LP Funnel list",
+    )
+    kibo_user_map_path: str | None = Field(
+        None,
+        description=(
+            "Path to JSON file mapping Kibo team members across "
+            "Notion/email/Affinity user ids. Defaults to "
+            "src/fundraising/data/kibo_user_map.json"
+        ),
+    )
 
 
 def load_config() -> SyncConfig:
@@ -52,9 +98,14 @@ def load_config() -> SyncConfig:
     return SyncConfig(
         notion_api_token=os.environ["NOTION_API_TOKEN"],
         openai_api_key=os.environ["OPENAI_API_KEY"],
+        openai_model=os.getenv("OPENAI_MODEL", "gpt-5-mini"),
+        openai_base_url=os.getenv("OPENAI_BASE_URL"),  # deprecated; unused
         gemini_api_key=os.getenv("GEMINI_API_KEY"),
-        openai_model=os.getenv("OPENAI_MODEL", "gpt-4.1"),
-        openai_base_url=os.getenv("OPENAI_BASE_URL"),  # TEMPORARY: for Gemini testing
+        gemini_model=os.getenv("GEMINI_MODEL", "gemini-3-flash-preview"),
+        gemini_base_url=os.getenv(
+            "GEMINI_BASE_URL",
+            "https://generativelanguage.googleapis.com/v1beta/openai/",
+        ),
         meeting_notes_db_id=os.environ["MEETING_NOTES_DB_ID"],
         team_tracker_db_id=os.environ["TEAM_TRACKER_DB_ID"],
         system_prompt_page_id=os.environ["SYSTEM_PROMPT_PAGE_ID"],
@@ -76,4 +127,12 @@ def load_config() -> SyncConfig:
         webhook_path_token=os.getenv("WEBHOOK_PATH_TOKEN"),
         idle_minutes=int(os.getenv("IDLE_MINUTES", "3")),
         aws_region=os.getenv("AWS_REGION", "eu-west-1"),
+        google_service_account_file=os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE"),
+        google_service_account_secret_arn=os.getenv("GOOGLE_SERVICE_ACCOUNT_SECRET_ARN"),
+        gcal_delegated_user_default=os.getenv("GCAL_DELEGATED_USER_DEFAULT"),
+        fundraising_branch_enabled=os.getenv("FUNDRAISING_BRANCH_ENABLED", "false").lower()
+        in ("true", "1", "yes"),
+        affinity_api_key=os.getenv("AFFINITY_API_KEY"),
+        affinity_lp_funnel_list_id=int(os.getenv("AFFINITY_LP_FUNNEL_LIST_ID", "168609")),
+        kibo_user_map_path=os.getenv("KIBO_USER_MAP_PATH"),
     )

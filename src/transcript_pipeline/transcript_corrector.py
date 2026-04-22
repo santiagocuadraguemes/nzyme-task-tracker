@@ -6,8 +6,6 @@ import logging
 
 from openai import OpenAI
 
-from src.transcript_pipeline.token_usage import log_token_usage
-
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """\
@@ -104,7 +102,7 @@ class TranscriptCorrector:
 {transcript}
 """
 
-        logger.info(
+        logger.debug(
             "Sending transcript to %s for correction (%d chars, %d attendees)",
             self._model,
             len(transcript),
@@ -121,9 +119,7 @@ class TranscriptCorrector:
 
         corrected = response.choices[0].message.content or ""
 
-        log_token_usage(self._model, response.usage)
-
-        logger.info(
+        logger.debug(
             "Correction complete: %d input chars → %d output chars",
             len(transcript),
             len(corrected),

@@ -245,3 +245,8 @@ class NotionClientWrapper:
             next_cursor = response.get("next_cursor")
 
         return all_users
+
+    def retrieve_user(self, user_id: str) -> dict[str, Any]:
+        """Fetch a single user by ID. For person users, `person.email` carries the
+        Workspace email (if the integration has user-info scope)."""
+        return self._call_with_retry(self._client.users.retrieve, user_id=user_id)

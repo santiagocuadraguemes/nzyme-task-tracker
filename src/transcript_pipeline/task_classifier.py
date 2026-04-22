@@ -13,8 +13,6 @@ from typing import Any
 
 from openai import OpenAI
 
-from src.transcript_pipeline.token_usage import log_token_usage
-
 logger = logging.getLogger(__name__)
 
 
@@ -141,7 +139,7 @@ class TaskClassifier:
         )
         user_prompt = "\n\n".join(user_sections)
 
-        logger.info(
+        logger.debug(
             "Classifying %d tasks with %s",
             len(tasks),
             self._model,
@@ -157,7 +155,6 @@ class TaskClassifier:
         )
 
         raw = response.choices[0].message.content or "{}"
-        log_token_usage(self._model, response.usage)
 
         data = json.loads(raw)
         classified = data.get("tasks", [])
@@ -249,5 +246,5 @@ class TaskClassifier:
                 )
                 task["category"] = "Other"
 
-        logger.info("Classified %d tasks", len(tasks))
+        logger.debug("Classified %d tasks", len(tasks))
         return tasks

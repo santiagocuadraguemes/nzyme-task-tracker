@@ -7,8 +7,6 @@ import logging
 
 from openai import OpenAI
 
-from src.transcript_pipeline.token_usage import log_token_usage
-
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """\
@@ -181,7 +179,7 @@ class TaskExtractor:
 
         user_prompt = "\n\n".join(sections)
 
-        logger.info(
+        logger.debug(
             "Extracting tasks from transcript with %s (%d chars, %d attendees)",
             self._model,
             len(transcript),
@@ -199,10 +197,8 @@ class TaskExtractor:
 
         raw = response.choices[0].message.content or "{}"
 
-        log_token_usage(self._model, response.usage)
-
         data = json.loads(raw)
         tasks = data.get("tasks", [])
 
-        logger.info("Extracted %d tasks", len(tasks))
+        logger.debug("Extracted %d tasks", len(tasks))
         return tasks

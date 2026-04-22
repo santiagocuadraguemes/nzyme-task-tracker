@@ -18,6 +18,23 @@ pip install -e "nzyme-task-tracker/.[dev]"
 
 Environment: copy `.env.example` to `.env` and fill in credentials. Never commit `.env`.
 
+## LLM keys — two-key setup
+
+Nzyme uses **two separate API keys** to balance cost and quality. When a run fails with an "API key not valid" error, check which endpoint was called to know which key to rotate.
+
+| Stage | Model | Env var |
+|-------|-------|---------|
+| Transcript correction (heavy) | `gemini-3-flash-preview` (Gemini 3 Flash Preview — **not** `gemini-2.5-flash`) | `GEMINI_API_KEY` |
+| Task extraction (heavy) | `gemini-3-flash-preview` (Gemini 3 Flash Preview — **not** `gemini-2.5-flash`) | `GEMINI_API_KEY` |
+| Task classification (light) | `gpt-5-mini` | `OPENAI_API_KEY` |
+| Fundraising next-step summary (light) | `gpt-5-mini` | `OPENAI_API_KEY` |
+| Semantic dedup embeddings (light) | `text-embedding-3-small` | `OPENAI_API_KEY` |
+
+- Endpoint `generativelanguage.googleapis.com` → it's the Gemini key (`GEMINI_API_KEY`).
+- Endpoint `api.openai.com` → it's the OpenAI key (`OPENAI_API_KEY`).
+
+When suggesting any run command to Santiago, always prefix with this key/model split so he knows which key to check if the run fails.
+
 ## Commands
 
 ```bash
@@ -107,7 +124,11 @@ CloudWatch cron (1 min) → Lambda: extraction_handler
 
 Key design: prompts, hierarchy, category options, deal context, terminology, and org chart are all read dynamically from Notion at runtime. Schema changes in Notion require no code changes.
 
-**GCal in Lambda:** Google Calendar attendee lookup requires OAuth credentials and is skipped in Lambda. Lambda falls back to Notion meeting_notes attendees or governance property. CLI mode uses GCal when available.
+**GCal attendees (CLI + Lambda):** Google Calendar attendee lookup uses a **service account with Domain-Wide Delegation** (scope: `https://www.googleapis.com/auth/calendar`). The SA impersonates the meeting page's Notion creator per-meeting to search that user's primary calendar, falling back to `GCAL_DELEGATED_USER_DEFAULT` when the creator's email can't be resolved. Names are resolved by matching attendee emails against the **Email** property on the Notion Org Chart DB (the People API / directory scope is not authorized, so this is the single source of truth for email → name).
+
+- **Local dev:** set `GOOGLE_SERVICE_ACCOUNT_FILE=.secrets/service-account.json` (gitignored) + `GCAL_DELEGATED_USER_DEFAULT` in `.env`.
+- **Lambda:** create a Secrets Manager secret whose value is the raw `service-account.json` contents, then pass its ARN as the `GoogleServiceAccountSecretArn` SAM parameter at deploy time. The SAM template conditionally grants `secretsmanager:GetSecretValue` scoped to that ARN.
+- **Org Chart prerequisite:** each active row must have the **Email** property populated for email-based matching to work. Rows without email fall back to name-substring matching (the pre-existing behavior).
 
 **Notion API version:** The entire project uses API version `2026-03-11` (supports `meeting_notes` blocks).
 
@@ -192,9 +213,13 @@ python -m src.transcript_pipeline <page_id> --gcal
 
 GCal is the **authoritative attendee source** when a matching calendar event exists. The pipeline searches GCal by cleaned meeting title (ISO datetime suffix stripped via `strip_title_datetime()`), and when found, **replaces** Notion's attendee list entirely. Falls back to Notion attendees only when no GCal event is found.
 
-Name resolution uses the **Google People API** (`listDirectoryPeople`) to fetch the full Workspace directory, building an `{email → full_name}` lookup. This is reliable across the whole org — no email-prefix guessing.
+**Auth:** Google Cloud **service account** with Domain-Wide Delegation, scope `https://www.googleapis.com/auth/calendar`. The SA impersonates the Notion page creator per-meeting (resolved via `client.users.retrieve`), falling back to `GCAL_DELEGATED_USER_DEFAULT`. Works identically in CLI and Lambda.
 
-**Setup:** Google Cloud project with Calendar API + People API enabled + Desktop OAuth credentials (`credentials.json` → `token.json`). OAuth scopes: `calendar.readonly` + `directory.readonly`.
+**Name resolution:** Calendar event attendees come back with emails only (no `displayName`), and the `directory.readonly` scope is not authorized. Names are resolved by matching attendee emails against the **Email** property on the Notion Org Chart DB. External attendees (non-Kibo emails) pass through with email-only — the LLM handles them as "external guests."
+
+**Credentials:**
+- **Local:** `GOOGLE_SERVICE_ACCOUNT_FILE=.secrets/service-account.json` (gitignored).
+- **Lambda:** `GOOGLE_SERVICE_ACCOUNT_SECRET_ARN` pointing at a Secrets Manager secret holding the JSON. SAM template grants `secretsmanager:GetSecretValue` conditionally (only if the ARN parameter is set).
 
 **Known issue:**
 - **Date fallback**: The Notion "Date" property is empty for some meeting pages — currently falls back to `created_time` which may not match the actual meeting time.
@@ -213,16 +238,41 @@ The `--extract` flag runs a second LLM call on the corrected transcript to extra
 | `src/transcript_pipeline/transcript_corrector.py` | LLM-based transcript correction (OpenAI) |
 | `src/transcript_pipeline/task_extractor.py` | LLM-based action item extraction from corrected transcript |
 | `src/transcript_pipeline/task_classifier.py` | LLM-based task classification (category, parent, assignee, deal) |
-| `src/transcript_pipeline/gcal_attendees.py` | Google Calendar OAuth + attendee lookup + People API directory resolution |
+| `src/transcript_pipeline/gcal_attendees.py` | Google Calendar lookup via service account (DWD) — per-meeting impersonation, emails-only; names resolved downstream via Org Chart |
 
 ### Notion databases (env vars in `.env`)
 
 - **Terminology DB** (`TERMINOLOGY_DB_ID`): Term, Phonetic Variants, Category, Context, Active
-- **Org Chart DB** (`ORG_CHART_DB_ID`): Name, Role, Department, Seniority, Typical Topics, Active
+- **Org Chart DB** (`ORG_CHART_DB_ID`): Name, **Email** (required for GCal attendee matching), Role, Department, Seniority, Typical Topics, Active
 
 ### Logfire
 
 All LLM calls (correction, extraction, classification) are tracked via logfire. Token usage is automatic via `logfire.instrument_openai()`.
+
+## Fundraising → Affinity branch (opt-in)
+
+When a meeting is tagged `Meeting type = Fundraising`, the pipeline mirrors a short summary of the extracted next step to Affinity's **Nzyme - LP Funnel** list (id `168609`) after the primary tracker write. Off by default; enable with `FUNDRAISING_BRANCH_ENABLED=true`.
+
+**What it does (current, note-only mode):**
+1. Matches the meeting to exactly one LP via attendee emails → Affinity persons → organization → list entry. On 0 or >1 matches, skips.
+2. LLM-summarises the classified tasks into a short next-step text.
+3. Posts an HTML meeting note attached to the matched LP's **opportunity** (title + summary + Notion backlink).
+
+Field updates (`Nzyme next step`, `Follow Up Date`, `OWNER`, `DETAILS`) are **deferred** — `write_next_step_to_lp` and `_resolve_owner` remain in the module and can be re-wired in `src/fundraising/__init__.py` once the note-only flow is validated.
+
+**Email source (manual):** GCal isn't yet available to Lambda, so LPs are matched from a manual **`LP Emails`** rich-text property on the meeting page (comma/semicolon-separated). These emails are merged into the attendee list in `pipeline.py` before the fundraising branch runs; internal Kibo emails and emails not matching any LP are silently ignored by the matcher. This also unblocks Lambda-mode fundraising runs.
+
+**Soft-fail**: Affinity errors are logged but never block the tracker write.
+
+**Key files:**
+- `src/affinity_client.py` — V1 REST wrapper (Basic auth, rate-limited)
+- `src/fundraising/__init__.py` — orchestrator `write_to_affinity` (currently wired to `post_meeting_note_to_lp`)
+- `src/fundraising/lp_matcher.py` — one-LP-per-meeting resolution (logs per-email match/ignore)
+- `src/fundraising/next_step_summarizer.py` — enum-constrained LLM call (produces note summary)
+- `src/fundraising/affinity_writer.py` — `post_meeting_note_to_lp` (note-only, attaches via `opportunity_ids`); `write_next_step_to_lp` kept for future field-write re-enable
+- `src/fundraising/data/kibo_user_map.json` — static Notion/email ↔ Affinity user-id map; only needed once OWNER field writes are re-enabled
+
+**Env vars:** `FUNDRAISING_BRANCH_ENABLED`, `AFFINITY_API_KEY`, `AFFINITY_LP_FUNNEL_LIST_ID` (default 168609), `KIBO_USER_MAP_PATH` (optional override).
 
 ## Team Task Tracker: Parent Items vs Extracted Tasks
 

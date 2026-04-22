@@ -51,7 +51,7 @@ class SingleSource:
             sorts=[{"timestamp": "last_edited_time", "direction": "descending"}],
         )
         pages = response.get("results", [])
-        logger.info("Found %d unprocessed pages (buffer=%dh)", len(pages), buffer_hours)
+        logger.debug("Found %d unprocessed pages (buffer=%sh)", len(pages), buffer_hours)
         return pages
 
     def get_processed_pages(self) -> list[dict]:
@@ -87,6 +87,10 @@ class SingleSource:
 
         date_prop = props.get("Date", {}).get("date")
         date_str = date_prop.get("start", "") if date_prop else ""
+        if not date_str:
+            # Fallback: some pages don't have a Date property set. Use page
+            # created_time so GCal matching + date-aware logic still work.
+            date_str = page.get("created_time", "")
 
         mt_prop = props.get("Meeting type", {}).get("select")
         meeting_type = mt_prop.get("name", "") if mt_prop else ""
@@ -95,6 +99,16 @@ class SingleSource:
             {"id": p.get("id", ""), "name": p.get("name", "")}
             for p in props.get("Attendees", {}).get("people", [])
         ]
+
+        lp_emails_raw = "".join(
+            p.get("plain_text", "")
+            for p in props.get("LP Emails", {}).get("rich_text", [])
+        )
+        lp_emails: list[str] = []
+        for token in lp_emails_raw.replace(";", ",").split(","):
+            candidate = token.strip().lower()
+            if "@" in candidate:
+                lp_emails.append(candidate)
 
         created_by_prop = page.get("created_by", {})
         created_by = {
@@ -107,7 +121,9 @@ class SingleSource:
             "date": date_str,
             "meeting_type": meeting_type,
             "attendees": attendees,
+            "lp_emails": lp_emails,
             "created_by": created_by,
+            "url": page.get("url", ""),
         }
 
     def get_ready_pages(self, idle_minutes: int = 3) -> list[dict]:
@@ -118,7 +134,7 @@ class SingleSource:
         - last_edited_time < now - idle_minutes (no one actively editing)
         """
         idle_cutoff = datetime.now(timezone.utc) - timedelta(minutes=idle_minutes)
-        logger.info(
+        logger.debug(
             "get_ready_pages: idle_cutoff=%s, db=%s",
             idle_cutoff.isoformat(), self._database_id,
         )
@@ -138,12 +154,14 @@ class SingleSource:
             sorts=[{"timestamp": "last_edited_time", "direction": "descending"}],
         )
         pages = response.get("results", [])
-        logger.info("Found %d pages ready for extraction (idle>%dmin)", len(pages), idle_minutes)
         if pages:
+            logger.debug(
+                "Found %d pages ready for extraction (idle>%dmin)", len(pages), idle_minutes,
+            )
             for p in pages[:5]:
                 pid = p.get("id", "?")
                 let = p.get("last_edited_time", "?")
-                logger.info("  ready page: id=%s last_edited=%s", pid, let)
+                logger.debug("  ready page: id=%s last_edited=%s", pid, let)
         return pages
 
     def mark_processing(self, page_id: str) -> None:

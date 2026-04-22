@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from datetime import datetime, timedelta, timezone
 
 import logfire
@@ -36,6 +37,12 @@ from src.transcript_pipeline.fetch_transcript import (
 from src.utils.blocks_to_text import blocks_to_text
 
 logger = logging.getLogger(__name__)
+
+# Hardcoded OpenAI base URL for LIGHT calls. We must pass this explicitly
+# because the OpenAI SDK falls back to the OPENAI_BASE_URL env var when
+# base_url is None — which would route light calls to Gemini if that env
+# var is still set from an older config.
+OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1"
 
 
 def _load_categories(client: NotionClientWrapper, database_id: str) -> list[str]:
@@ -104,7 +111,7 @@ def _load_existing_tasks(
 
         tasks.append({"title": title, "parent_title": parent_title})
 
-    logger.info("Loaded %d existing tasks for AI dedup context (last 30min)", len(tasks))
+    logger.debug("Loaded %d existing tasks for AI dedup context (last 30min)", len(tasks))
     return tasks
 
 
@@ -211,22 +218,77 @@ def _run_semantic_dedup(
     return kept
 
 
+def _resolve_delegated_user(
+    client: NotionClientWrapper,
+    created_by_id: str,
+    default_email: str | None,
+) -> str | None:
+    """Resolve the meeting page's Notion creator to a Workspace email.
+
+    Returns the creator's email when retrievable, else `default_email`.
+    The returned email is used to impersonate a Workspace user when calling
+    Google Calendar via the service account.
+    """
+    if created_by_id:
+        try:
+            user = client.retrieve_user(created_by_id)
+            email = (user.get("person") or {}).get("email") or ""
+            if email:
+                return email.strip().lower()
+            logger.info(
+                "Notion user %s has no email (bot or integration-gated); using default %s",
+                created_by_id, default_email,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to retrieve Notion user %s; using default %s",
+                created_by_id, default_email, exc_info=True,
+            )
+    return default_email
+
+
+def _enrich_attendee_names(
+    attendees: list[dict[str, str]],
+    org_chart_rows: list[dict] | None,
+) -> list[dict[str, str]]:
+    """Replace email-prefix placeholder names with Org Chart full names when available."""
+    if not org_chart_rows:
+        return attendees
+    email_to_name = {
+        row["email"]: row["name"]
+        for row in org_chart_rows
+        if row.get("email") and row.get("name")
+    }
+    enriched: list[dict[str, str]] = []
+    for att in attendees:
+        email = (att.get("email") or "").lower()
+        if email and email in email_to_name:
+            enriched.append({**att, "name": email_to_name[email]})
+        else:
+            enriched.append(att)
+    return enriched
+
+
 def _resolve_attendees(
     client: NotionClientWrapper,
+    config: SyncConfig,
     mn_block: dict | None,
     page: dict,
     metadata: dict,
     *,
-    use_gcal: bool = False,
+    org_chart_rows: list[dict] | None = None,
 ) -> list[dict[str, str]]:
     """Resolve meeting attendees via the priority chain.
 
     Priority:
-    1. Google Calendar (when use_gcal=True and available)
-    2. Notion meeting_notes.calendar_event.attendees
-    3. Page's "Governance: Edit & View Access" people property
+    1. Google Calendar (when `config.gcal_enabled`) — impersonates the page's
+       Notion creator via service account; falls back to default delegated
+       user if the creator's email can't be resolved.
+    2. Notion meeting_notes.calendar_event.attendees.
+    3. Page's "Governance: Edit & View Access" people property.
 
-    Returns list of {"id": ..., "name": ...} dicts.
+    Returns list of {"id", "name", optional "email"} dicts. GCal-sourced
+    attendees carry `email`; other sources set it to None.
     """
     attendees: list[dict[str, str]] = []
 
@@ -236,31 +298,54 @@ def _resolve_attendees(
         if attendee_ids:
             user_lookup = build_user_lookup(client)
             attendees = [
-                {"id": uid, "name": user_lookup.get(uid, uid)}
+                {"id": uid, "name": user_lookup.get(uid, uid), "email": None}
                 for uid in attendee_ids
             ]
 
-    # Source 1: Google Calendar (CLI only, overrides Notion if found)
-    if use_gcal and metadata.get("title") and metadata.get("date"):
+    # Source 1: Google Calendar (overrides Notion when an event matches)
+    gcal_ready = config.gcal_enabled and metadata.get("title") and metadata.get("date")
+    if gcal_ready:
         try:
             from src.transcript_pipeline.gcal_attendees import get_gcal_attendees
 
-            gcal_attendees = get_gcal_attendees(metadata["title"], metadata["date"])
-            if gcal_attendees:
-                attendees = [
-                    {"id": ga["email"], "name": ga["name"]}
-                    for ga in gcal_attendees
-                ]
-                logger.info("GCal attendees resolved: %d", len(attendees))
+            created_by_id = (metadata.get("created_by") or {}).get("id", "")
+            delegated_user = _resolve_delegated_user(
+                client, created_by_id, config.gcal_delegated_user_default,
+            )
+            if not delegated_user:
+                logger.warning(
+                    "No Workspace user to impersonate for GCal lookup — skipping",
+                )
+            else:
+                logger.debug("GCal lookup impersonating %s", delegated_user)
+                gcal_attendees = get_gcal_attendees(
+                    metadata["title"], metadata["date"], delegated_user,
+                )
+                if gcal_attendees:
+                    attendees = [
+                        {"id": ga["email"], "name": ga["name"], "email": ga["email"]}
+                        for ga in gcal_attendees
+                    ]
+                    attendees = _enrich_attendee_names(attendees, org_chart_rows)
+                    logger.info("GCal attendees resolved: %d", len(attendees))
         except Exception:
             logger.warning("GCal lookup failed — using Notion attendees", exc_info=True)
+    else:
+        reasons = []
+        if not config.gcal_enabled:
+            reasons.append("gcal_enabled=False")
+        if not metadata.get("title"):
+            reasons.append("no title")
+        if not metadata.get("date"):
+            reasons.append("no date")
+        logger.debug("GCal lookup skipped: %s", ", ".join(reasons))
 
     # Source 3: Governance fallback
     if not attendees:
         governance = extract_governance_attendees(page)
         if governance:
-            attendees = governance
-            logger.info(
+            attendees = [{**g, "email": None} for g in governance]
+            logger.debug(
                 "Using governance-access fallback (%d attendees)", len(attendees),
             )
 
@@ -306,11 +391,15 @@ def _process_via_transcript(
     if ctx["org_chart_rows"] and attendees:
         enriched_attendee_str = build_enriched_attendee_str(attendees, ctx["org_chart_rows"])
 
-    # Step 1: Correct transcript
+    # Step 1: Correct transcript — HEAVY call → Gemini
+    if not config.gemini_api_key:
+        raise RuntimeError(
+            "GEMINI_API_KEY is required for transcript correction. Set it in .env."
+        )
     corrector = TranscriptCorrector(
-        api_key=config.openai_api_key,
-        model=config.openai_model,
-        base_url=config.openai_base_url,
+        api_key=config.gemini_api_key,
+        model=config.gemini_model,
+        base_url=config.gemini_base_url,
     )
     corrected = corrector.correct(
         transcript_text,
@@ -319,13 +408,13 @@ def _process_via_transcript(
         enriched_attendee_str=enriched_attendee_str,
         notes_text=notes_text,
     )
-    logger.info("Transcript corrected (%d → %d chars)", len(transcript_text), len(corrected))
+    logger.debug("Transcript corrected (%d → %d chars)", len(transcript_text), len(corrected))
 
-    # Step 2: Extract tasks
+    # Step 2: Extract tasks — HEAVY call → Gemini
     extractor = TaskExtractor(
-        api_key=config.openai_api_key,
-        model=config.openai_model,
-        base_url=config.openai_base_url,
+        api_key=config.gemini_api_key,
+        model=config.gemini_model,
+        base_url=config.gemini_base_url,
     )
     tasks = extractor.extract(
         corrected,
@@ -338,11 +427,11 @@ def _process_via_transcript(
         notes_text=notes_text,
     )
     if not tasks:
-        logger.info("No tasks extracted from transcript")
+        logger.debug("No tasks extracted from transcript")
         return []
-    logger.info("Extracted %d tasks from transcript", len(tasks))
+    logger.debug("Extracted %d tasks from transcript", len(tasks))
 
-    # Step 3: Classify tasks (category, parent, assignee, deal)
+    # Step 3: Classify tasks — LIGHT call → OpenAI
     if not ctx["classifier_prompt"]:
         logger.warning("No classifier prompt — skipping classification, tasks will have no category/parent")
         return tasks
@@ -350,7 +439,7 @@ def _process_via_transcript(
     classifier = TaskClassifier(
         api_key=config.openai_api_key,
         model=config.openai_model,
-        base_url=config.openai_base_url,
+        base_url=OPENAI_DEFAULT_BASE_URL,
     )
     tasks = classifier.classify(
         tasks,
@@ -364,7 +453,7 @@ def _process_via_transcript(
         enriched_attendees=enriched_attendee_str,
         notes_text=notes_text,
     )
-    logger.info("Classified %d tasks", len(tasks))
+    logger.debug("Classified %d tasks", len(tasks))
     return tasks
 
 
@@ -447,7 +536,7 @@ def _build_seen_fingerprints(source: SingleSource) -> set[str]:
             if meta["date"]:
                 fp = _meeting_fingerprint(meta["title"], meta["date"])
                 seen.add(fp)
-        logger.info("Loaded %d processed meeting fingerprints for dedup", len(seen))
+        logger.debug("Loaded %d processed meeting fingerprints for dedup", len(seen))
     except Exception:
         logger.exception("Failed to load processed meetings for dedup — proceeding without")
     return seen
@@ -578,7 +667,7 @@ def _load_sync_context(
     # Hierarchy is optional
     try:
         hierarchy = hierarchy_loader.load()
-        logger.info("Categories: %s", [h["title"] for h in hierarchy])
+        logger.debug("Categories loaded: %s", [h["title"] for h in hierarchy])
     except Exception:
         logger.exception("Failed to load hierarchy — proceeding without it")
         hierarchy = []
@@ -589,7 +678,7 @@ def _load_sync_context(
         if not categories:
             logger.warning("No categories found in DB schema — using fallback")
             categories = ["Other"]
-        logger.info("Category options: %s", categories)
+        logger.debug("Category options: %s", categories)
     except Exception:
         logger.exception("Failed to load categories — using fallback")
         categories = ["Other"]
@@ -605,7 +694,7 @@ def _load_sync_context(
             for u in client.list_users()
             if u.get("type") == "person"
         ]
-        logger.info("Loaded %d workspace users", len(all_users))
+        logger.debug("Loaded %d workspace users", len(all_users))
     except Exception:
         logger.exception("Failed to load workspace users — will use attendees only")
         all_users = []
@@ -619,7 +708,7 @@ def _load_sync_context(
         try:
             deal_loader = DealContextLoader(client, config.deal_workplans_db_id)
             deals = deal_loader.load_deals()
-            logger.info("Loaded %d deals with context", len(deals))
+            logger.debug("Loaded %d deals with context", len(deals))
         except Exception:
             logger.exception("Failed to load deal context — proceeding without")
 
@@ -628,12 +717,14 @@ def _load_sync_context(
     # Semantic dedup — compare new task titles against existing ones via embeddings
     semantic_dedup: SemanticDedup | None = None
     try:
-        openai_client = OpenAI(api_key=config.openai_api_key)
+        # Force OpenAI endpoint — the SDK would otherwise pick up OPENAI_BASE_URL
+        # from the environment and send embeddings to the wrong provider.
+        openai_client = OpenAI(api_key=config.openai_api_key, base_url=OPENAI_DEFAULT_BASE_URL)
         existing_title_list = list(writer._existing_titles)
         semantic_dedup = SemanticDedup(
             openai_client, existing_title_list, config.semantic_dedup_threshold,
         )
-        logger.info("Semantic dedup initialized with %d existing titles", len(existing_title_list))
+        logger.debug("Semantic dedup initialized with %d existing titles", len(existing_title_list))
     except Exception:
         logger.exception("Failed to initialize semantic dedup — proceeding without")
 
@@ -644,7 +735,7 @@ def _load_sync_context(
     if config.terminology_db_id:
         try:
             terminology = load_terminology(client, config.terminology_db_id)
-            logger.info("Loaded terminology dictionary (%d chars)", len(terminology))
+            logger.debug("Loaded terminology dictionary (%d chars)", len(terminology))
         except Exception:
             logger.exception("Failed to load terminology — transcript correction will be less accurate")
 
@@ -655,7 +746,7 @@ def _load_sync_context(
         try:
             org_chart_rows = load_org_chart_rows(client, config.org_chart_db_id)
             org_chart_text = load_org_chart(client, config.org_chart_db_id)
-            logger.info("Loaded %d org chart members", len(org_chart_rows))
+            logger.debug("Loaded %d org chart members", len(org_chart_rows))
         except Exception:
             logger.exception("Failed to load org chart — proceeding without")
 
@@ -665,7 +756,7 @@ def _load_sync_context(
         try:
             classifier_prompt = _fetch_page_text(client, config.classifier_prompt_page_id)
             if classifier_prompt.strip():
-                logger.info("Loaded classifier prompt (%d chars)", len(classifier_prompt))
+                logger.debug("Loaded classifier prompt (%d chars)", len(classifier_prompt))
             else:
                 logger.warning("Classifier prompt page is empty")
         except Exception:
@@ -679,7 +770,8 @@ def _load_sync_context(
         "all_users": all_users,
         "existing_tasks": existing_tasks,
         "deals": deals,
-        "extractor": AIExtractor(config.openai_api_key, config.openai_model, config.openai_base_url),
+        # Notes-path extractor is a LIGHT call → OpenAI (forced base_url to override any env var)
+        "extractor": AIExtractor(config.openai_api_key, config.openai_model, OPENAI_DEFAULT_BASE_URL),
         "writer": writer,
         "semantic_dedup": semantic_dedup,
         "terminology": terminology,
@@ -733,7 +825,8 @@ def run_sync(config: SyncConfig, client: NotionClientWrapper) -> None:
                         # --- Transcript path ---
                         logger.info("Page '%s': transcript found — using transcript extraction", title)
                         attendees = _resolve_attendees(
-                            client, mn_block, page, metadata,
+                            client, config, mn_block, page, metadata,
+                            org_chart_rows=ctx.get("org_chart_rows"),
                         )
                         tasks = _process_via_transcript(
                             client, config, ctx, page_id, page, blocks,
@@ -746,7 +839,7 @@ def run_sync(config: SyncConfig, client: NotionClientWrapper) -> None:
                         for task in tasks:
                             if not task.get("assignee_id") and creator_id:
                                 task["assignee_id"] = [creator_id]
-                                logger.info(
+                                logger.debug(
                                     "Assignee fallback → meeting creator for: %s",
                                     task.get("title", "?")[:60],
                                 )
@@ -770,7 +863,7 @@ def run_sync(config: SyncConfig, client: NotionClientWrapper) -> None:
                         for task in tasks:
                             if not task.get("assignee_id") and creator_id:
                                 task["assignee_id"] = creator_id
-                                logger.info(
+                                logger.debug(
                                     "Assignee fallback → meeting creator for: %s",
                                     task.get("title", "?")[:60],
                                 )
@@ -859,17 +952,15 @@ def run_sync_for_page(
     client: NotionClientWrapper,
     page_id: str,
     *,
-    use_gcal: bool = False,
     force: bool = False,
 ) -> None:
     """Run extraction on a single page — transcript-first, notes fallback.
 
-    Guards: skips if page is already processed or currently being processed
-    (unless force=True).
+    GCal attendee lookup is automatic when `config.gcal_enabled` is true
+    (i.e., a service-account credential source and default delegated user
+    are configured). Works identically in CLI and Lambda.
 
     Args:
-        use_gcal: If True, attempt Google Calendar attendee lookup (CLI only;
-            requires OAuth credentials). Skipped in Lambda.
         force: If True, skip the "already processed" / "processing" guards.
             Used by CLI to re-process pages.
     """
@@ -879,21 +970,26 @@ def run_sync_for_page(
     page = client.get_page(page_id)
     props = page.get("properties", {})
 
+    short_id = page_id[:8]
+
     if not force:
         processed = props.get("Processed", {}).get("checkbox", False)
         if processed:
-            logger.info("Page %s already processed — skipping", page_id)
+            logger.debug("page=%s already processed — skipping", short_id)
             return
 
         processing = props.get("Processing", {}).get("checkbox", False)
         if processing:
-            logger.info("Page %s already being processed by another invocation — skipping", page_id)
+            logger.debug("page=%s already being processed by another invocation — skipping", short_id)
             return
 
     # Claim the page (concurrency lock)
     if not config.dry_run and not force:
         source.mark_processing(page_id)
 
+    start = time.monotonic()
+    tasks: list[dict] = []
+    path = "?"
     try:
         ctx = _load_sync_context(config, client)
         metadata = source.get_page_metadata(page)
@@ -903,7 +999,7 @@ def run_sync_for_page(
         seen_meetings = _build_seen_fingerprints(source)
         fingerprint = _meeting_fingerprint(title, metadata["date"])
         if fingerprint in seen_meetings:
-            logger.info("DEDUP — skipping duplicate meeting: '%s'", title)
+            logger.info("page=%s '%s' skipped (duplicate meeting)", short_id, title[:60])
             if not config.dry_run:
                 source.mark_page_processed(page_id)
             return
@@ -913,13 +1009,19 @@ def run_sync_for_page(
             blocks = client.get_block_children(page_id)
             mn_block = find_meeting_notes_block(blocks)
 
+            # Declared here so the fundraising branch below can see it
+            # regardless of which extraction path ran.
+            attendees: list[dict[str, str]] = []
+
             if mn_block is not None:
                 # --- Transcript path ---
-                logger.info("Page '%s': transcript found — using transcript extraction", title)
+                path = "transcript"
+                logger.info("page=%s '%s' starting (path=transcript)", short_id, title[:60])
 
                 # Resolve attendees (GCal → Notion → governance)
                 attendees = _resolve_attendees(
-                    client, mn_block, page, metadata, use_gcal=use_gcal,
+                    client, config, mn_block, page, metadata,
+                    org_chart_rows=ctx.get("org_chart_rows"),
                 )
 
                 tasks = _process_via_transcript(
@@ -933,19 +1035,20 @@ def run_sync_for_page(
                 for task in tasks:
                     if not task.get("assignee_id") and creator_id:
                         task["assignee_id"] = [creator_id]
-                        logger.info(
+                        logger.debug(
                             "Assignee fallback → meeting creator for: %s",
                             task.get("title", "?")[:60],
                         )
             else:
                 # --- Notes fallback ---
-                logger.info("Page '%s': no transcript — falling back to notes extraction", title)
+                path = "notes"
+                logger.info("page=%s '%s' starting (path=notes)", short_id, title[:60])
 
                 content = source.get_page_content(
                     page_id, include_ai_notes=config.include_ai_notes,
                 )
                 if not content.strip():
-                    logger.info("Page '%s' has no content — marking processed", title)
+                    logger.info("page=%s '%s' skipped (no content)", short_id, title[:60])
                     if not config.dry_run:
                         source.mark_page_processed(page_id)
                     return
@@ -958,7 +1061,7 @@ def run_sync_for_page(
                 for task in tasks:
                     if not task.get("assignee_id") and creator_id:
                         task["assignee_id"] = creator_id
-                        logger.info(
+                        logger.debug(
                             "Assignee fallback → meeting creator for: %s",
                             task.get("title", "?")[:60],
                         )
@@ -972,12 +1075,52 @@ def run_sync_for_page(
 
             if tasks:
                 ctx["writer"].write_batch(tasks)
-                logger.info("Page '%s': %d tasks created", title, len(tasks))
-            else:
-                logger.info("Page '%s': no tasks found", title)
+
+            # Fundraising add-on: mirror the next step to Affinity's LP Funnel
+            # when this is a fundraising meeting. Soft-fails; errors do not
+            # block the primary tracker write that just succeeded.
+            if (
+                config.fundraising_branch_enabled
+                and metadata.get("meeting_type") == "Fundraising"
+                and tasks
+                and not config.dry_run
+            ):
+                logger.info("page=%s fundraising branch: starting LP match", short_id)
+                try:
+                    from src.fundraising import write_to_affinity
+
+                    # Merge manually-supplied LP emails (from the Meeting
+                    # Notes "LP Emails" property) into the attendee list so
+                    # the LP matcher has external emails to work with even
+                    # when GCal isn't available.
+                    affinity_attendees = list(attendees)
+                    existing_ids = {a.get("id") for a in affinity_attendees}
+                    for email in metadata.get("lp_emails", []):
+                        if email and email not in existing_ids:
+                            affinity_attendees.append({"id": email, "name": email})
+                            existing_ids.add(email)
+
+                    write_to_affinity(
+                        config=config,
+                        tasks=tasks,
+                        metadata=metadata,
+                        attendees=affinity_attendees,
+                        notion_url=metadata.get("url", ""),
+                    )
+                except Exception:
+                    logger.exception(
+                        "Affinity fundraising write failed for page %s — continuing",
+                        page_id,
+                    )
 
             if not config.dry_run and not force:
                 source.mark_page_processed(page_id)
+
+            elapsed = time.monotonic() - start
+            logger.info(
+                "page=%s done in %.1fs (path=%s, tasks=%d)",
+                short_id, elapsed, path, len(tasks),
+            )
     except Exception:
         # Release the lock so the page retries next cycle
         if not config.dry_run and not force:

@@ -1,0 +1,4 @@
+{
+  "_comment": "Kibo team members — map across Notion / email / Affinity user ids. Populate by running a one-off script or manually from Affinity. Entries without affinity_user_id cannot be used as Nzyme Next Step OWNER.",
+  "users": []
+}

@@ -16,7 +16,9 @@ class TestSyncConfig:
             system_prompt_page_id="page-system-prompt",
             user_prompt_page_id="page-user-prompt",
         )
-        assert config.openai_model == "gpt-4.1"
+        assert config.openai_model == "gpt-5-mini"
+        assert config.gemini_model == "gemini-3-flash-preview"
+        assert config.gemini_base_url == "https://generativelanguage.googleapis.com/v1beta/openai/"
         assert config.buffer_hours == 2
         assert config.dry_run is False
 

@@ -1,0 +1,218 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1000" font-family="Geologica, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif">
+
+  <defs>
+    <style type="text/css"><![CDATA[
+      @import url('https://fonts.googleapis.com/css2?family=Geologica:wght@400;500;600;700&display=swap');
+      text { font-family: 'Geologica', -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; }
+    ]]></style>
+    <marker id="arrow-navy" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#0A3A5C"/>
+    </marker>
+    <marker id="arrow-teal" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#2AB3B9"/>
+    </marker>
+    <marker id="arrow-grey" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#5A6470"/>
+    </marker>
+  </defs>
+
+  <!-- Canvas -->
+  <rect width="1600" height="1000" fill="#F5F7F9"/>
+
+  <!-- ============================================================= -->
+  <!-- TITLE -->
+  <!-- ============================================================= -->
+  <text x="60" y="68" font-size="30" font-weight="700" fill="#0A3A5C">How meeting notes become tracked tasks</text>
+  <text x="60" y="98" font-size="16" font-weight="400" fill="#5A6470">Nzyme - AI sync engine for Kibo Ventures</text>
+
+  <!-- ============================================================= -->
+  <!-- LEFT: TRIGGERS -->
+  <!-- ============================================================= -->
+  <g>
+    <rect x="60" y="150" width="260" height="720" rx="12" fill="#FFFFFF" stroke="#B5BCC3" stroke-width="1.5"/>
+    <text x="85" y="185" font-size="13" font-weight="600" fill="#0A3A5C" letter-spacing="1.5">TRIGGERS</text>
+    <line x1="85" y1="195" x2="155" y2="195" stroke="#2AB3B9" stroke-width="2"/>
+    <text x="85" y="220" font-size="11" font-weight="400" fill="#5A6470">what kicks off a sync</text>
+
+    <!-- Trigger 1 -->
+    <rect x="85" y="265" width="210" height="95" rx="8" fill="#FFFFFF" stroke="#0A3A5C" stroke-width="1.5"/>
+    <text x="190" y="300" font-size="15" font-weight="600" fill="#0A3A5C" text-anchor="middle">Meeting note saved</text>
+    <text x="190" y="322" font-size="11" font-weight="400" fill="#5A6470" text-anchor="middle">someone adds a meeting</text>
+    <text x="190" y="337" font-size="11" font-weight="400" fill="#5A6470" text-anchor="middle">page in Notion</text>
+
+    <!-- Flow arrow between triggers -->
+    <line x1="190" y1="360" x2="190" y2="410" stroke="#0A3A5C" stroke-width="1.5" marker-end="url(#arrow-navy)"/>
+
+    <!-- Trigger 2 -->
+    <rect x="85" y="415" width="210" height="95" rx="8" fill="#FFFFFF" stroke="#0A3A5C" stroke-width="1.5"/>
+    <text x="190" y="450" font-size="15" font-weight="600" fill="#0A3A5C" text-anchor="middle">Every minute check</text>
+    <text x="190" y="472" font-size="11" font-weight="400" fill="#5A6470" text-anchor="middle">scheduler looks for</text>
+    <text x="190" y="487" font-size="11" font-weight="400" fill="#5A6470" text-anchor="middle">meetings ready to process</text>
+  </g>
+
+  <!-- ============================================================= -->
+  <!-- MIDDLE: NZYME ENGINE (AI pipeline) -->
+  <!-- ============================================================= -->
+  <g>
+    <rect x="360" y="150" width="800" height="720" rx="12" fill="#FFFFFF" stroke="#B5BCC3" stroke-width="1.5"/>
+    <text x="385" y="185" font-size="13" font-weight="600" fill="#0A3A5C" letter-spacing="1.5">NZYME ENGINE</text>
+    <line x1="385" y1="195" x2="475" y2="195" stroke="#2AB3B9" stroke-width="2"/>
+    <text x="385" y="220" font-size="11" font-weight="400" fill="#5A6470">runs on AWS Lambda. 3 AI steps, then dedup, then write.</text>
+
+    <!-- Step 1: Correct transcript -->
+    <rect x="395" y="290" width="230" height="110" rx="8" fill="#FFFFFF" stroke="#0A3A5C" stroke-width="1.5"/>
+    <text x="510" y="319" font-size="11" font-weight="500" fill="#5A6470" text-anchor="middle">STEP 1</text>
+    <text x="510" y="345" font-size="15" font-weight="600" fill="#0A3A5C" text-anchor="middle">Correct transcript</text>
+    <text x="510" y="366" font-size="11" font-weight="400" fill="#5A6470" text-anchor="middle">fix speaker names,</text>
+    <text x="510" y="381" font-size="11" font-weight="400" fill="#5A6470" text-anchor="middle">domain terms, deal names</text>
+
+    <!-- Step 2: Extract action items -->
+    <rect x="655" y="290" width="230" height="110" rx="8" fill="#FFFFFF" stroke="#0A3A5C" stroke-width="1.5"/>
+    <text x="770" y="319" font-size="11" font-weight="500" fill="#5A6470" text-anchor="middle">STEP 2</text>
+    <text x="770" y="345" font-size="15" font-weight="600" fill="#0A3A5C" text-anchor="middle">Extract action items</text>
+    <text x="770" y="366" font-size="11" font-weight="400" fill="#5A6470" text-anchor="middle">who owes what, to whom,</text>
+    <text x="770" y="381" font-size="11" font-weight="400" fill="#5A6470" text-anchor="middle">with what deadline</text>
+
+    <!-- Step 3: Classify tasks -->
+    <rect x="915" y="290" width="230" height="110" rx="8" fill="#FFFFFF" stroke="#0A3A5C" stroke-width="1.5"/>
+    <text x="1030" y="319" font-size="11" font-weight="500" fill="#5A6470" text-anchor="middle">STEP 3</text>
+    <text x="1030" y="345" font-size="15" font-weight="600" fill="#0A3A5C" text-anchor="middle">Classify tasks</text>
+    <text x="1030" y="366" font-size="11" font-weight="400" fill="#5A6470" text-anchor="middle">category, assignee,</text>
+    <text x="1030" y="381" font-size="11" font-weight="400" fill="#5A6470" text-anchor="middle">priority, due date</text>
+
+    <!-- Arrows between steps (teal accent = critical path) -->
+    <line x1="625" y1="345" x2="655" y2="345" stroke="#2AB3B9" stroke-width="2" marker-end="url(#arrow-teal)"/>
+    <line x1="885" y1="345" x2="915" y2="345" stroke="#2AB3B9" stroke-width="2" marker-end="url(#arrow-teal)"/>
+
+    <!-- Step 4: Dedup -->
+    <rect x="555" y="490" width="430" height="85" rx="8" fill="#FFFFFF" stroke="#0A3A5C" stroke-width="1.5"/>
+    <text x="770" y="525" font-size="15" font-weight="600" fill="#0A3A5C" text-anchor="middle">Dedup against existing tasks</text>
+    <text x="770" y="548" font-size="11" font-weight="400" fill="#5A6470" text-anchor="middle">filters out tasks that are already being tracked</text>
+    <text x="770" y="563" font-size="11" font-weight="400" fill="#5A6470" text-anchor="middle">(even if worded differently or in another language)</text>
+
+    <!-- Arrow: Step 3 to Dedup -->
+    <path d="M 1030 400 C 1030 460 1000 490 900 490" stroke="#0A3A5C" stroke-width="1.5" fill="none" marker-end="url(#arrow-navy)"/>
+
+    <!-- Step 5: Write tasks (SOLID NAVY = emphasis) -->
+    <rect x="555" y="660" width="430" height="110" rx="8" fill="#0A3A5C"/>
+    <text x="770" y="699" font-size="16" font-weight="600" fill="#FFFFFF" text-anchor="middle">Write tasks to Team Task Tracker</text>
+    <text x="770" y="723" font-size="11" font-weight="400" fill="#D4D8DC" text-anchor="middle">creates one Notion page per action item,</text>
+    <text x="770" y="738" font-size="11" font-weight="400" fill="#D4D8DC" text-anchor="middle">linked back to the source meeting</text>
+
+    <!-- Arrow: Dedup to Write -->
+    <line x1="770" y1="575" x2="770" y2="660" stroke="#0A3A5C" stroke-width="1.5" marker-end="url(#arrow-navy)"/>
+
+    <!-- Small note: notes fallback -->
+    <rect x="395" y="660" width="140" height="110" rx="8" fill="#F5F7F9" stroke="#D4D8DC" stroke-width="1" stroke-dasharray="4 3"/>
+    <text x="465" y="695" font-size="12" font-weight="600" fill="#5A6470" text-anchor="middle">Fallback</text>
+    <text x="465" y="720" font-size="10" font-weight="400" fill="#5A6470" text-anchor="middle">if no transcript,</text>
+    <text x="465" y="734" font-size="10" font-weight="400" fill="#5A6470" text-anchor="middle">extract tasks directly</text>
+    <text x="465" y="748" font-size="10" font-weight="400" fill="#5A6470" text-anchor="middle">from typed notes</text>
+  </g>
+
+  <!-- Arrow: Trigger "Every minute check" to Engine Step 1 -->
+  <path d="M 295 462 C 340 462 370 420 395 370" stroke="#0A3A5C" stroke-width="1.5" fill="none" marker-end="url(#arrow-navy)"/>
+  <rect x="300" y="412" width="100" height="18" fill="#F5F7F9"/>
+  <text x="350" y="425" font-size="11" font-weight="500" fill="#5A6470" text-anchor="middle">reads meeting</text>
+
+  <!-- ============================================================= -->
+  <!-- RIGHT: NOTION WORKSPACE -->
+  <!-- ============================================================= -->
+  <g>
+    <rect x="1200" y="150" width="360" height="720" rx="12" fill="#FFFFFF" stroke="#B5BCC3" stroke-width="1.5"/>
+    <text x="1225" y="185" font-size="13" font-weight="600" fill="#0A3A5C" letter-spacing="1.5">NOTION WORKSPACE</text>
+    <line x1="1225" y1="195" x2="1345" y2="195" stroke="#2AB3B9" stroke-width="2"/>
+    <text x="1225" y="220" font-size="11" font-weight="400" fill="#5A6470">source of input and destination of output</text>
+
+    <!-- Source section label -->
+    <text x="1225" y="260" font-size="11" font-weight="600" fill="#5A6470" letter-spacing="1">INPUT</text>
+
+    <!-- Meeting Notes DB -->
+    <rect x="1225" y="275" width="310" height="95" rx="8" fill="#FFFFFF" stroke="#0A3A5C" stroke-width="1.5"/>
+    <text x="1380" y="308" font-size="15" font-weight="600" fill="#0A3A5C" text-anchor="middle">Meeting Notes DB</text>
+    <text x="1380" y="330" font-size="11" font-weight="400" fill="#5A6470" text-anchor="middle">where every meeting lives:</text>
+    <text x="1380" y="345" font-size="11" font-weight="400" fill="#5A6470" text-anchor="middle">transcript, attendees, date,</text>
+    <text x="1380" y="360" font-size="11" font-weight="400" fill="#5A6470" text-anchor="middle">meeting type</text>
+
+    <!-- Output section label -->
+    <text x="1225" y="405" font-size="11" font-weight="600" fill="#5A6470" letter-spacing="1">OUTPUT</text>
+
+    <!-- Team Task Tracker DB (SOLID = emphasis) -->
+    <rect x="1225" y="420" width="310" height="105" rx="8" fill="#0A3A5C"/>
+    <text x="1380" y="455" font-size="16" font-weight="600" fill="#FFFFFF" text-anchor="middle">Team Task Tracker DB</text>
+    <text x="1380" y="478" font-size="11" font-weight="400" fill="#D4D8DC" text-anchor="middle">the single source of truth</text>
+    <text x="1380" y="493" font-size="11" font-weight="400" fill="#D4D8DC" text-anchor="middle">for "what did we commit to</text>
+    <text x="1380" y="508" font-size="11" font-weight="400" fill="#D4D8DC" text-anchor="middle">in every meeting"</text>
+
+    <!-- Context section label -->
+    <text x="1225" y="560" font-size="11" font-weight="600" fill="#5A6470" letter-spacing="1">CONTEXT (READ-ONLY)</text>
+
+    <!-- Terminology DB -->
+    <rect x="1225" y="575" width="310" height="75" rx="8" fill="#FFFFFF" stroke="#0A3A5C" stroke-width="1.5"/>
+    <text x="1380" y="603" font-size="14" font-weight="600" fill="#0A3A5C" text-anchor="middle">Terminology DB</text>
+    <text x="1380" y="623" font-size="11" font-weight="400" fill="#5A6470" text-anchor="middle">domain terms, portfolio names,</text>
+    <text x="1380" y="638" font-size="11" font-weight="400" fill="#5A6470" text-anchor="middle">phonetic variants</text>
+
+    <!-- Org Chart DB -->
+    <rect x="1225" y="670" width="310" height="75" rx="8" fill="#FFFFFF" stroke="#0A3A5C" stroke-width="1.5"/>
+    <text x="1380" y="698" font-size="14" font-weight="600" fill="#0A3A5C" text-anchor="middle">Org Chart DB</text>
+    <text x="1380" y="718" font-size="11" font-weight="400" fill="#5A6470" text-anchor="middle">people, roles, seniority,</text>
+    <text x="1380" y="733" font-size="11" font-weight="400" fill="#5A6470" text-anchor="middle">typical topics</text>
+
+    <!-- Task hierarchy -->
+    <rect x="1225" y="765" width="310" height="75" rx="8" fill="#FFFFFF" stroke="#0A3A5C" stroke-width="1.5"/>
+    <text x="1380" y="793" font-size="14" font-weight="600" fill="#0A3A5C" text-anchor="middle">Task hierarchy</text>
+    <text x="1380" y="813" font-size="11" font-weight="400" fill="#5A6470" text-anchor="middle">categories and parent items</text>
+    <text x="1380" y="828" font-size="11" font-weight="400" fill="#5A6470" text-anchor="middle">(lives inside the tracker)</text>
+  </g>
+
+  <!-- Arrow: Meeting Notes DB to Step 1 (routes above the pipeline steps) -->
+  <path d="M 1225 275 C 1100 240 750 235 510 285" stroke="#0A3A5C" stroke-width="1.5" fill="none" marker-end="url(#arrow-navy)"/>
+  <rect x="785" y="223" width="140" height="18" fill="#F5F7F9"/>
+  <text x="855" y="236" font-size="11" font-weight="500" fill="#5A6470" text-anchor="middle">meeting + transcript</text>
+
+  <!-- Arrow: Context DBs (grouped) to Step 3 (right edge, between engine and Notion) -->
+  <path d="M 1225 640 C 1185 640 1170 430 1145 360" stroke="#5A6470" stroke-width="1.2" stroke-dasharray="5 4" fill="none" marker-end="url(#arrow-grey)"/>
+  <rect x="1155" y="520" width="70" height="18" fill="#F5F7F9"/>
+  <text x="1190" y="533" font-size="11" font-weight="500" fill="#5A6470" text-anchor="middle">AI context</text>
+
+  <!-- Arrow: Write tasks to Team Task Tracker DB (teal accent) -->
+  <path d="M 985 715 C 1110 680 1180 600 1225 475" stroke="#2AB3B9" stroke-width="2" fill="none" marker-end="url(#arrow-teal)"/>
+  <rect x="1040" y="660" width="115" height="18" fill="#F5F7F9"/>
+  <text x="1097" y="673" font-size="11" font-weight="500" fill="#5A6470" text-anchor="middle">writes new tasks</text>
+
+  <!-- ============================================================= -->
+  <!-- BOTTOM: EXTERNAL SERVICES -->
+  <!-- ============================================================= -->
+  <g>
+    <rect x="60" y="895" width="1100" height="85" rx="12" fill="#FFFFFF" stroke="#B5BCC3" stroke-width="1.5"/>
+    <text x="85" y="920" font-size="13" font-weight="600" fill="#0A3A5C" letter-spacing="1.5">EXTERNAL SERVICES</text>
+    <line x1="85" y1="930" x2="210" y2="930" stroke="#2AB3B9" stroke-width="2"/>
+
+    <!-- LLM processor -->
+    <rect x="85" y="942" width="500" height="32" rx="8" fill="#FFFFFF" stroke="#0A3A5C" stroke-width="1.5"/>
+    <text x="335" y="963" font-size="13" font-weight="600" fill="#0A3A5C" text-anchor="middle">LLM processor (the AI brain behind the 3 steps)</text>
+
+    <!-- Google Calendar -->
+    <rect x="615" y="942" width="500" height="32" rx="8" fill="#FFFFFF" stroke="#0A3A5C" stroke-width="1.5"/>
+    <text x="865" y="963" font-size="13" font-weight="600" fill="#0A3A5C" text-anchor="middle">Google Calendar (authoritative attendees)</text>
+  </g>
+
+  <!-- Arrow: LLM processor to AI pipeline -->
+  <path d="M 335 942 C 335 750 410 600 410 410" stroke="#5A6470" stroke-width="1.2" stroke-dasharray="5 4" fill="none" marker-end="url(#arrow-grey)"/>
+  <rect x="260" y="872" width="170" height="18" fill="#FFFFFF"/>
+  <text x="345" y="885" font-size="11" font-weight="500" fill="#5A6470" text-anchor="middle">3 AI calls per meeting</text>
+
+  <!-- Arrow: GCal to engine -->
+  <path d="M 865 942 C 865 750 730 600 730 410" stroke="#5A6470" stroke-width="1.2" stroke-dasharray="5 4" fill="none" marker-end="url(#arrow-grey)"/>
+  <rect x="785" y="872" width="150" height="18" fill="#FFFFFF"/>
+  <text x="860" y="885" font-size="11" font-weight="500" fill="#5A6470" text-anchor="middle">meeting attendees</text>
+
+  <!-- ============================================================= -->
+  <!-- FOOTER -->
+  <!-- ============================================================= -->
+  <text x="1540" y="970" font-size="10" font-weight="700" fill="#0A3A5C" text-anchor="end">Nzyme</text>
+  <text x="1540" y="984" font-size="9" font-weight="400" fill="#5A6470" text-anchor="end">April 2026</text>
+
+</svg>

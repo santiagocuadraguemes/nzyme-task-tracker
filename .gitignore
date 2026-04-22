@@ -15,9 +15,16 @@ build/
 # Environment variables
 .env
 
-# Google OAuth credentials
+# Google OAuth credentials (legacy, pre-service-account)
 credentials.json
 token.json
+
+# Google service account credentials (local dev only)
+.secrets/
+
+# Peer's standalone calendar project — not part of nzyme
+calendar/
+calendar.zip
 
 # IDE / editor settings
 .vscode/

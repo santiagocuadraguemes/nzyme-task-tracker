@@ -1,67 +1,74 @@
-"""Structured logging setup for the Nzyme Task Tracker.
+"""Logging setup for Nzyme Task Tracker.
 
-Configures Python's standard ``logging`` library with a structured format
-that includes timestamps, log level, and module name in every message.
-
-Key functions:
-    ``setup_logging``  — one-time initialisation of the root logger.
-    ``get_logger``     — returns a named child logger for a specific module.
-
-Design notes:
-    * Uses only the standard library (no external dependencies like
-      ``structlog``) to keep the dependency footprint small.
-    * The format string includes ISO-8601 timestamps and the logger name
-      so that log output is easy to search and correlate.
-    * ``setup_logging`` is idempotent — calling it multiple times does not
-      add duplicate handlers.
+Goals:
+  * Default INFO output is a short, human-readable trace of what the pipeline
+    is doing — one or two lines per phase per meeting.
+  * Set ``LOG_LEVEL=DEBUG`` to get the full HTTP / library trace for
+    debugging.
+  * Works identically in CLI and in AWS Lambda. In Lambda, AWS configures the
+    root handler (JSON format), so we do NOT add a second handler — we only
+    set levels.
 """
 from __future__ import annotations
 
 import logging
+import os
+
+# Third-party loggers that flood INFO with one line per HTTP request or
+# auth event. Capped at WARNING so a real problem still surfaces.
+_NOISY_LOGGERS = (
+    "httpx",
+    "httpcore",
+    "urllib3",
+    "openai",
+    "openai._base_client",
+    "botocore",
+    "boto3",
+    "s3transfer",
+    "googleapiclient",
+    "googleapiclient.discovery",
+    "googleapiclient.discovery_cache",
+    "google",
+    "google.auth",
+    "google_auth_httplib2",
+)
+
+
+def _running_in_lambda() -> bool:
+    return bool(os.environ.get("AWS_LAMBDA_FUNCTION_NAME"))
 
 
 def setup_logging(level: str = "INFO") -> logging.Logger:
-    """Configure the root logger and return it.
+    """Configure root logger level and silence noisy third-party loggers.
 
-    Sets up a ``StreamHandler`` with a structured format if one has not
-    already been attached.
-
-    Parameters
-    ----------
-    level:
-        Logging level name (e.g. ``"DEBUG"``, ``"INFO"``).
-
-    Returns
-    -------
-    logging.Logger
-        The root logger, configured and ready to use.
+    Idempotent: safe to call from both module load (Lambda cold start) and
+    CLI ``main()``.
     """
-    root = logging.getLogger()
-    root.setLevel(getattr(logging, level.upper(), logging.INFO))
+    resolved_level = getattr(logging, level.upper(), logging.INFO)
 
-    if not root.handlers:
+    root = logging.getLogger()
+    root.setLevel(resolved_level)
+
+    # CLI: add a stream handler with our format. In Lambda, AWS owns the
+    # handler (JSON format via template.yaml LoggingConfig), so adding one
+    # would double every log line.
+    if not _running_in_lambda() and not root.handlers:
         handler = logging.StreamHandler()
-        formatter = logging.Formatter(
-            fmt="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-            datefmt="%Y-%m-%dT%H:%M:%S",
+        handler.setFormatter(
+            logging.Formatter(
+                fmt="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
+                datefmt="%H:%M:%S",
+            )
         )
-        handler.setFormatter(formatter)
         root.addHandler(handler)
+
+    # Always cap noisy loggers — applies whether in CLI or Lambda.
+    for name in _NOISY_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
 
     return root
 
 
 def get_logger(name: str) -> logging.Logger:
-    """Return a named logger.
-
-    Parameters
-    ----------
-    name:
-        Logger name, typically ``__name__`` of the calling module.
-
-    Returns
-    -------
-    logging.Logger
-        A child logger that inherits the root configuration.
-    """
+    """Return a named logger (typically pass ``__name__``)."""
     return logging.getLogger(name)

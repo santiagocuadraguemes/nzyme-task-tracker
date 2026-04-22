@@ -36,7 +36,17 @@
       "WebFetch(domain:developers.openai.com)",
       "WebFetch(domain:platform.openai.com)",
       "WebFetch(domain:openai.com)",
-      "WebFetch(domain:openrouter.ai)"
+      "WebFetch(domain:openrouter.ai)",
+      "mcp__affinity__affinity_whoami",
+      "mcp__affinity__affinity_list_lists",
+      "mcp__affinity__affinity_get_list_fields",
+      "mcp__affinity__affinity_get_list_entries",
+      "mcp__affinity__affinity_search_persons",
+      "mcp__affinity__affinity_get_person",
+      "mcp__affinity__affinity_search_companies",
+      "mcp__affinity__affinity_list_opportunities",
+      "mcp__affinity__affinity_list_companies",
+      "mcp__affinity__affinity_get_companies_in_swimlane"
     ]
   }
 }

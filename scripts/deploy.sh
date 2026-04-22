@@ -7,8 +7,8 @@
 #   - .env file with all required variables
 #
 # Usage:
-#   ./scripts/deploy.sh                  # guided deploy (first time)
-#   ./scripts/deploy.sh --no-confirm     # non-interactive re-deploy
+#   ./scripts/deploy.sh                         # guided deploy (first time)
+#   ./scripts/deploy.sh --no-confirm-changeset  # non-interactive re-deploy
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -20,6 +20,51 @@ if [ -f .env ]; then
     set +a
 fi
 
+# Build the --parameter-overrides list. Empty values are skipped — newer SAM
+# CLI versions reject `Key=` with no value, and omitting a parameter causes
+# CloudFormation to fall back to the Default declared in template.yaml.
+PARAMS=()
+add_param() {
+    local key="$1"
+    local value="$2"
+    if [ -n "$value" ]; then
+        PARAMS+=("${key}=${value}")
+    fi
+}
+
+# Required parameters (no defaults in template.yaml — must always be set)
+add_param "NotionApiToken"    "${NOTION_API_TOKEN}"
+add_param "OpenAIApiKey"      "${OPENAI_API_KEY}"
+add_param "MeetingNotesDbId"  "${MEETING_NOTES_DB_ID}"
+add_param "TeamTrackerDbId"   "${TEAM_TRACKER_DB_ID}"
+add_param "SystemPromptPageId" "${SYSTEM_PROMPT_PAGE_ID}"
+add_param "UserPromptPageId"  "${USER_PROMPT_PAGE_ID}"
+add_param "WebhookPathToken"  "${WEBHOOK_PATH_TOKEN}"
+
+# Optional parameters (template.yaml supplies the Default when omitted)
+add_param "MeetingTemplatePageId"          "${MEETING_TEMPLATE_PAGE_ID:-}"
+add_param "InjectTemplate"                 "${INJECT_TEMPLATE:-}"
+add_param "IdleMinutes"                    "${IDLE_MINUTES:-}"
+add_param "LogLevel"                       "${LOG_LEVEL:-}"
+add_param "DryRun"                         "${DRY_RUN:-}"
+add_param "IncludeAINotes"                 "${INCLUDE_AI_NOTES:-}"
+add_param "BufferHours"                    "${BUFFER_HOURS:-}"
+add_param "DealWorkplansDbId"              "${DEAL_WORKPLANS_DB_ID:-}"
+add_param "SemanticDedupThreshold"         "${SEMANTIC_DEDUP_THRESHOLD:-}"
+add_param "GoogleServiceAccountSecretArn"  "${GOOGLE_SERVICE_ACCOUNT_SECRET_ARN:-}"
+add_param "GCalDelegatedUserDefault"       "${GCAL_DELEGATED_USER_DEFAULT:-}"
+add_param "GeminiApiKey"                   "${GEMINI_API_KEY:-}"
+add_param "GeminiModel"                    "${GEMINI_MODEL:-}"
+add_param "GeminiBaseUrl"                  "${GEMINI_BASE_URL:-}"
+add_param "OpenAIModel"                    "${OPENAI_MODEL:-}"
+add_param "TerminologyDbId"                "${TERMINOLOGY_DB_ID:-}"
+add_param "OrgChartDbId"                   "${ORG_CHART_DB_ID:-}"
+add_param "ClassifierPromptPageId"         "${CLASSIFIER_PROMPT_PAGE_ID:-}"
+add_param "LogfireToken"                   "${LOGFIRE_TOKEN:-}"
+add_param "FundraisingBranchEnabled"       "${FUNDRAISING_BRANCH_ENABLED:-}"
+add_param "AffinityApiKey"                 "${AFFINITY_API_KEY:-}"
+add_param "AffinityLpFunnelListId"         "${AFFINITY_LP_FUNNEL_LIST_ID:-}"
+
 echo "=== Building SAM application ==="
 sam build
 
@@ -28,23 +73,7 @@ sam deploy \
     --stack-name nzyme-task-tracker \
     --capabilities CAPABILITY_IAM \
     --resolve-s3 \
-    --parameter-overrides \
-        "NotionApiToken=${NOTION_API_TOKEN}" \
-        "OpenAIApiKey=${OPENAI_API_KEY}" \
-        "MeetingNotesDbId=${MEETING_NOTES_DB_ID}" \
-        "TeamTrackerDbId=${TEAM_TRACKER_DB_ID}" \
-        "SystemPromptPageId=${SYSTEM_PROMPT_PAGE_ID}" \
-        "UserPromptPageId=${USER_PROMPT_PAGE_ID}" \
-        "MeetingTemplatePageId=${MEETING_TEMPLATE_PAGE_ID:-}" \
-        "InjectTemplate=${INJECT_TEMPLATE:-true}" \
-        "WebhookPathToken=${WEBHOOK_PATH_TOKEN}" \
-        "IdleMinutes=${IDLE_MINUTES:-3}" \
-        "LogLevel=${LOG_LEVEL:-INFO}" \
-        "DryRun=${DRY_RUN:-false}" \
-        "IncludeAINotes=${INCLUDE_AI_NOTES:-false}" \
-        "BufferHours=${BUFFER_HOURS:-2}" \
-        "DealWorkplansDbId=${DEAL_WORKPLANS_DB_ID:-}" \
-        "SemanticDedupThreshold=${SEMANTIC_DEDUP_THRESHOLD:-0.85}" \
+    --parameter-overrides "${PARAMS[@]}" \
     "$@"
 
 echo ""

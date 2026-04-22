@@ -26,6 +26,19 @@ Globals:
         BUFFER_HOURS: !Ref BufferHours
         DEAL_WORKPLANS_DB_ID: !Ref DealWorkplansDbId
         SEMANTIC_DEDUP_THRESHOLD: !Ref SemanticDedupThreshold
+        GOOGLE_SERVICE_ACCOUNT_SECRET_ARN: !Ref GoogleServiceAccountSecretArn
+        GCAL_DELEGATED_USER_DEFAULT: !Ref GCalDelegatedUserDefault
+        GEMINI_API_KEY: !Ref GeminiApiKey
+        GEMINI_MODEL: !Ref GeminiModel
+        GEMINI_BASE_URL: !Ref GeminiBaseUrl
+        OPENAI_MODEL: !Ref OpenAIModel
+        TERMINOLOGY_DB_ID: !Ref TerminologyDbId
+        ORG_CHART_DB_ID: !Ref OrgChartDbId
+        CLASSIFIER_PROMPT_PAGE_ID: !Ref ClassifierPromptPageId
+        LOGFIRE_TOKEN: !Ref LogfireToken
+        FUNDRAISING_BRANCH_ENABLED: !Ref FundraisingBranchEnabled
+        AFFINITY_API_KEY: !Ref AffinityApiKey
+        AFFINITY_LP_FUNNEL_LIST_ID: !Ref AffinityLpFunnelListId
 
 Parameters:
   NotionApiToken:
@@ -72,6 +85,65 @@ Parameters:
   SemanticDedupThreshold:
     Type: String
     Default: '0.85'
+  GoogleServiceAccountSecretArn:
+    Type: String
+    Default: ''
+    Description: ARN of the Secrets Manager secret holding the Google service-account JSON. Leave empty to disable GCal.
+    NoEcho: true
+  GCalDelegatedUserDefault:
+    Type: String
+    Default: ''
+    Description: Default Workspace email to impersonate when the meeting creator can't be resolved.
+  GeminiApiKey:
+    Type: String
+    Default: ''
+    Description: Google Gemini API key for heavy LLM calls (transcript correction, task extraction).
+    NoEcho: true
+  GeminiModel:
+    Type: String
+    Default: gemini-3-flash-preview
+    Description: Gemini model for heavy LLM calls.
+  GeminiBaseUrl:
+    Type: String
+    Default: https://generativelanguage.googleapis.com/v1beta/openai/
+    Description: Gemini OpenAI-compatible base URL.
+  OpenAIModel:
+    Type: String
+    Default: gpt-5-mini
+    Description: OpenAI model for light LLM calls (classifier + fundraising summary).
+  TerminologyDbId:
+    Type: String
+    Default: ''
+    Description: Notion Terminology DB ID (transcript correction context).
+  OrgChartDbId:
+    Type: String
+    Default: ''
+    Description: Notion Org Chart DB ID (used by transcript classification + GCal name resolution).
+  ClassifierPromptPageId:
+    Type: String
+    Default: ''
+    Description: Notion page ID for the transcript classifier system prompt.
+  LogfireToken:
+    Type: String
+    Default: ''
+    Description: Logfire token for tracing LLM calls.
+    NoEcho: true
+  FundraisingBranchEnabled:
+    Type: String
+    Default: 'false'
+    Description: Enable the Affinity sync for Meeting type = Fundraising.
+  AffinityApiKey:
+    Type: String
+    Default: ''
+    Description: Affinity API key (HTTP basic auth).
+    NoEcho: true
+  AffinityLpFunnelListId:
+    Type: String
+    Default: '168609'
+    Description: Affinity list ID for Nzyme - LP Funnel.
+
+Conditions:
+  GCalEnabled: !Not [!Equals [!Ref GoogleServiceAccountSecretArn, '']]
 
 Resources:
   NzymeFunction:
@@ -81,11 +153,24 @@ Resources:
       Handler: src.webhook.lambda_handler.handler
       CodeUri: .
       MemorySize: 512
-      Timeout: 120
+      # Transcript pipeline = 3 sequential LLM calls (correct → extract →
+      # classify) per meeting. End-to-end runs ~60–110s for typical meetings;
+      # 120s left no headroom and timed out the 2026-04-21 fundraising test
+      # mid-classifier. 300s gives ~3x margin for the slow tail.
+      Timeout: 300
       LoggingConfig:
         LogFormat: JSON
         ApplicationLogLevel: !Ref LogLevel
         SystemLogLevel: WARN
+      Policies:
+        - !If
+          - GCalEnabled
+          - Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref GoogleServiceAccountSecretArn
+          - !Ref AWS::NoValue
       Events:
         WebhookPost:
           Type: HttpApi

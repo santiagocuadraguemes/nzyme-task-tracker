@@ -14,6 +14,13 @@ def _get_text(prop: dict[str, Any]) -> str:
     return "".join(p.get("plain_text", "") for p in parts).strip()
 
 
+def _get_email(prop: dict[str, Any]) -> str:
+    """Extract an email from a Notion property — handles both email and rich_text types."""
+    if "email" in prop and prop.get("email"):
+        return prop["email"].strip().lower()
+    return _get_text(prop).lower()
+
+
 def _get_title(prop: dict[str, Any]) -> str:
     """Extract plain text from a Notion title property."""
     parts = prop.get("title", [])
@@ -108,7 +115,9 @@ def load_org_chart_rows(
 ) -> list[dict[str, Any]]:
     """Load active members from the Org Chart as structured dicts.
 
-    Returns list of {"name", "seniority", "department", "role", "topics"}.
+    Returns list of {"name", "email", "seniority", "department", "role", "topics"}.
+    `email` is lowercase (empty string if not set). Used for email-first matching
+    of GCal attendees against the org chart.
     """
     resp = client.query_database(
         database_id=db_id,
@@ -123,6 +132,7 @@ def load_org_chart_rows(
             continue
         rows.append({
             "name": name,
+            "email": _get_email(props.get("Email", {})),
             "seniority": _get_select(props.get("Seniority", {})),
             "department": _get_select(props.get("Department", {})),
             "role": _get_text(props.get("Role", {})),
@@ -140,13 +150,25 @@ def _normalize(name: str) -> str:
 
 
 def _match_attendee_to_org(
-    attendee_name: str, org_rows: list[dict[str, Any]]
+    attendee_name: str,
+    org_rows: list[dict[str, Any]],
+    attendee_email: str | None = None,
 ) -> dict[str, Any] | None:
-    """Find the best org chart match for an attendee name."""
+    """Find the best org chart match for an attendee.
+
+    Tries email first (exact, case-insensitive) when available — this is the
+    reliable match for GCal attendees. Falls back to name substring matching
+    when no email is provided or no email row matches.
+    """
+    if attendee_email:
+        norm_email = attendee_email.strip().lower()
+        for row in org_rows:
+            if row.get("email") and row["email"] == norm_email:
+                return row
+
     norm_att = _normalize(attendee_name)
     for row in org_rows:
         norm_org = _normalize(row["name"])
-        # Exact match or one is a substring of the other
         if norm_att == norm_org or norm_att in norm_org or norm_org in norm_att:
             return row
     return None
@@ -158,7 +180,9 @@ def build_enriched_attendee_str(
 ) -> str:
     """Build a structured attendee string with inline role context.
 
-    Returns something like:
+    Attendee dicts may include an `email` field (set by the GCal source);
+    when present it is used as the primary match key against the org chart,
+    falling back to name. Returns something like:
         - Santiago Cuadra Güemes [Technology — Head of Technology]
           Typical topics: automation, Notion integration
         - Reyes Rubio [Investment — Managing Partner & CIO]
@@ -168,11 +192,13 @@ def build_enriched_attendee_str(
     lines: list[str] = []
     for att in attendees:
         name = att["name"]
-        match = _match_attendee_to_org(name, org_chart_rows)
+        email = att.get("email")
+        match = _match_attendee_to_org(name, org_chart_rows, attendee_email=email)
         if match:
             qualifiers = [q for q in (match["seniority"], match["department"]) if q]
             annotation = f" [{' — '.join(qualifiers)}]" if qualifiers else ""
-            lines.append(f"- {name}{annotation}")
+            display = match["name"] if match["name"] else name
+            lines.append(f"- {display}{annotation}")
             if match["topics"]:
                 lines.append(f"  Typical topics: {', '.join(match['topics'])}")
         else:

@@ -1,57 +1,78 @@
-"""Fetch meeting attendees from Google Calendar via OAuth."""
+"""Fetch meeting attendees from Google Calendar via a service account with DWD.
+
+Authentication: a Google Cloud service account with Domain-Wide Delegation
+authorized for the `https://www.googleapis.com/auth/calendar` scope. The
+service account impersonates a specific Workspace user (the "delegated user")
+per call, which is typically the meeting page's Notion creator.
+
+Credentials can come from:
+  - Local dev: a JSON file at `GOOGLE_SERVICE_ACCOUNT_FILE`.
+  - Lambda:    a secret in AWS Secrets Manager whose ARN is
+               `GOOGLE_SERVICE_ACCOUNT_SECRET_ARN`. The secret value is the
+               raw service-account.json string.
+
+Name resolution no longer uses the People API (`directory.readonly` is not on
+the DWD allowlist). Callers resolve attendee names downstream by matching
+emails against the Notion Org Chart.
+"""
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Any
 
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
+from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from rapidfuzz import fuzz
 
 logger = logging.getLogger(__name__)
 
-SCOPES = [
-    "https://www.googleapis.com/auth/calendar.readonly",
-    "https://www.googleapis.com/auth/directory.readonly",
-]
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-CREDENTIALS_FILE = PROJECT_ROOT / "credentials.json"
-TOKEN_FILE = PROJECT_ROOT / "token.json"
-
+SCOPES = ["https://www.googleapis.com/auth/calendar"]
 MIN_FUZZY_SCORE = 60
 
+_SA_INFO_CACHE: dict[str, Any] | None = None
 
-def _get_credentials() -> Credentials:
-    """Load or create Google OAuth credentials.
 
-    First run opens a browser for consent and stores token.json locally.
-    Subsequent runs auto-refresh the token.
-    """
-    creds = None
-    if TOKEN_FILE.exists():
-        creds = Credentials.from_authorized_user_file(str(TOKEN_FILE), SCOPES)
+def _load_sa_info() -> dict[str, Any]:
+    """Load service-account JSON from file or Secrets Manager; cache for warm reuse."""
+    global _SA_INFO_CACHE
+    if _SA_INFO_CACHE is not None:
+        return _SA_INFO_CACHE
 
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            if not CREDENTIALS_FILE.exists():
-                raise FileNotFoundError(
-                    f"Google OAuth credentials not found at {CREDENTIALS_FILE}. "
-                    f"Download from Google Cloud Console → APIs & Services → Credentials."
-                )
-            flow = InstalledAppFlow.from_client_secrets_file(
-                str(CREDENTIALS_FILE), SCOPES
-            )
-            creds = flow.run_local_server(port=0)
-        TOKEN_FILE.write_text(creds.to_json())
+    secret_arn = os.getenv("GOOGLE_SERVICE_ACCOUNT_SECRET_ARN")
+    if secret_arn:
+        import boto3
 
-    return creds
+        region = os.getenv("AWS_REGION", "eu-west-1")
+        logger.debug("Loading service account from Secrets Manager (region=%s)", region)
+        sm = boto3.client("secretsmanager", region_name=region)
+        resp = sm.get_secret_value(SecretId=secret_arn)
+        raw = resp.get("SecretString") or resp["SecretBinary"].decode()
+        _SA_INFO_CACHE = json.loads(raw)
+        return _SA_INFO_CACHE
+
+    file_path = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE")
+    if not file_path:
+        raise RuntimeError(
+            "No Google service account configured. Set GOOGLE_SERVICE_ACCOUNT_FILE "
+            "(local) or GOOGLE_SERVICE_ACCOUNT_SECRET_ARN (Lambda)."
+        )
+    logger.debug("Loading service account from file: %s", file_path)
+    with open(file_path, "r", encoding="utf-8") as f:
+        _SA_INFO_CACHE = json.load(f)
+    return _SA_INFO_CACHE
+
+
+def _build_calendar_service(delegated_user: str):
+    """Create a Calendar API client impersonating `delegated_user`."""
+    sa_info = _load_sa_info()
+    creds = service_account.Credentials.from_service_account_info(
+        sa_info, scopes=SCOPES, subject=delegated_user,
+    )
+    return build("calendar", "v3", credentials=creds, cache_discovery=False)
 
 
 def _parse_event_bounds(event: dict[str, Any]) -> tuple[datetime, datetime] | None:
@@ -83,9 +104,7 @@ def _pick_best_event(
     """Pick the best GCal event for the given Notion meeting.
 
     Prefers events whose [start, end] contains notion_dt. Ties broken by
-    rapidfuzz token_set_ratio against the cleaned title. If no event contains
-    the timestamp, still returns the highest-scoring event if its score is at
-    least MIN_FUZZY_SCORE; otherwise returns None.
+    rapidfuzz token_set_ratio against the cleaned title.
     """
     if not events:
         return None
@@ -103,11 +122,13 @@ def _pick_best_event(
     return best if score(best) >= MIN_FUZZY_SCORE else None
 
 
-def _flatten_attendees(
-    event: dict[str, Any],
-    directory: dict[str, str],
-) -> list[dict[str, str]]:
-    """Resolve an event's attendees + organizer to {email, name} dicts."""
+def _flatten_attendees(event: dict[str, Any]) -> list[dict[str, str]]:
+    """Resolve an event's attendees + organizer to {email, name} dicts.
+
+    `name` is populated from the Calendar event's own `displayName` when
+    present (often empty). Downstream code enriches missing names via the
+    Notion Org Chart email lookup.
+    """
     result: list[dict[str, str]] = []
     seen_emails: set[str] = set()
 
@@ -116,18 +137,14 @@ def _flatten_attendees(
         if not email or email in seen_emails:
             continue
         seen_emails.add(email)
-        display_name = att.get("displayName", "") or directory.get(email.lower(), "")
-        result.append({"email": email, "name": display_name or email.split("@")[0]})
+        display_name = att.get("displayName", "") or email.split("@")[0]
+        result.append({"email": email, "name": display_name})
 
     organizer = event.get("organizer", {})
     org_email = organizer.get("email", "")
     if org_email and org_email not in seen_emails:
-        display_name = organizer.get("displayName", "") or directory.get(
-            org_email.lower(), ""
-        )
-        result.append(
-            {"email": org_email, "name": display_name or org_email.split("@")[0]}
-        )
+        display_name = organizer.get("displayName", "") or org_email.split("@")[0]
+        result.append({"email": org_email, "name": display_name})
 
     return result
 
@@ -135,41 +152,34 @@ def _flatten_attendees(
 def get_gcal_attendees(
     meeting_title: str,
     meeting_date: str,
+    delegated_user: str,
 ) -> list[dict[str, str]]:
     """Query Google Calendar for a meeting and return its attendees.
 
-    Matches in two passes:
-    1. Keyword search (q=<title>) with the current ±12 h window, best-ranked.
-    2. Time-containment fallback: re-query without q=, pick the event whose
-       [start, end] contains the Notion timestamp. Title drift between Notion
-       and GCal (e.g. "Commercial Weekly - WV" vs "Int.call seguimiento
-       comercial WV") is handled because matching falls through to time.
-
-    Uses Google Workspace directory (People API) to resolve emails to full names.
-
     Args:
         meeting_title: Meeting title to search for.
-        meeting_date: ISO datetime string from Notion (e.g. "2026-04-08T12:00:00.000+02:00").
+        meeting_date: ISO datetime string from Notion (e.g.
+            "2026-04-08T12:00:00.000+02:00").
+        delegated_user: Workspace email to impersonate. The service account
+            searches this user's primary calendar.
 
     Returns:
-        List of {"email": ..., "name": ...} dicts for all attendees including organizer.
+        List of {"email": ..., "name": ...} dicts for all attendees including
+        organizer. Names are best-effort from Calendar's `displayName` field;
+        callers should enrich via the Notion Org Chart.
     """
     from src.transcript_pipeline.fetch_transcript import strip_title_datetime
 
-    creds = _get_credentials()
-    service = build("calendar", "v3", credentials=creds)
-    directory = _build_directory_lookup(creds)
+    service = _build_calendar_service(delegated_user)
 
     cleaned_title = strip_title_datetime(meeting_title)
     notion_dt = datetime.fromisoformat(meeting_date)
     time_min = (notion_dt - timedelta(hours=12)).isoformat()
     time_max = (notion_dt + timedelta(hours=12)).isoformat()
 
-    # Pass 1: keyword search
-    logger.info(
-        "Searching Google Calendar (keyword) for '%s' around %s",
-        cleaned_title,
-        meeting_date,
+    logger.debug(
+        "Searching Google Calendar (keyword) for '%s' around %s (as %s)",
+        cleaned_title, meeting_date, delegated_user,
     )
     pass1 = (
         service.events()
@@ -191,9 +201,8 @@ def get_gcal_attendees(
             match.get("summary"),
             match.get("start", {}).get("dateTime"),
         )
-        return _flatten_attendees(match, directory)
+        return _flatten_attendees(match)
 
-    # Pass 2: time-containment fallback
     logger.info(
         "No keyword match; falling back to time-range scan for '%s'", cleaned_title
     )
@@ -217,7 +226,7 @@ def get_gcal_attendees(
             match.get("summary"),
             match.get("start", {}).get("dateTime"),
         )
-        return _flatten_attendees(match, directory)
+        return _flatten_attendees(match)
 
     considered = [
         f"'{e.get('summary')}' @ {e.get('start', {}).get('dateTime') or e.get('start', {}).get('date')}"
@@ -225,47 +234,6 @@ def get_gcal_attendees(
     ]
     logger.warning(
         "No Google Calendar event matched '%s' at %s. Considered: %s",
-        cleaned_title,
-        notion_dt,
-        considered,
+        cleaned_title, notion_dt, considered,
     )
     return []
-
-
-def _build_directory_lookup(creds: Credentials) -> dict[str, str]:
-    """Fetch Google Workspace directory and return {email: full_name} map."""
-    service = build("people", "v1", credentials=creds)
-    lookup: dict[str, str] = {}
-    page_token: str | None = None
-
-    while True:
-        result = (
-            service.people()
-            .listDirectoryPeople(
-                readMask="names,emailAddresses",
-                sources=["DIRECTORY_SOURCE_TYPE_DOMAIN_PROFILE"],
-                pageSize=200,
-                pageToken=page_token,
-            )
-            .execute()
-        )
-
-        for person in result.get("people", []):
-            names = person.get("names", [])
-            emails = person.get("emailAddresses", [])
-            if not names or not emails:
-                continue
-            full_name = names[0].get("displayName", "")
-            if not full_name:
-                continue
-            for email_entry in emails:
-                email = email_entry.get("value", "").lower()
-                if email:
-                    lookup[email] = full_name
-
-        page_token = result.get("nextPageToken")
-        if not page_token:
-            break
-
-    logger.info("Loaded %d people from Google Workspace directory", len(lookup))
-    return lookup

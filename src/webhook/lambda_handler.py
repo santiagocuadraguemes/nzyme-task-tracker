@@ -3,14 +3,31 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 
+import logfire
 from notion_client import Client as NotionClient
 
 from src.config import load_config
 from src.notion_client_wrapper import NotionClientWrapper
 from src.pipeline import run_sync_for_page, _archive_done_tasks
 from src.sources.single_source import SingleSource
+from src.utils.logger import setup_logging
 from src.webhook.handler import handle_automation_webhook
+
+# Configure logging at cold start so noisy 3rd-party loggers (httpx, botocore,
+# googleapiclient, etc.) are capped at WARNING. AWS owns the root handler in
+# Lambda; setup_logging only adjusts levels there.
+setup_logging(os.environ.get("LOG_LEVEL", "INFO"))
+
+# Wire logfire so OpenAI token usage / spans show up there (was previously
+# only configured in CLI, leaving Lambda emitting LogfireNotConfiguredWarning).
+logfire.configure(
+    token=os.environ.get("LOGFIRE_TOKEN"),
+    service_name="nzyme-lambda",
+    send_to_logfire="if-token-present",
+)
+logfire.instrument_openai()
 
 logger = logging.getLogger(__name__)
 
@@ -30,14 +47,13 @@ def handler(event, context):
     - API Gateway (has "requestContext") → template injection via webhook
     - CloudWatch Events (has "source": "aws.events") → scheduled extraction
     """
-    # CloudWatch Events cron
+    # CloudWatch Events cron — silent unless there's actual work
     if event.get("source") == "aws.events":
-        logger.info("Event routed to: extraction", extra={"event_type": "cron"})
         return _handle_extraction(event, context)
 
     # API Gateway (has requestContext or pathParameters)
     if event.get("requestContext") or event.get("pathParameters"):
-        logger.info("Event routed to: webhook", extra={"event_type": "webhook"})
+        logger.info("webhook received")
         return _handle_webhook(event, context)
 
     logger.warning("Unknown event source: %s", json.dumps(event)[:200])
@@ -81,17 +97,18 @@ def _handle_webhook(event, context):
 def _handle_extraction(event, context):
     """Scheduled extraction: find idle meeting pages and run AI extraction.
 
-    Triggered by CloudWatch Events rule (every 1 minute).
+    Triggered by CloudWatch Events rule (every 1 minute). Stays silent at
+    INFO when there's no work — only logs once a page is found.
     """
     config, client = _init()
-    logger.info("Extraction tick — db=%s, idle_minutes=%s", config.meeting_notes_db_id, config.idle_minutes, extra={"event_type": "cron"})
     source = SingleSource(client, config.meeting_notes_db_id)
 
     pages = source.get_ready_pages(idle_minutes=config.idle_minutes)
     if not pages:
-        logger.info("No pages ready for extraction")
+        logger.debug("cron tick: 0 pages ready")
         return {"statusCode": 200, "body": json.dumps({"processed": 0})}
 
+    logger.info("cron tick: %d page(s) ready for extraction", len(pages))
     processed = 0
     for page in pages:
         page_id = page["id"]
@@ -109,5 +126,5 @@ def _handle_extraction(event, context):
     except Exception:
         logger.exception("Failed to archive done tasks")
 
-    logger.info("Extraction cycle complete: %d pages processed", processed, extra={"event_type": "cron"})
+    logger.info("cron tick complete: %d page(s) processed", processed)
     return {"statusCode": 200, "body": json.dumps({"processed": processed})}

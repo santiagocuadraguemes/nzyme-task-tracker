@@ -78,12 +78,25 @@ def _run_gcal_test(args: argparse.Namespace) -> None:
     else:
         print("  (none)")
 
-    # 3. Google Calendar lookup (People API resolves emails → names)
+    # 3. Google Calendar lookup — impersonates the page creator via service account
     print("\n=== GCAL SEARCH ===")
     print(f'  Query:  "{clean_title}"')
     print(f"  Window: ±12h around {date}")
 
-    gcal_attendees = get_gcal_attendees(clean_title, date)
+    from src.config import load_config
+    from src.pipeline import _resolve_delegated_user
+
+    cfg = load_config()
+    created_by_id = metadata.get("created_by_id", "")
+    delegated_user = _resolve_delegated_user(
+        client, created_by_id, cfg.gcal_delegated_user_default,
+    )
+    if not delegated_user:
+        print("\nERROR: No Workspace user to impersonate. Set GCAL_DELEGATED_USER_DEFAULT.")
+        sys.exit(1)
+    print(f"  Page creator ID: {created_by_id or '(none)'}")
+    print(f"  Impersonating:   {delegated_user}")
+    gcal_attendees = get_gcal_attendees(clean_title, date, delegated_user)
 
     print(f"\n=== GCAL ATTENDEES ({len(gcal_attendees)}) ===")
     if gcal_attendees:
@@ -187,12 +200,23 @@ def main() -> None:
             org_chart_rows = load_org_chart_rows(client, cfg.org_chart_db_id)
 
     # Attendee resolution chain
-    if metadata.get("title") and metadata.get("date"):
+    if metadata.get("title") and metadata.get("date") and cfg and cfg.gcal_enabled:
+        from src.pipeline import _resolve_delegated_user
         from src.transcript_pipeline.gcal_attendees import get_gcal_attendees
 
-        gcal_attendees = get_gcal_attendees(metadata["title"], metadata["date"])
-        if gcal_attendees:
-            attendees = [{"id": ga["email"], "name": ga["name"]} for ga in gcal_attendees]
+        created_by_id = metadata.get("created_by_id", "")
+        delegated_user = _resolve_delegated_user(
+            client, created_by_id, cfg.gcal_delegated_user_default,
+        )
+        if delegated_user:
+            gcal_attendees = get_gcal_attendees(
+                metadata["title"], metadata["date"], delegated_user,
+            )
+            if gcal_attendees:
+                attendees = [
+                    {"id": ga["email"], "name": ga["name"], "email": ga["email"]}
+                    for ga in gcal_attendees
+                ]
 
     if not attendees and governance_attendees:
         attendees = governance_attendees
@@ -369,7 +393,7 @@ def _run_write_mode(args: argparse.Namespace) -> None:
         print("(dry-run mode — no writes)")
     print()
 
-    run_sync_for_page(cfg, client, args.page_id, use_gcal=True, force=True)
+    run_sync_for_page(cfg, client, args.page_id, force=True)
 
     print()
     print("Done.")

@@ -48,7 +48,7 @@ class TeamTaskTrackerWriter:
                 title = self._get_title(page)
                 if title:
                     self._existing_titles.add(self._normalize_title(title))
-            logger.info("Loaded %d existing task titles for dedup", len(self._existing_titles))
+            logger.debug("Loaded %d existing task titles for dedup", len(self._existing_titles))
         except Exception:
             logger.exception("Failed to load existing titles for dedup — proceeding without dedup")
 
@@ -60,7 +60,7 @@ class TeamTaskTrackerWriter:
         title = self._build_display_title(task)
         normalized = self._normalize_title(title)
         if normalized in self._existing_titles:
-            logger.info("DEDUP — skipping duplicate: %s", title[:80])
+            logger.debug("DEDUP — skipping duplicate: %s", title[:80])
             return None
 
         properties: dict[str, Any] = {
@@ -111,7 +111,7 @@ class TeamTaskTrackerWriter:
 
         result = self._client.create_page(self._db_id, properties)
         self._existing_titles.add(normalized)
-        logger.info("Created task: %s (id=%s)", title[:80], result.get("id"))
+        logger.debug("Created task: %s (id=%s)", title[:80], result.get("id"))
         return result
 
     @staticmethod
