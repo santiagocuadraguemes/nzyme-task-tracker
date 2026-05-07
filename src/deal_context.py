@@ -40,15 +40,24 @@ class DealContextLoader:
         self._client = client
         self._db_id = deal_workplans_db_id
 
-    def load_deals(self) -> list[DealInfo]:
-        """Query Deal Workplans DB and load context for each deal."""
+    def load_deals(
+        self, valid_parent_ids: set[str] | None = None,
+    ) -> list[DealInfo]:
+        """Query Deal Workplans DB and load context for each deal.
+
+        If ``valid_parent_ids`` is given, any deal whose "Team Task Tracker"
+        relation points at a page NOT in that set is treated as having no
+        tracker link (``tracker_page_id=None``). This prevents a stray
+        deal→extracted-task link from being echoed into the classifier
+        prompt as a valid ``parent_task_id``.
+        """
         response = self._client.query_database(database_id=self._db_id)
         pages = response.get("results", [])
 
         deals: list[DealInfo] = []
         for page in pages:
             try:
-                deal = self._parse_deal(page)
+                deal = self._parse_deal(page, valid_parent_ids)
                 if deal:
                     deals.append(deal)
             except Exception:
@@ -58,7 +67,11 @@ class DealContextLoader:
         logger.info("Loaded %d deals from Deal Workplans DB", len(deals))
         return deals
 
-    def _parse_deal(self, page: dict[str, Any]) -> DealInfo | None:
+    def _parse_deal(
+        self,
+        page: dict[str, Any],
+        valid_parent_ids: set[str] | None = None,
+    ) -> DealInfo | None:
         """Parse a deal page into a DealInfo, discovering inline DBs."""
         name = self._get_title(page)
         if not name:
@@ -68,6 +81,17 @@ class DealContextLoader:
 
         # Get Team Task Tracker relation (🖇️ Team Task Tracker property)
         tracker_page_id = self._get_tracker_page_id(page)
+        if (
+            tracker_page_id
+            and valid_parent_ids is not None
+            and tracker_page_id not in valid_parent_ids
+        ):
+            logger.warning(
+                "Deal '%s' tracker relation %s is not an organizational node "
+                "(likely points at an extracted task) — ignoring",
+                name, tracker_page_id,
+            )
+            tracker_page_id = None
 
         # Discover inline databases from the deal page's child blocks
         inline_dbs = self._discover_inline_dbs(deal_page_id)

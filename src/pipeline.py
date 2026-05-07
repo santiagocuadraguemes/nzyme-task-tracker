@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 import logfire
 
+from notion_client import APIResponseError
 from openai import OpenAI
 
 from src.config import SyncConfig
@@ -17,6 +18,10 @@ from src.deal_context import DealContextLoader, DealInfo
 from src.semantic_dedup import SemanticDedup
 from src.hierarchy_loader import HierarchyLoader
 from src.ai_extractor import AIExtractor
+from src import literal_notes_extractor
+from src.meeting_db_registry import (
+    MeetingDB, find_owner_for_page, load_registry,
+)
 from src.sources.single_source import SingleSource
 from src.template_injector import fetch_template, inject_notes_section
 from src.tracker.team_writer import TeamTaskTrackerWriter
@@ -43,6 +48,25 @@ logger = logging.getLogger(__name__)
 # base_url is None — which would route light calls to Gemini if that env
 # var is still set from an older config.
 OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1"
+
+
+def _resolve_stage_creds(
+    model_name: str, config: SyncConfig,
+) -> tuple[str, str]:
+    """Pick (api_key, base_url) for a stage based on the model name prefix.
+
+    Convention: model names starting with `gemini-` route through the Gemini
+    OpenAI-compatible endpoint; everything else uses OpenAI directly. This
+    lets per-stage CLI overrides (--correction-model, etc.) swap providers
+    without an extra flag.
+    """
+    if model_name.startswith("gemini-"):
+        if not config.gemini_api_key:
+            raise RuntimeError(
+                f"Model '{model_name}' requires GEMINI_API_KEY. Set it in .env."
+            )
+        return config.gemini_api_key, config.gemini_base_url
+    return config.openai_api_key, OPENAI_DEFAULT_BASE_URL
 
 
 def _load_categories(client: NotionClientWrapper, database_id: str) -> list[str]:
@@ -372,8 +396,14 @@ def _process_via_transcript(
     from src.transcript_pipeline.task_extractor import TaskExtractor
     from src.transcript_pipeline.task_classifier import TaskClassifier
 
-    # Fetch transcript text
+    # Fetch transcript text. The router only invokes this path when
+    # extract_transcript_block_id(mn_block) returned a valid id, so the
+    # re-call here is just to keep the signature un-coupled and cannot
+    # legitimately return None.
     transcript_block_id = extract_transcript_block_id(mn_block)
+    if transcript_block_id is None:
+        logger.warning("Transcript block id missing — no tasks to extract")
+        return []
     transcript_blocks = client.get_block_children(transcript_block_id)
     if not transcript_blocks:
         logger.warning("Transcript block has no children — no tasks to extract")
@@ -391,16 +421,20 @@ def _process_via_transcript(
     if ctx["org_chart_rows"] and attendees:
         enriched_attendee_str = build_enriched_attendee_str(attendees, ctx["org_chart_rows"])
 
-    # Step 1: Correct transcript — HEAVY call → Gemini
-    if not config.gemini_api_key:
-        raise RuntimeError(
-            "GEMINI_API_KEY is required for transcript correction. Set it in .env."
-        )
-    corrector = TranscriptCorrector(
-        api_key=config.gemini_api_key,
-        model=config.gemini_model,
-        base_url=config.gemini_base_url,
+    logger.info(
+        "Transcript loaded: %.1f KB (%d chars)",
+        len(transcript_text) / 1024, len(transcript_text),
     )
+
+    # Step 1: Correct transcript
+    correction_model = config.correction_model or config.gemini_model
+    correction_key, correction_base = _resolve_stage_creds(correction_model, config)
+    corrector = TranscriptCorrector(
+        api_key=correction_key,
+        model=correction_model,
+        base_url=correction_base,
+    )
+    t0 = time.perf_counter()
     corrected = corrector.correct(
         transcript_text,
         ctx["terminology"],
@@ -408,14 +442,22 @@ def _process_via_transcript(
         enriched_attendee_str=enriched_attendee_str,
         notes_text=notes_text,
     )
-    logger.debug("Transcript corrected (%d → %d chars)", len(transcript_text), len(corrected))
-
-    # Step 2: Extract tasks — HEAVY call → Gemini
-    extractor = TaskExtractor(
-        api_key=config.gemini_api_key,
-        model=config.gemini_model,
-        base_url=config.gemini_base_url,
+    logger.info(
+        "Corrected transcript (%s, %.1fs, %d → %d chars)",
+        correction_model, time.perf_counter() - t0,
+        len(transcript_text), len(corrected),
     )
+    logger.debug("Corrected transcript text:\n%s", corrected)
+
+    # Step 2: Extract tasks
+    extraction_model = config.extraction_model or config.gemini_model
+    extraction_key, extraction_base = _resolve_stage_creds(extraction_model, config)
+    extractor = TaskExtractor(
+        api_key=extraction_key,
+        model=extraction_model,
+        base_url=extraction_base,
+    )
+    t0 = time.perf_counter()
     tasks = extractor.extract(
         corrected,
         attendees,
@@ -426,21 +468,31 @@ def _process_via_transcript(
         enriched_attendee_str=enriched_attendee_str,
         notes_text=notes_text,
     )
+    extract_elapsed = time.perf_counter() - t0
     if not tasks:
-        logger.debug("No tasks extracted from transcript")
+        logger.info(
+            "Extracted 0 tasks (%s, %.1fs)", extraction_model, extract_elapsed,
+        )
         return []
-    logger.debug("Extracted %d tasks from transcript", len(tasks))
+    logger.info(
+        "Extracted %d tasks (%s, %.1fs)",
+        len(tasks), extraction_model, extract_elapsed,
+    )
+    logger.debug("Extracted task payload: %s", json.dumps(tasks, ensure_ascii=False, indent=2))
 
-    # Step 3: Classify tasks — LIGHT call → OpenAI
+    # Step 3: Classify tasks
     if not ctx["classifier_prompt"]:
         logger.warning("No classifier prompt — skipping classification, tasks will have no category/parent")
         return tasks
 
+    classification_model = config.classification_model or config.openai_model
+    classification_key, classification_base = _resolve_stage_creds(classification_model, config)
     classifier = TaskClassifier(
-        api_key=config.openai_api_key,
-        model=config.openai_model,
-        base_url=OPENAI_DEFAULT_BASE_URL,
+        api_key=classification_key,
+        model=classification_model,
+        base_url=classification_base,
     )
+    t0 = time.perf_counter()
     tasks = classifier.classify(
         tasks,
         ctx["classifier_prompt"],
@@ -453,8 +505,111 @@ def _process_via_transcript(
         enriched_attendees=enriched_attendee_str,
         notes_text=notes_text,
     )
-    logger.debug("Classified %d tasks", len(tasks))
+    logger.info(
+        "Classified %d tasks (%s, %.1fs)",
+        len(tasks), classification_model, time.perf_counter() - t0,
+    )
+    logger.debug("Classified task payload: %s", json.dumps(tasks, ensure_ascii=False, indent=2))
     return tasks
+
+
+def _should_auto_extract(
+    config: SyncConfig, owner: MeetingDB | None,
+) -> bool:
+    """Decide whether the transcript pipeline runs for this page.
+
+    Priority: CLI override → owner's Org Chart flag → True (fail open when
+    the owner can't be resolved, which keeps today's behaviour).
+    """
+    if config.auto_extract_tasks_override is not None:
+        return config.auto_extract_tasks_override
+    if owner is None:
+        return True
+    return owner.auto_extract_tasks
+
+
+def _process_via_literal_notes(
+    client: NotionClientWrapper,
+    config: SyncConfig,
+    ctx: dict,
+    page_id: str,
+    blocks: list[dict],
+    metadata: dict,
+    attendees: list[dict[str, str]] | None = None,
+) -> list[dict]:
+    """Notes-only LLM path: extract bullets verbatim, then classify.
+
+    Used when the page's Org Chart owner has Auto-extract Tasks=False (or
+    the CLI override forces FALSE). The extraction prompt (Notion-hosted)
+    instructs the model to return one task per `## Action Items` bullet
+    with the title kept as the author typed it. The existing classifier
+    then resolves category/parent/deal_page_id and `assignee_id` from
+    the internal/external split.
+    """
+    if not ctx.get("literal_notes_prompt"):
+        logger.warning(
+            "literal-notes: prompt not configured (LITERAL_NOTES_EXTRACTION_PROMPT_PAGE_ID) — "
+            "cannot extract for page=%s",
+            page_id,
+        )
+        return []
+
+    extraction_model = config.openai_model
+    extraction_key, extraction_base = _resolve_stage_creds(extraction_model, config)
+    extraction_client = OpenAI(api_key=extraction_key, base_url=extraction_base)
+
+    t0 = time.perf_counter()
+    tasks = literal_notes_extractor.extract(
+        client=client,
+        page_blocks=blocks,
+        metadata=metadata,
+        attendees=attendees,
+        all_users=ctx.get("all_users") or [],
+        system_prompt_template=ctx["literal_notes_prompt"],
+        openai_client=extraction_client,
+        model=extraction_model,
+    )
+    logger.info(
+        "literal-notes: extracted %d task(s) (%s, %.1fs)",
+        len(tasks), extraction_model, time.perf_counter() - t0,
+    )
+    if not tasks:
+        return []
+
+    if not ctx["classifier_prompt"]:
+        logger.warning(
+            "literal-notes: no classifier prompt — skipping classification, "
+            "tasks will have no category/parent/assignee",
+        )
+        return tasks
+
+    from src.transcript_pipeline.task_classifier import TaskClassifier
+
+    classification_model = config.classification_model or config.openai_model
+    classification_key, classification_base = _resolve_stage_creds(
+        classification_model, config,
+    )
+    classifier = TaskClassifier(
+        api_key=classification_key,
+        model=classification_model,
+        base_url=classification_base,
+    )
+    t0 = time.perf_counter()
+    classified = classifier.classify(
+        tasks,
+        ctx["classifier_prompt"],
+        ctx["categories"],
+        ctx["hierarchy"],
+        ctx["all_users"],
+        _format_deal_context(ctx["deals"]),
+        meeting_title=metadata.get("title", ""),
+        meeting_date=metadata.get("date", ""),
+    )
+    logger.info(
+        "literal-notes: classified %d tasks (%s, %.1fs)",
+        len(classified), classification_model, time.perf_counter() - t0,
+    )
+    return classified
 
 
 def _process_via_notes(
@@ -516,39 +671,164 @@ def _process_via_notes(
     )
 
 
-def _meeting_fingerprint(title: str, date: str) -> str:
-    """Normalize meeting title + date into a dedup key.
+def _meeting_fingerprint(db_id: str, title: str, date: str) -> str:
+    """Normalize (db_id, title, date) into a per-DB dedup key.
 
-    Strips trailing (1), (2) suffixes that Notion adds to duplicates,
-    lowercases, and combines with date.
+    The db_id prefix is what makes the multi-DB model safe: two team members
+    capturing notes for the same meeting in their own DBs share title+date
+    but live in different DBs, so they MUST be processed independently. The
+    " (1)" suffix Notion adds to duplicates within a single DB still
+    collapses correctly.
     """
-    normalized = re.sub(r"\s*\(\d+\)\s*$", "", title).strip().lower()
-    return f"{normalized}|{date}"
+    normalized_db = (db_id or "").replace("-", "").lower()
+    normalized_title = re.sub(r"\s*\(\d+\)\s*$", "", title).strip().lower()
+    return f"{normalized_db}|{normalized_title}|{date}"
 
 
-def _build_seen_fingerprints(source: SingleSource) -> set[str]:
-    """Collect fingerprints from already-processed meetings for cross-cycle dedup."""
+def _build_seen_fingerprints(source: SingleSource, db_id: str) -> set[str]:
+    """Collect fingerprints from already-processed meetings within one DB."""
     seen: set[str] = set()
     try:
         processed_pages = source.get_processed_pages()
         for page in processed_pages:
             meta = source.get_page_metadata(page)
             if meta["date"]:
-                fp = _meeting_fingerprint(meta["title"], meta["date"])
+                fp = _meeting_fingerprint(db_id, meta["title"], meta["date"])
                 seen.add(fp)
-        logger.debug("Loaded %d processed meeting fingerprints for dedup", len(seen))
+        logger.debug(
+            "Loaded %d processed meeting fingerprints for db=%s",
+            len(seen), db_id[:8],
+        )
     except Exception:
         logger.exception("Failed to load processed meetings for dedup — proceeding without")
+    return seen
+
+
+_READ_ONLY_PROPERTY_TYPES = frozenset({
+    "formula", "rollup", "created_time", "last_edited_time",
+    "created_by", "last_edited_by", "unique_id",
+})
+
+# Hierarchy relations get dropped on archival — once parents are archived too,
+# the references would dangle. Archive is a flat record of completed work.
+_SKIP_PROPERTY_NAMES_ON_ARCHIVE = frozenset({"Parent item", "Sub-item"})
+
+
+def _copy_property_for_write(prop: dict) -> dict | None:
+    """Convert a Notion property from read shape to write shape.
+
+    Returns None for read-only types so the caller can skip them.
+    """
+    ptype = prop.get("type")
+    if not ptype or ptype in _READ_ONLY_PROPERTY_TYPES:
+        return None
+
+    if ptype == "title":
+        items = prop.get("title") or []
+        return {"title": [{"text": {"content": rt.get("plain_text", "")}} for rt in items]}
+
+    if ptype == "rich_text":
+        items = prop.get("rich_text") or []
+        return {"rich_text": [{"text": {"content": rt.get("plain_text", "")}} for rt in items]}
+
+    if ptype == "select":
+        sel = prop.get("select")
+        return {"select": {"name": sel["name"]} if sel else None}
+
+    if ptype == "status":
+        st = prop.get("status")
+        return {"status": {"name": st["name"]} if st else None}
+
+    if ptype == "multi_select":
+        items = prop.get("multi_select") or []
+        return {"multi_select": [{"name": it["name"]} for it in items if it.get("name")]}
+
+    if ptype == "date":
+        d = prop.get("date")
+        if not d:
+            return {"date": None}
+        out: dict = {"start": d["start"]}
+        if d.get("end"):
+            out["end"] = d["end"]
+        if d.get("time_zone"):
+            out["time_zone"] = d["time_zone"]
+        return {"date": out}
+
+    if ptype == "people":
+        items = prop.get("people") or []
+        return {"people": [{"id": p["id"]} for p in items if p.get("id")]}
+
+    if ptype == "relation":
+        items = prop.get("relation") or []
+        return {"relation": [{"id": r["id"]} for r in items if r.get("id")]}
+
+    if ptype == "checkbox":
+        return {"checkbox": bool(prop.get("checkbox"))}
+
+    if ptype == "number":
+        return {"number": prop.get("number")}
+
+    if ptype == "url":
+        return {"url": prop.get("url")}
+
+    if ptype == "email":
+        return {"email": prop.get("email")}
+
+    if ptype == "phone_number":
+        return {"phone_number": prop.get("phone_number")}
+
+    return None
+
+
+def _build_archive_payload(source_page: dict) -> dict:
+    """Build a write-shape properties payload for an archive copy."""
+    out: dict = {}
+    for name, value in (source_page.get("properties") or {}).items():
+        if name in _SKIP_PROPERTY_NAMES_ON_ARCHIVE:
+            continue
+        converted = _copy_property_for_write(value)
+        if converted is not None:
+            out[name] = converted
+
+    out["Source Page ID"] = {
+        "rich_text": [{"text": {"content": source_page["id"]}}],
+    }
+    return out
+
+
+def _load_archived_source_ids(
+    client: NotionClientWrapper, archive_database_id: str,
+) -> set[str]:
+    """Return Source Page IDs already present in the archive DB (idempotency)."""
+    response = client.query_database(database_id=archive_database_id)
+    seen: set[str] = set()
+    for page in response.get("results", []):
+        prop = (page.get("properties") or {}).get("Source Page ID") or {}
+        if prop.get("type") == "rich_text":
+            for rt in prop.get("rich_text", []):
+                txt = (rt.get("plain_text") or "").strip()
+                if txt:
+                    seen.add(txt)
     return seen
 
 
 def _archive_done_tasks(
     client: NotionClientWrapper,
     database_id: str,
-    grace_days: int = 3,
+    archive_database_id: str | None,
+    grace_days: int = 5,
     dry_run: bool = False,
 ) -> int:
-    """Archive tasks marked Done whose last edit is older than grace_days."""
+    """Sweep Done tasks older than grace_days into the archive DB.
+
+    For each match: copy properties to `archive_database_id`, then archive the
+    original. When `archive_database_id` is empty/None, the sweep is a no-op.
+    Re-runs are idempotent via the `Source Page ID` marker on each archive copy.
+    """
+    if not archive_database_id:
+        logger.warning("TASK_ARCHIVE_DB_ID not configured — skipping archive sweep")
+        return 0
+
     cutoff = datetime.now(timezone.utc) - timedelta(days=grace_days)
     db_filter = {
         "and": [
@@ -558,25 +838,35 @@ def _archive_done_tasks(
     }
     response = client.query_database(database_id=database_id, filter=db_filter)
     pages = response.get("results", [])
+    if not pages:
+        return 0
 
+    already_archived = _load_archived_source_ids(client, archive_database_id)
     archived = 0
     for page in pages:
         page_id = page["id"]
         title = ""
-        for prop in page.get("properties", {}).values():
+        for prop in (page.get("properties") or {}).values():
             if prop.get("type") == "title":
                 title = "".join(p.get("plain_text", "") for p in prop.get("title", []))
                 break
 
+        if page_id in already_archived:
+            logger.info("Already archived, skipping: %s", title[:80])
+            continue
+
         if dry_run:
             logger.info("DRY RUN — would archive done task: %s", title[:80])
-        else:
-            try:
-                client.archive_page(page_id)
-                logger.info("Archived done task: %s", title[:80])
-                archived += 1
-            except Exception:
-                logger.exception("Failed to archive task: %s", title[:80])
+            continue
+
+        try:
+            payload = _build_archive_payload(page)
+            client.create_page(parent_database_id=archive_database_id, properties=payload)
+            client.archive_page(page_id)
+            logger.info("Archived done task: %s", title[:80])
+            archived += 1
+        except Exception:
+            logger.exception("Failed to archive task: %s", title[:80])
 
     return archived
 
@@ -630,7 +920,7 @@ def _inject_templates(
 
 
 def run_inject_templates(config: SyncConfig, client: NotionClientWrapper) -> None:
-    """Inject meeting note template into new pages (standalone command)."""
+    """Inject meeting note template into new pages across every discovered DB."""
     if not config.inject_template:
         logger.info("INJECT_TEMPLATE disabled — skipping template injection")
         return
@@ -643,11 +933,26 @@ def run_inject_templates(config: SyncConfig, client: NotionClientWrapper) -> Non
         logger.warning("Template page has no usable blocks — skipping")
         return
 
-    injected = _inject_templates(
-        client, config.meeting_notes_db_id,
-        template_blocks, marker, config.dry_run,
-    )
-    logger.info("Template injection complete: %d pages updated", injected)
+    try:
+        registry = load_registry(config, client)
+    except Exception:
+        logger.exception("Failed to load Meeting Notes DB registry — skipping injection")
+        return
+
+    total = 0
+    for member_db in registry:
+        label = member_db.owner_name or member_db.db_id[:8]
+        try:
+            injected = _inject_templates(
+                client, member_db.db_id,
+                template_blocks, marker, config.dry_run,
+            )
+            if injected:
+                logger.info("[%s] template injected into %d page(s)", label, injected)
+            total += injected
+        except Exception:
+            logger.exception("[%s] template injection failed — continuing", label)
+    logger.info("Template injection complete: %d pages updated across %d DB(s)", total, len(registry))
 
 
 def _load_sync_context(
@@ -702,12 +1007,16 @@ def _load_sync_context(
     # Recent tasks for AI dedup context
     existing_tasks = _load_existing_tasks(client, config.team_tracker_db_id, hierarchy)
 
-    # Deal context (optional — enables deal-aware extraction)
+    # Deal context (optional — enables deal-aware extraction).
+    # Pass the clean hierarchy IDs so any deal whose "Team Task Tracker"
+    # relation accidentally points at an extracted task is sanitized before
+    # that ID reaches the classifier prompt as a "valid" parent_task_id.
     deals: list[DealInfo] = []
     if config.deal_workplans_db_id:
         try:
             deal_loader = DealContextLoader(client, config.deal_workplans_db_id)
-            deals = deal_loader.load_deals()
+            valid_parent_ids = set(_flatten_hierarchy(hierarchy).keys())
+            deals = deal_loader.load_deals(valid_parent_ids=valid_parent_ids)
             logger.debug("Loaded %d deals with context", len(deals))
         except Exception:
             logger.exception("Failed to load deal context — proceeding without")
@@ -762,6 +1071,29 @@ def _load_sync_context(
         except Exception:
             logger.exception("Failed to load classifier prompt — transcript classification will fall back to notes path")
 
+    # Literal-notes extraction prompt (only used when an Org Chart row has
+    # `Auto-extract Tasks = false`). Loading is best-effort: if the page is
+    # missing, the literal-notes path will skip with a warning rather than
+    # silently fall through to the transcript pipeline.
+    literal_notes_prompt = ""
+    if config.literal_notes_extraction_prompt_page_id:
+        try:
+            literal_notes_prompt = _fetch_page_text(
+                client, config.literal_notes_extraction_prompt_page_id,
+            )
+            if literal_notes_prompt.strip():
+                logger.debug(
+                    "Loaded literal-notes extraction prompt (%d chars)",
+                    len(literal_notes_prompt),
+                )
+            else:
+                logger.warning("Literal-notes extraction prompt page is empty")
+        except Exception:
+            logger.exception(
+                "Failed to load literal-notes extraction prompt — literal-notes "
+                "path will be unavailable",
+            )
+
     return {
         "system_prompt_template": system_prompt_template,
         "user_prompt_template": user_prompt_template,
@@ -778,136 +1110,239 @@ def _load_sync_context(
         "org_chart_text": org_chart_text,
         "org_chart_rows": org_chart_rows,
         "classifier_prompt": classifier_prompt,
+        "literal_notes_prompt": literal_notes_prompt,
     }
 
 
 def run_sync(config: SyncConfig, client: NotionClientWrapper) -> None:
-    """Execute one full sync cycle — transcript-first extraction + archiving."""
-    source = SingleSource(client, config.meeting_notes_db_id)
-
+    """Execute one full sync cycle across every discovered Meeting Notes DB."""
     try:
-        ctx = _load_sync_context(config, client)
+        registry = load_registry(config, client)
     except Exception:
-        logger.exception("Failed to load sync context — aborting sync")
+        logger.exception("Failed to load Meeting Notes DB registry — aborting sync")
         raise
 
-    # Poll for unprocessed meetings
-    pages = source.get_unprocessed_pages(config.buffer_hours)
-    if not pages:
-        logger.info("No unprocessed meetings found")
+    if not registry:
+        logger.info("No Meeting Notes DBs to poll — nothing to do")
+        # Still run the workspace-wide archive sweep below.
+        ctx = None
     else:
-        # Build meeting-level dedup set from already-processed meetings
-        seen_meetings = _build_seen_fingerprints(source)
+        try:
+            ctx = _load_sync_context(config, client)
+        except Exception:
+            logger.exception("Failed to load sync context — aborting sync")
+            raise
+
         parent_titles_map = _flatten_hierarchy(ctx["hierarchy"])
-
         total_tasks = 0
-        for page in pages:
-            page_id = page["id"]
-            metadata = source.get_page_metadata(page)
-            title = metadata["title"]
 
-            # Meeting-level dedup: skip if same meeting (title+date) already processed
-            fingerprint = _meeting_fingerprint(title, metadata["date"])
-            if fingerprint in seen_meetings:
-                logger.info("DEDUP — skipping duplicate meeting: '%s'", title)
-                if not config.dry_run:
-                    source.mark_page_processed(page_id)
+        # When --db-id (or MEETING_NOTES_DB_ID) is set, this is a manual
+        # single-DB run. The created_time buffer exists to wait for AI
+        # recordings to finish populating, but for explicit manual runs we
+        # want every Processed=false page picked up immediately — including
+        # pages the user just toggled to re-run.
+        if config.meeting_notes_db_id:
+            buffer_hours = None
+            logger.info(
+                "manual single-DB run — skipping created_time buffer "
+                "(meeting_notes_db_id=%s)",
+                config.meeting_notes_db_id,
+            )
+        else:
+            buffer_hours = config.buffer_hours
+
+        for member_db in registry:
+            source = SingleSource(client, member_db.db_id)
+            label = member_db.owner_name or member_db.db_id[:8]
+
+            pages = source.get_unprocessed_pages(buffer_hours)
+            if not pages:
+                logger.debug("[%s] no unprocessed meetings", label)
                 continue
-            seen_meetings.add(fingerprint)
 
-            try:
-                with logfire.span("process_meeting", meeting_title=title, page_id=page_id):
-                    # Decision point: does this page have a transcript?
-                    blocks = client.get_block_children(page_id)
-                    mn_block = find_meeting_notes_block(blocks)
+            seen_meetings = _build_seen_fingerprints(source, member_db.db_id)
 
-                    if mn_block is not None:
-                        # --- Transcript path ---
-                        logger.info("Page '%s': transcript found — using transcript extraction", title)
-                        attendees = _resolve_attendees(
-                            client, config, mn_block, page, metadata,
-                            org_chart_rows=ctx.get("org_chart_rows"),
-                        )
-                        tasks = _process_via_transcript(
-                            client, config, ctx, page_id, page, blocks,
-                            mn_block, metadata, attendees,
-                        )
+            for page in pages:
+                page_id = page["id"]
+                metadata = source.get_page_metadata(page)
+                title = metadata["title"]
 
-                        # Assignee fallback: default to meeting creator
-                        creator = metadata.get("created_by", {})
-                        creator_id = creator.get("id")
-                        for task in tasks:
-                            if not task.get("assignee_id") and creator_id:
-                                task["assignee_id"] = [creator_id]
-                                logger.debug(
-                                    "Assignee fallback → meeting creator for: %s",
-                                    task.get("title", "?")[:60],
-                                )
-                    else:
-                        # --- Notes fallback ---
-                        logger.info("Page '%s': no transcript — falling back to notes extraction", title)
-                        content = source.get_page_content(
-                            page_id, include_ai_notes=config.include_ai_notes,
-                        )
-                        if not content.strip():
-                            logger.info("Page '%s' has no content — marking processed", title)
-                            if not config.dry_run:
-                                source.mark_page_processed(page_id)
-                            continue
-
-                        tasks = _process_via_notes(config, ctx, page_id, metadata, content)
-
-                        # Assignee fallback: default to meeting creator
-                        creator = metadata.get("created_by", {})
-                        creator_id = creator.get("id")
-                        for task in tasks:
-                            if not task.get("assignee_id") and creator_id:
-                                task["assignee_id"] = creator_id
-                                logger.debug(
-                                    "Assignee fallback → meeting creator for: %s",
-                                    task.get("title", "?")[:60],
-                                )
-
-                    # Common post-processing for both paths
-                    for task in tasks:
-                        task["meeting_page_id"] = page_id
-
-                    # Semantic dedup: filter out tasks similar to existing ones
-                    tasks = _run_semantic_dedup(tasks, ctx.get("semantic_dedup"))
-
-                    if tasks:
-                        created = ctx["writer"].write_batch(tasks)
-                        total_tasks += len(created) if not config.dry_run else len(tasks)
-                        logger.info("Page '%s': %d tasks created", title, len(tasks))
-
-                        # Accumulate for cross-meeting AI dedup context
-                        for task in tasks:
-                            pid = task.get("parent_task_id")
-                            ctx["existing_tasks"].append({
-                                "title": task["title"],
-                                "parent_title": parent_titles_map.get(pid, "") if pid else "",
-                            })
-                    else:
-                        logger.info("Page '%s': no tasks found", title)
-
+                fingerprint = _meeting_fingerprint(
+                    member_db.db_id, title, metadata["date"],
+                )
+                if fingerprint in seen_meetings:
+                    logger.info(
+                        "[%s] DEDUP — skipping duplicate within this DB: '%s'",
+                        label, title,
+                    )
                     if not config.dry_run:
                         source.mark_page_processed(page_id)
+                    continue
+                seen_meetings.add(fingerprint)
 
-            except Exception:
-                logger.exception("Failed to process '%s' — will retry next cycle", title)
-                continue
+                try:
+                    with logfire.span(
+                        "process_meeting",
+                        meeting_title=title, page_id=page_id, db_owner=label,
+                    ):
+                        # Decision point: does this page have a transcript?
+                        blocks = client.get_block_children(page_id)
+                        mn_block = find_meeting_notes_block(blocks)
+                        transcript_block_id = (
+                            extract_transcript_block_id(mn_block) if mn_block else None
+                        )
 
-        logger.info("Extraction complete: %d tasks processed", total_tasks)
+                        if not _should_auto_extract(config, member_db):
+                            # --- Literal-notes path (LLM extraction, verbatim) ---
+                            logger.info(
+                                "[%s] Page '%s': literal-notes path (auto_extract_tasks=False)",
+                                label, title,
+                            )
+                            attendees = _resolve_attendees(
+                                client, config, mn_block, page, metadata,
+                                org_chart_rows=ctx.get("org_chart_rows"),
+                            )
+                            tasks = _process_via_literal_notes(
+                                client, config, ctx, page_id, blocks, metadata,
+                                attendees=attendees,
+                            )
+                            if not tasks:
+                                logger.warning(
+                                    "[%s] Page '%s': no action items found in notes — "
+                                    "skipping (auto_extract_tasks=False)",
+                                    label, title,
+                                )
+                                if not config.dry_run:
+                                    source.mark_page_processed(page_id)
+                                continue
 
-    # Archive done tasks (3-day grace period)
-    try:
-        archived = _archive_done_tasks(
-            client, config.team_tracker_db_id, grace_days=3, dry_run=config.dry_run,
+                            # Assignee fallback: default to meeting creator
+                            creator = metadata.get("created_by", {})
+                            creator_id = creator.get("id")
+                            for task in tasks:
+                                if not task.get("assignee_id") and creator_id:
+                                    task["assignee_id"] = [creator_id]
+                                    logger.debug(
+                                        "Assignee fallback → meeting creator for: %s",
+                                        task.get("title", "?")[:60],
+                                    )
+                        elif transcript_block_id:
+                            # --- Transcript path ---
+                            logger.info("[%s] Page '%s': transcript found", label, title)
+                            attendees = _resolve_attendees(
+                                client, config, mn_block, page, metadata,
+                                org_chart_rows=ctx.get("org_chart_rows"),
+                            )
+                            tasks = _process_via_transcript(
+                                client, config, ctx, page_id, page, blocks,
+                                mn_block, metadata, attendees,
+                            )
+
+                            # Assignee fallback: default to meeting creator
+                            creator = metadata.get("created_by", {})
+                            creator_id = creator.get("id")
+                            for task in tasks:
+                                if not task.get("assignee_id") and creator_id:
+                                    task["assignee_id"] = [creator_id]
+                                    logger.debug(
+                                        "Assignee fallback → meeting creator for: %s",
+                                        task.get("title", "?")[:60],
+                                    )
+                        elif mn_block is not None:
+                            # meeting_notes block exists but transcription is
+                            # paused/disabled. Fall back to extracting from the
+                            # notes the user wrote inside the AI Meeting block.
+                            logger.info(
+                                "[%s] Page '%s': transcript unavailable — meeting_notes notes path",
+                                label, title,
+                            )
+                            attendees = _resolve_attendees(
+                                client, config, mn_block, page, metadata,
+                                org_chart_rows=ctx.get("org_chart_rows"),
+                            )
+                            notes_content = fetch_notes_text(mn_block, client)
+                            if not notes_content.strip():
+                                logger.info(
+                                    "[%s] Page '%s' has no transcript and no notes — marking processed",
+                                    label, title,
+                                )
+                                if not config.dry_run:
+                                    source.mark_page_processed(page_id)
+                                continue
+
+                            metadata["attendees"] = attendees
+                            tasks = _process_via_notes(
+                                config, ctx, page_id, metadata, notes_content,
+                            )
+
+                            # Assignee fallback: default to meeting creator
+                            creator = metadata.get("created_by", {})
+                            creator_id = creator.get("id")
+                            for task in tasks:
+                                if not task.get("assignee_id") and creator_id:
+                                    task["assignee_id"] = creator_id
+                                    logger.debug(
+                                        "Assignee fallback → meeting creator for: %s",
+                                        task.get("title", "?")[:60],
+                                    )
+                        else:
+                            # --- Notes fallback (no meeting_notes block at all) ---
+                            logger.info("[%s] Page '%s': no transcript — notes path", label, title)
+                            content = source.get_page_content(
+                                page_id, include_ai_notes=config.include_ai_notes,
+                            )
+                            if not content.strip():
+                                logger.info("[%s] Page '%s' has no content — marking processed", label, title)
+                                if not config.dry_run:
+                                    source.mark_page_processed(page_id)
+                                continue
+
+                            tasks = _process_via_notes(config, ctx, page_id, metadata, content)
+
+                            # Assignee fallback: default to meeting creator
+                            creator = metadata.get("created_by", {})
+                            creator_id = creator.get("id")
+                            for task in tasks:
+                                if not task.get("assignee_id") and creator_id:
+                                    task["assignee_id"] = creator_id
+                                    logger.debug(
+                                        "Assignee fallback → meeting creator for: %s",
+                                        task.get("title", "?")[:60],
+                                    )
+
+                        # Common post-processing for both paths
+                        for task in tasks:
+                            task["meeting_page_id"] = page_id
+
+                        # Semantic dedup: filter out tasks similar to existing ones
+                        tasks = _run_semantic_dedup(tasks, ctx.get("semantic_dedup"))
+
+                        if tasks:
+                            created = ctx["writer"].write_batch(tasks)
+                            total_tasks += len(created) if not config.dry_run else len(tasks)
+                            logger.info("[%s] Page '%s': %d tasks created", label, title, len(tasks))
+
+                            # Accumulate for cross-meeting AI dedup context
+                            for task in tasks:
+                                pid = task.get("parent_task_id")
+                                ctx["existing_tasks"].append({
+                                    "title": task["title"],
+                                    "parent_title": parent_titles_map.get(pid, "") if pid else "",
+                                })
+                        else:
+                            logger.info("[%s] Page '%s': no tasks found", label, title)
+
+                        if not config.dry_run:
+                            source.mark_page_processed(page_id)
+
+                except Exception:
+                    logger.exception("[%s] Failed to process '%s' — will retry next cycle", label, title)
+                    continue
+
+        logger.info(
+            "Extraction complete: %d task(s) processed across %d DB(s)",
+            total_tasks, len(registry),
         )
-        if archived:
-            logger.info("Archived %d done tasks", archived)
-    except Exception:
-        logger.exception("Failed to archive done tasks — will retry next cycle")
 
 
 # ---------------------------------------------------------------------------
@@ -919,7 +1354,9 @@ def run_inject_templates_for_page(
 ) -> bool:
     """Inject template into a single page (webhook entry point).
 
-    Returns True if the template was injected, False if skipped.
+    The page's parent database is derived from the page itself, so this
+    works for any per-member Meeting Notes DB without prior knowledge of
+    which one. Returns True if the template was injected, False if skipped.
     """
     if not config.inject_template:
         logger.info("INJECT_TEMPLATE disabled — skipping template injection")
@@ -933,7 +1370,30 @@ def run_inject_templates_for_page(
         logger.warning("Template page has no usable blocks — skipping")
         return False
 
-    source = SingleSource(client, config.meeting_notes_db_id)
+    try:
+        page = client.get_page(page_id)
+    except APIResponseError as e:
+        if e.status == 404:
+            logger.info(
+                "Page %s not accessible (deleted before webhook arrived) — skipping",
+                page_id,
+            )
+            return False
+        raise
+
+    if page.get("archived") is True or page.get("in_trash") is True:
+        logger.info(
+            "Page %s is archived/in trash (deleted before webhook arrived) — skipping",
+            page_id,
+        )
+        return False
+
+    page_db_id = (page.get("parent") or {}).get("database_id", "")
+    if not page_db_id:
+        logger.warning("Page %s has no parent database — cannot mark Template Injected", page_id)
+        return False
+
+    source = SingleSource(client, page_db_id)
     try:
         if inject_notes_section(client, page_id, template_blocks, marker):
             if not config.dry_run:
@@ -942,6 +1402,18 @@ def run_inject_templates_for_page(
             return True
         logger.debug("Template already present on page %s — skipped", page_id)
         return False
+    except APIResponseError as e:
+        # Notion returns 404 "Could not find block … shared with your integration"
+        # for archived/in-trash blocks even when pages.retrieve worked moments
+        # before — race between automation firing and the user deleting the page.
+        if e.status == 404:
+            logger.info(
+                "Page %s gone during inject (deleted/archived race) — skipping",
+                page_id,
+            )
+            return False
+        logger.exception("Failed to inject template into page %s", page_id)
+        raise
     except Exception:
         logger.exception("Failed to inject template into page %s", page_id)
         raise
@@ -956,6 +1428,9 @@ def run_sync_for_page(
 ) -> None:
     """Run extraction on a single page — transcript-first, notes fallback.
 
+    The page's owning DB is derived from the page itself, so this works for
+    any per-member Meeting Notes DB.
+
     GCal attendee lookup is automatic when `config.gcal_enabled` is true
     (i.e., a service-account credential source and default delegated user
     are configured). Works identically in CLI and Lambda.
@@ -964,13 +1439,31 @@ def run_sync_for_page(
         force: If True, skip the "already processed" / "processing" guards.
             Used by CLI to re-process pages.
     """
-    source = SingleSource(client, config.meeting_notes_db_id)
-
-    # Fetch page and validate state
+    # Fetch page first so we can derive the owning DB.
     page = client.get_page(page_id)
     props = page.get("properties", {})
+    page_db_id = (page.get("parent") or {}).get("database_id", "")
+    if not page_db_id:
+        raise RuntimeError(
+            f"Page {page_id} has no parent database — cannot run sync.",
+        )
 
-    short_id = page_id[:8]
+    source = SingleSource(client, page_db_id)
+    # 16-char prefix avoids the short-id collisions that hid Vicente's vs
+    # Reyes' 2026-04-27 Unicaja runs (both UUIDs share the first 8 chars).
+    short_id = page_id[:16]
+
+    # Resolve the owning member's name for log line stamping. Best-effort:
+    # if the registry can't be loaded, we still process the page.
+    db_owner = "?"
+    owner: MeetingDB | None = None
+    try:
+        registry = load_registry(config, client)
+        owner = find_owner_for_page(registry, page_db_id)
+        if owner is not None and owner.owner_name:
+            db_owner = owner.owner_name
+    except Exception:
+        logger.debug("Could not resolve db_owner for page %s", short_id, exc_info=True)
 
     if not force:
         processed = props.get("Processed", {}).get("checkbox", False)
@@ -995,9 +1488,9 @@ def run_sync_for_page(
         metadata = source.get_page_metadata(page)
         title = metadata["title"]
 
-        # Dedup check
-        seen_meetings = _build_seen_fingerprints(source)
-        fingerprint = _meeting_fingerprint(title, metadata["date"])
+        # Dedup check (per-DB; same title+date in another member's DB is allowed).
+        seen_meetings = _build_seen_fingerprints(source, page_db_id)
+        fingerprint = _meeting_fingerprint(page_db_id, title, metadata["date"])
         if fingerprint in seen_meetings:
             logger.info("page=%s '%s' skipped (duplicate meeting)", short_id, title[:60])
             if not config.dry_run:
@@ -1008,12 +1501,51 @@ def run_sync_for_page(
             # Decision point: does this page have a transcript?
             blocks = client.get_block_children(page_id)
             mn_block = find_meeting_notes_block(blocks)
+            transcript_block_id = (
+                extract_transcript_block_id(mn_block) if mn_block else None
+            )
 
             # Declared here so the fundraising branch below can see it
             # regardless of which extraction path ran.
             attendees: list[dict[str, str]] = []
 
-            if mn_block is not None:
+            if not _should_auto_extract(config, owner):
+                # --- Literal-notes path (LLM extraction, verbatim) ---
+                path = "literal_notes"
+                logger.info(
+                    "page=%s '%s' starting (path=literal_notes, auto_extract_tasks=False)",
+                    short_id, title[:60],
+                )
+                attendees = _resolve_attendees(
+                    client, config, mn_block, page, metadata,
+                    org_chart_rows=ctx.get("org_chart_rows"),
+                )
+                tasks = _process_via_literal_notes(
+                    config=config, client=client, ctx=ctx,
+                    page_id=page_id, blocks=blocks, metadata=metadata,
+                    attendees=attendees,
+                )
+                if not tasks:
+                    logger.warning(
+                        "page=%s '%s' skipped: no action items found in notes "
+                        "(auto_extract_tasks=False)",
+                        short_id, title[:60],
+                    )
+                    if not config.dry_run and not force:
+                        source.mark_page_processed(page_id)
+                    return
+
+                # Assignee fallback: default to meeting creator
+                creator = metadata.get("created_by", {})
+                creator_id = creator.get("id")
+                for task in tasks:
+                    if not task.get("assignee_id") and creator_id:
+                        task["assignee_id"] = [creator_id]
+                        logger.debug(
+                            "Assignee fallback → meeting creator for: %s",
+                            task.get("title", "?")[:60],
+                        )
+            elif transcript_block_id:
                 # --- Transcript path ---
                 path = "transcript"
                 logger.info("page=%s '%s' starting (path=transcript)", short_id, title[:60])
@@ -1039,8 +1571,47 @@ def run_sync_for_page(
                             "Assignee fallback → meeting creator for: %s",
                             task.get("title", "?")[:60],
                         )
+            elif mn_block is not None:
+                # meeting_notes block exists but transcription is paused/disabled.
+                # Run the notes-extraction path against the notes the user wrote
+                # inside the AI Meeting block.
+                path = "meeting_notes_only"
+                logger.info(
+                    "page=%s '%s' starting (path=meeting_notes_only)",
+                    short_id, title[:60],
+                )
+
+                attendees = _resolve_attendees(
+                    client, config, mn_block, page, metadata,
+                    org_chart_rows=ctx.get("org_chart_rows"),
+                )
+                notes_content = fetch_notes_text(mn_block, client)
+                if not notes_content.strip():
+                    logger.info(
+                        "page=%s '%s' skipped (no transcript and no notes)",
+                        short_id, title[:60],
+                    )
+                    if not config.dry_run:
+                        source.mark_page_processed(page_id)
+                    return
+
+                metadata["attendees"] = attendees
+                tasks = _process_via_notes(
+                    config, ctx, page_id, metadata, notes_content,
+                )
+
+                # Assignee fallback: default to meeting creator
+                creator = metadata.get("created_by", {})
+                creator_id = creator.get("id")
+                for task in tasks:
+                    if not task.get("assignee_id") and creator_id:
+                        task["assignee_id"] = creator_id
+                        logger.debug(
+                            "Assignee fallback → meeting creator for: %s",
+                            task.get("title", "?")[:60],
+                        )
             else:
-                # --- Notes fallback ---
+                # --- Notes fallback (no meeting_notes block at all) ---
                 path = "notes"
                 logger.info("page=%s '%s' starting (path=notes)", short_id, title[:60])
 
@@ -1079,47 +1650,82 @@ def run_sync_for_page(
             # Fundraising add-on: mirror the next step to Affinity's LP Funnel
             # when this is a fundraising meeting. Soft-fails; errors do not
             # block the primary tracker write that just succeeded.
-            if (
+            #
+            # Fires on every Fundraising meeting regardless of whether the
+            # extractor produced tasks: a Fundraising meeting happening is
+            # itself worth logging against the LP, and the summarizer copes
+            # with empty task lists (returns nulls + a generic details_text).
+            #
+            # If two Kibo members independently capture the same meeting in
+            # their respective DBs, both pages fire and Affinity gets two
+            # notes — that's intentional: each member's notes capture distinct
+            # insights and are independently valuable on the LP timeline.
+
+            # Fundraising → Affinity branch.
+            #
+            # No Notion property tracks status — the only persistence is
+            # CloudWatch logs. Every fundraising-branch run emits a single
+            # structured "fundraising outcome:" line so silent skips become
+            # grep-able. AffinityClient handles transient retries within the
+            # same Lambda invocation; longer outages are logged loudly and
+            # require a manual page re-trigger (clear `Processed`).
+            mt = metadata.get("meeting_type") or None
+            run_fundraising = (
                 config.fundraising_branch_enabled
-                and metadata.get("meeting_type") == "Fundraising"
-                and tasks
+                and mt == "Fundraising"
                 and not config.dry_run
-            ):
-                logger.info("page=%s fundraising branch: starting LP match", short_id)
-                try:
-                    from src.fundraising import write_to_affinity
+            )
+            logger.info(
+                "page=%s db_owner=%s fundraising decision: meeting_type=%r → %s",
+                short_id, db_owner, mt, "RUN" if run_fundraising else "SKIP",
+            )
 
-                    # Merge manually-supplied LP emails (from the Meeting
-                    # Notes "LP Emails" property) into the attendee list so
-                    # the LP matcher has external emails to work with even
-                    # when GCal isn't available.
-                    affinity_attendees = list(attendees)
-                    existing_ids = {a.get("id") for a in affinity_attendees}
-                    for email in metadata.get("lp_emails", []):
-                        if email and email not in existing_ids:
-                            affinity_attendees.append({"id": email, "name": email})
-                            existing_ids.add(email)
+            if run_fundraising:
+                from src.fundraising import write_to_affinity
+                from src.fundraising.outcome import FundraisingStatus
 
-                    write_to_affinity(
-                        config=config,
-                        tasks=tasks,
-                        metadata=metadata,
-                        attendees=affinity_attendees,
-                        notion_url=metadata.get("url", ""),
-                    )
-                except Exception:
-                    logger.exception(
-                        "Affinity fundraising write failed for page %s — continuing",
-                        page_id,
-                    )
+                # Merge manually-supplied LP emails (from the Meeting
+                # Notes "LP Emails" property) into the attendee list.
+                affinity_attendees = list(attendees)
+                existing_ids = {a.get("id") for a in affinity_attendees}
+                for email in metadata.get("lp_emails", []):
+                    if email and email not in existing_ids:
+                        affinity_attendees.append({"id": email, "name": email})
+                        existing_ids.add(email)
+
+                logger.info(
+                    "page=%s db_owner=%s fundraising branch: starting LP match",
+                    short_id, db_owner,
+                )
+                outcome = write_to_affinity(
+                    config=config,
+                    tasks=tasks,
+                    metadata=metadata,
+                    attendees=affinity_attendees,
+                    notion_url=metadata.get("url", ""),
+                    page_id=page_id,
+                    notion_client=client,
+                )
+                # Single structured line per run — log level reflects severity
+                # so CloudWatch filters can split actionable failures from
+                # expected skips (e.g. cold LPs).
+                log_fn = (
+                    logger.error
+                    if outcome.status == FundraisingStatus.FAILED_API_ERROR
+                    else logger.info
+                )
+                log_fn(
+                    "fundraising outcome: page=%s db_owner=%s status=%s detail=%s",
+                    short_id, db_owner, outcome.status.value, outcome.detail,
+                )
 
             if not config.dry_run and not force:
                 source.mark_page_processed(page_id)
 
             elapsed = time.monotonic() - start
             logger.info(
-                "page=%s done in %.1fs (path=%s, tasks=%d)",
-                short_id, elapsed, path, len(tasks),
+                "page=%s db_owner=%s done in %.1fs (path=%s, tasks=%d)",
+                short_id, db_owner, elapsed, path, len(tasks),
             )
     except Exception:
         # Release the lock so the page retries next cycle

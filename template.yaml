@@ -12,8 +12,8 @@ Globals:
       Variables:
         NOTION_API_TOKEN: !Ref NotionApiToken
         OPENAI_API_KEY: !Ref OpenAIApiKey
-        MEETING_NOTES_DB_ID: !Ref MeetingNotesDbId
         TEAM_TRACKER_DB_ID: !Ref TeamTrackerDbId
+        TASK_ARCHIVE_DB_ID: !Ref TaskArchiveDbId
         SYSTEM_PROMPT_PAGE_ID: !Ref SystemPromptPageId
         USER_PROMPT_PAGE_ID: !Ref UserPromptPageId
         MEETING_TEMPLATE_PAGE_ID: !Ref MeetingTemplatePageId
@@ -47,10 +47,12 @@ Parameters:
   OpenAIApiKey:
     Type: String
     NoEcho: true
-  MeetingNotesDbId:
-    Type: String
   TeamTrackerDbId:
     Type: String
+  TaskArchiveDbId:
+    Type: String
+    Default: ''
+    Description: Notion DB ID for the Team Task Tracker — Archive (destination for the weekly Done-task sweep). Leave empty to disable the weekly archive job.
   SystemPromptPageId:
     Type: String
   UserPromptPageId:
@@ -118,7 +120,10 @@ Parameters:
   OrgChartDbId:
     Type: String
     Default: ''
-    Description: Notion Org Chart DB ID (used by transcript classification + GCal name resolution).
+    Description: |
+      Notion Org Chart DB ID. Required in production — drives discovery of
+      per-member Meeting Notes DBs via the "Meeting Notes DB" URL column on
+      each active row, plus transcript classification and GCal name resolution.
   ClassifierPromptPageId:
     Type: String
     Default: ''
@@ -184,6 +189,13 @@ Resources:
             Schedule: rate(1 minute)
             Description: Check for idle meeting pages and run AI extraction
             Enabled: true
+        WeeklyArchive:
+          Type: Schedule
+          Properties:
+            Schedule: cron(0 6 ? * SUN *)
+            Description: Sweep Done tasks (idle >3d) into the Team Task Tracker — Archive DB. Sunday 06:00 UTC.
+            Enabled: true
+            Input: '{"source": "aws.events", "job": "weekly_archive"}'
 
   HttpApi:
     Type: AWS::Serverless::HttpApi

@@ -1,8 +1,22 @@
 """Tests for single-page pipeline entry points."""
 from unittest.mock import MagicMock, patch
 
+import httpx
+from notion_client import APIResponseError
+
 from src.config import SyncConfig
 from src.pipeline import run_inject_templates_for_page, run_sync_for_page
+
+
+def _make_404_error(message: str = "Could not find block") -> APIResponseError:
+    """Build a 404 APIResponseError matching the shape Notion's SDK raises."""
+    return APIResponseError(
+        code="object_not_found",
+        status=404,
+        message=message,
+        headers=httpx.Headers(),
+        raw_body_text="",
+    )
 
 
 def _make_config(**overrides) -> SyncConfig:
@@ -73,6 +87,77 @@ class TestRunInjectTemplatesForPage:
         assert result is True
         mock_source_cls.return_value.mark_template_injected.assert_not_called()
 
+    @patch("src.pipeline.SingleSource")
+    @patch("src.pipeline.inject_notes_section")
+    @patch("src.pipeline.fetch_template")
+    def test_skips_when_page_archived(self, mock_fetch, mock_inject, mock_source_cls):
+        """Archived pages return 404 from blocks.children.list — skip cleanly."""
+        config = _make_config()
+        client = MagicMock()
+        client.get_page.return_value = {
+            "id": "page-1",
+            "archived": True,
+            "parent": {"type": "database_id", "database_id": "db-meetings"},
+        }
+        mock_fetch.return_value = ([{"type": "heading_2"}], ("heading_2", "notes"))
+
+        result = run_inject_templates_for_page(config, client, "page-1")
+
+        assert result is False
+        mock_inject.assert_not_called()
+
+    @patch("src.pipeline.SingleSource")
+    @patch("src.pipeline.inject_notes_section")
+    @patch("src.pipeline.fetch_template")
+    def test_skips_when_page_in_trash(self, mock_fetch, mock_inject, mock_source_cls):
+        config = _make_config()
+        client = MagicMock()
+        client.get_page.return_value = {
+            "id": "page-1",
+            "in_trash": True,
+            "parent": {"type": "database_id", "database_id": "db-meetings"},
+        }
+        mock_fetch.return_value = ([{"type": "heading_2"}], ("heading_2", "notes"))
+
+        result = run_inject_templates_for_page(config, client, "page-1")
+
+        assert result is False
+        mock_inject.assert_not_called()
+
+    @patch("src.pipeline.SingleSource")
+    @patch("src.pipeline.inject_notes_section")
+    @patch("src.pipeline.fetch_template")
+    def test_skips_when_get_page_404(self, mock_fetch, mock_inject, mock_source_cls):
+        """Page deleted before webhook arrived — pages.retrieve returns 404."""
+        config = _make_config()
+        client = MagicMock()
+        client.get_page.side_effect = _make_404_error()
+        mock_fetch.return_value = ([{"type": "heading_2"}], ("heading_2", "notes"))
+
+        result = run_inject_templates_for_page(config, client, "page-1")
+
+        assert result is False
+        mock_inject.assert_not_called()
+
+    @patch("src.pipeline.SingleSource")
+    @patch("src.pipeline.inject_notes_section")
+    @patch("src.pipeline.fetch_template")
+    def test_skips_when_inject_404_race(self, mock_fetch, mock_inject, mock_source_cls):
+        """Page deleted between get_page and inject — 404 on blocks.children.list."""
+        config = _make_config()
+        client = MagicMock()
+        client.get_page.return_value = {
+            "id": "page-1",
+            "parent": {"type": "database_id", "database_id": "db-meetings"},
+        }
+        mock_fetch.return_value = ([{"type": "heading_2"}], ("heading_2", "notes"))
+        mock_inject.side_effect = _make_404_error()
+
+        result = run_inject_templates_for_page(config, client, "page-1")
+
+        assert result is False
+        mock_source_cls.return_value.mark_template_injected.assert_not_called()
+
 
 class TestRunSyncForPage:
     @patch("src.pipeline._load_sync_context")
@@ -85,6 +170,7 @@ class TestRunSyncForPage:
         client = MagicMock()
         client.get_page.return_value = {
             "id": "page-1",
+            "parent": {"type": "database_id", "database_id": "db-meetings"},
             "properties": {
                 "Processed": {"type": "checkbox", "checkbox": False},
                 "Date": {"type": "date", "date": {"start": "2026-01-01"}},
@@ -135,6 +221,7 @@ class TestRunSyncForPage:
         client = MagicMock()
         client.get_page.return_value = {
             "id": "page-1",
+            "parent": {"type": "database_id", "database_id": "db-meetings"},
             "properties": {
                 "Processed": {"type": "checkbox", "checkbox": True},
                 "Date": {"type": "date", "date": {"start": "2026-01-01"}},
@@ -156,6 +243,7 @@ class TestRunSyncForPage:
         client = MagicMock()
         client.get_page.return_value = {
             "id": "page-1",
+            "parent": {"type": "database_id", "database_id": "db-meetings"},
             "properties": {
                 "Processed": {"type": "checkbox", "checkbox": False},
                 "Date": {"type": "date", "date": {"start": "2026-01-01"}},
@@ -195,6 +283,7 @@ class TestRunSyncForPage:
         client = MagicMock()
         client.get_page.return_value = {
             "id": "page-1",
+            "parent": {"type": "database_id", "database_id": "db-meetings"},
             "properties": {
                 "Processed": {"type": "checkbox", "checkbox": False},
                 "Date": {"type": "date", "date": {"start": "2026-01-01"}},
@@ -204,7 +293,8 @@ class TestRunSyncForPage:
             },
         }
 
-        mock_fingerprints.return_value = {"standup|2026-01-01"}  # already seen
+        # Fingerprint is now (db_id|title|date) — db prefix is the page's parent DB.
+        mock_fingerprints.return_value = {"dbmeetings|standup|2026-01-01"}
         mock_source = mock_source_cls.return_value
         mock_source.get_page_metadata.return_value = {
             "title": "Standup", "date": "2026-01-01",

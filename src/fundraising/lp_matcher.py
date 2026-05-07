@@ -1,19 +1,19 @@
-"""Resolve a single LP Funnel list_entry_id from meeting attendees.
+"""Resolve LP Funnel list_entry_ids from meeting attendees.
 
 The LP Funnel (list 168609) is an *opportunity* list — each list entry's
 ``entity.id`` IS an opportunity id. We match attendees by pulling
 ``opportunity_ids`` off the Affinity person record and intersecting with the
 funnel's opportunity index.
 
-Strategy (stop at first confident match):
+Strategy:
     1. Extract external attendee emails (drop kiboventures.com).
     2. For each email: search Affinity persons (with ``with_opportunities``);
        intersect their ``opportunity_ids`` with the LP Funnel index.
     3. Domain fallback — search persons by ``@domain`` and intersect the same
        way (catches LPs whose primary contact wasn't invited).
-    4. Return the matching ``list_entry_id`` ONLY if exactly one distinct LP
-       matches. On 0 or >1, log and return None (caller skips the Affinity
-       write).
+    4. Return *every* matching ``list_entry_id``. Two LPs in the same
+       meeting → both get the note. The caller decides what to do with the
+       empty-list case (no external attendees vs no LP match).
 """
 from __future__ import annotations
 
@@ -27,12 +27,17 @@ logger = logging.getLogger(__name__)
 INTERNAL_DOMAINS = frozenset({"kiboventures.com"})
 
 
-def _extract_emails(attendees: list[dict[str, Any]]) -> list[str]:
-    """Pull email addresses from pipeline attendee dicts.
+def extract_external_emails(attendees: list[dict[str, Any]]) -> list[str]:
+    """Return external attendee emails (lowercased, kiboventures stripped).
 
-    Handles both GCal-resolved attendees (``id`` is an email) and raw
-    ``email`` fields if a future attendee source supplies them.
+    Public so the orchestrator can distinguish ``no external attendees`` from
+    ``no LP match`` when shaping the outcome.
     """
+    return _drop_internal(_extract_emails(attendees))
+
+
+def _extract_emails(attendees: list[dict[str, Any]]) -> list[str]:
+    """Pull email addresses from pipeline attendee dicts."""
     emails: list[str] = []
     for att in attendees or []:
         candidate = att.get("email") or att.get("id") or ""
@@ -62,12 +67,7 @@ def _unique_domains(emails: list[str]) -> list[str]:
 def build_lp_entity_index(
     client: AffinityClient, list_id: int,
 ) -> dict[int, int]:
-    """Return ``{opportunity_id: list_entry_id}`` for the LP Funnel.
-
-    Each list entry on an opportunity list has ``entity.id`` set to the
-    opportunity id. That's the key we match attendee ``opportunity_ids``
-    against.
-    """
+    """Return ``{opportunity_id: list_entry_id}`` for the LP Funnel."""
     entries = client.list_list_entries(list_id)
     index: dict[int, int] = {}
     for entry in entries:
@@ -101,17 +101,21 @@ def _match_via_persons(
     return entries, logs
 
 
-def resolve_lp_list_entry(
+def resolve_lp_list_entries(
     client: AffinityClient,
     *,
     attendees: list[dict[str, Any]],
     lp_entity_index: dict[int, int],
-) -> int | None:
-    """Return the list_entry_id for exactly one matching LP, else None."""
-    emails = _drop_internal(_extract_emails(attendees))
+) -> list[int]:
+    """Return every matching list_entry_id (sorted, deduped).
+
+    Empty list = no LP match. Multi-LP meetings (e.g. an inter-LP intro) get
+    the same note posted to each match.
+    """
+    emails = extract_external_emails(attendees)
     if not emails:
         logger.info("LP match skipped: no external attendee emails")
-        return None
+        return []
 
     candidate_entries: set[int] = set()
     candidate_logs: list[str] = []
@@ -155,17 +159,21 @@ def resolve_lp_list_entry(
         logger.info(
             "LP match: no candidates for emails=%s (not on the LP Funnel)", emails,
         )
-        return None
-    if len(candidate_entries) > 1:
-        logger.warning(
-            "LP match: %d candidate entries for emails=%s — skipping write. Matches: %s",
-            len(candidate_entries), emails, candidate_logs,
+        return []
+
+    matches = sorted(candidate_entries)
+    if len(matches) == 1:
+        logger.info("LP match: single LP found (list_entry_id=%d) via %s", matches[0], candidate_logs)
+    else:
+        logger.info(
+            "LP match: %d LPs found (list_entry_ids=%s) — note will be posted to each. via %s",
+            len(matches), matches, candidate_logs,
         )
-        return None
-
-    match = next(iter(candidate_entries))
-    logger.info("LP match: single LP found (list_entry_id=%d) via %s", match, candidate_logs)
-    return match
+    return matches
 
 
-__all__ = ["resolve_lp_list_entry", "build_lp_entity_index"]
+__all__ = [
+    "build_lp_entity_index",
+    "extract_external_emails",
+    "resolve_lp_list_entries",
+]

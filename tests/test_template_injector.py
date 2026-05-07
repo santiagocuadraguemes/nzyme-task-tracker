@@ -1,12 +1,33 @@
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from src.template_injector import (
     _block_to_create_format,
     _extract_heading_marker,
+    _find_notes_block_id,
     fetch_template,
     inject_notes_section,
     page_has_template,
 )
+
+
+def _meeting_notes_block(notes_block_id: str = "notes-1") -> dict:
+    return {
+        "id": "mn-1",
+        "type": "meeting_notes",
+        "has_children": True,
+        "meeting_notes": {
+            "children": {
+                "transcript_block_id": "tx-1",
+                "notes_block_id": notes_block_id,
+            },
+            "calendar_event": {"attendees": []},
+        },
+    }
+
+
+def _children_map(client: MagicMock, mapping: dict) -> None:
+    """Wire ``client.get_block_children`` to dispatch by block id."""
+    client.get_block_children.side_effect = lambda block_id: list(mapping.get(block_id, []))
 
 
 def _heading_block(level: int, text: str, block_id: str = "b1") -> dict:
@@ -79,6 +100,28 @@ class TestBlockToCreateFormat:
         block = {"id": "ai1", "type": "ai_block", "has_children": True, "ai_block": {}}
 
         assert _block_to_create_format(block, client) is None
+
+    def test_drops_null_valued_fields(self):
+        """Notion read returns ``icon: null`` on paragraphs; create API rejects null."""
+        client = MagicMock()
+        block = {
+            "id": "p1",
+            "type": "paragraph",
+            "has_children": False,
+            "paragraph": {
+                "rich_text": [{"plain_text": "hi", "type": "text"}],
+                "color": "default",
+                "icon": None,
+                "caption": None,
+            },
+        }
+
+        result = _block_to_create_format(block, client)
+
+        assert result is not None
+        assert "icon" not in result["paragraph"]
+        assert "caption" not in result["paragraph"]
+        assert result["paragraph"]["color"] == "default"
 
     def test_recursively_converts_children(self):
         client = MagicMock()
@@ -157,27 +200,93 @@ class TestFetchTemplate:
         client.get_block_children.assert_called_once_with("template-page-id")
 
 
-class TestInjectNotesSection:
-    def test_injects_when_template_missing(self):
+class TestFindNotesBlockId:
+    def test_returns_notes_block_id(self):
         client = MagicMock()
-        client.get_block_children.return_value = []  # empty page
+        _children_map(client, {"page-1": [_meeting_notes_block("notes-xyz")]})
+
+        assert _find_notes_block_id(client, "page-1") == "notes-xyz"
+
+    def test_returns_none_when_no_meeting_notes_block(self):
+        client = MagicMock()
+        _children_map(client, {"page-1": [_todo_block("standalone")]})
+
+        with patch("src.template_injector.time.sleep"):
+            assert _find_notes_block_id(client, "page-1") is None
+
+    def test_retries_then_succeeds(self):
+        client = MagicMock()
+        # First two calls: no meeting_notes block; third call: present.
+        client.get_block_children.side_effect = [
+            [],
+            [],
+            [_meeting_notes_block("notes-late")],
+        ]
+
+        with patch("src.template_injector.time.sleep") as mock_sleep:
+            result = _find_notes_block_id(client, "page-1")
+
+        assert result == "notes-late"
+        assert client.get_block_children.call_count == 3
+        assert mock_sleep.call_count == 2
+
+    def test_returns_none_when_notes_block_id_missing(self):
+        client = MagicMock()
+        broken = {
+            "id": "mn-1",
+            "type": "meeting_notes",
+            "has_children": True,
+            "meeting_notes": {"children": {}},
+        }
+        _children_map(client, {"page-1": [broken]})
+
+        assert _find_notes_block_id(client, "page-1") is None
+
+
+class TestInjectNotesSection:
+    def test_injects_inside_meeting_notes_block(self):
+        client = MagicMock()
+        _children_map(client, {
+            "page-1": [_meeting_notes_block("notes-1")],
+            "notes-1": [],  # empty notes section
+        })
 
         template_blocks = [{"object": "block", "type": "heading_2", "heading_2": {}}]
         marker = ("heading_2", "action items")
 
-        result = inject_notes_section(client, "page-123", template_blocks, marker)
+        result = inject_notes_section(client, "page-1", template_blocks, marker)
 
         assert result is True
         client.append_block_children.assert_called_once()
+        kwargs = client.append_block_children.call_args.kwargs
+        assert kwargs["block_id"] == "notes-1"
+        assert kwargs["children"] == template_blocks
+        assert kwargs["position"] == {"type": "start"}
 
-    def test_skips_when_template_exists(self):
+    def test_skips_when_template_already_in_notes_block(self):
         client = MagicMock()
-        client.get_block_children.return_value = [_heading_block(2, "Action Items")]
+        _children_map(client, {
+            "page-1": [_meeting_notes_block("notes-1")],
+            "notes-1": [_heading_block(2, "Action Items")],
+        })
 
         template_blocks = [{"object": "block", "type": "heading_2", "heading_2": {}}]
         marker = ("heading_2", "action items")
 
-        result = inject_notes_section(client, "page-123", template_blocks, marker)
+        result = inject_notes_section(client, "page-1", template_blocks, marker)
+
+        assert result is False
+        client.append_block_children.assert_not_called()
+
+    def test_skips_when_meeting_notes_block_missing(self):
+        client = MagicMock()
+        _children_map(client, {"page-1": [_todo_block("orphan")]})
+
+        template_blocks = [{"object": "block", "type": "heading_2", "heading_2": {}}]
+        marker = ("heading_2", "action items")
+
+        with patch("src.template_injector.time.sleep"):
+            result = inject_notes_section(client, "page-1", template_blocks, marker)
 
         assert result is False
         client.append_block_children.assert_not_called()

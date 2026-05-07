@@ -35,7 +35,6 @@ add_param() {
 # Required parameters (no defaults in template.yaml — must always be set)
 add_param "NotionApiToken"    "${NOTION_API_TOKEN}"
 add_param "OpenAIApiKey"      "${OPENAI_API_KEY}"
-add_param "MeetingNotesDbId"  "${MEETING_NOTES_DB_ID}"
 add_param "TeamTrackerDbId"   "${TEAM_TRACKER_DB_ID}"
 add_param "SystemPromptPageId" "${SYSTEM_PROMPT_PAGE_ID}"
 add_param "UserPromptPageId"  "${USER_PROMPT_PAGE_ID}"

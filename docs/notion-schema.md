@@ -8,6 +8,7 @@
 | Team Task Tracker DB | `32f83e67e2e7803f9662f43125603afa` | Destination for extracted tasks |
 | Playbook page | `33083e67-e2e7-8108-bb08-eaeba8b65678` | "Nzyme Playbook - Task Extraction Rules" under Nzyme Home |
 | Meeting template page | `32f83e67-e2e7-8086-9863-e276b70cc5a2` | Default "New page" template in Meeting Notes DB — edit in Notion to change injected content |
+| Literal-notes extraction prompt | `35183e67-e2e7-813d-ad55-f011624d2e29` | "📝 Literal Notes Extraction Prompt" under Nzyme Prompts. Used when an Org Chart row has `Auto-extract Tasks = false`. |
 
 Workspace: `kiboventures.notion.so`
 
@@ -26,6 +27,18 @@ Workspace: `kiboventures.notion.so`
 | Task - Relation | relation | Relation to Team Task Tracker (auto-populated when tasks set "Meeting - Relation") |
 | Created | created_time | Auto-set by Notion |
 | Created by | created_by | Auto-set by Notion |
+
+**Fundraising → Affinity outcome**: not stored on the meeting page. Each
+fundraising-branch run emits a single grep-friendly CloudWatch log line:
+
+```
+fundraising outcome: page=<16-char-prefix> db_owner=<member> status=<enum> detail=<text>
+```
+
+Status values: `Posted`, `Skipped: no external attendees`, `Skipped: no LP match`,
+`Failed: API error`. Failures log at ERROR; everything else at INFO. To audit
+the queue: CloudWatch Logs Insights query
+`filter @message like /fundraising outcome:/`.
 
 **Query patterns** (from `single_source.py`):
 
@@ -56,7 +69,7 @@ sort: created_time descending
 | Assignee (edit access) | people | Single Notion user |
 | Governance: View Access | people | View-only access (not used by pipeline) |
 | Due Date | date | ISO date (YYYY-MM-DD) |
-| Priority | select | High, Medium, Low |
+| Priority | select | High, Medium, Low, **[DETAILS INSIDE]** — architecture/hierarchy rows carry `[DETAILS INSIDE]`; extracted tasks use `High`/`Medium`/`Low` or no value |
 | Category | select | Read dynamically from DB schema at runtime (see below) |
 | Parent item | relation | Self-relation to Team Task Tracker (hierarchy parent) |
 | Sub-item | relation | Self-relation (hierarchy children, inverse of Parent item) |
@@ -86,7 +99,36 @@ Category (root level, e.g. "Sourcing / Investing / Divesting")
                     └── Task (leaf node — not loaded by hierarchy)
 ```
 
-`HierarchyLoader` queries all non-Done items, builds the tree, and prunes to 4 levels (categories → sub-categories → entities → deals). At max depth, only organizational nodes (those with children) are kept — leaf tasks are filtered out. The resulting JSON is passed to the AI extractor so it can set `parent_task_id` on new tasks.
+`HierarchyLoader` queries non-Done items where **`Priority = [DETAILS INSIDE]`**, builds the tree, and prunes to 4 levels (categories → sub-categories → entities → deals). At max depth, only organizational nodes (those with children) are kept. The resulting JSON is passed to the classifier so it can set `parent_task_id` on new tasks.
+
+The marker is the single source of truth for "this row is part of the architecture, not a real task." It also cleanly splits the two consumers of tracker state: the **classifier (LLM)** sees architecture rows for parent assignment, and the **deduper** (`TeamTaskTrackerWriter._load_existing_titles` + `SemanticDedup`) sees only task rows (`Priority != [DETAILS INSIDE]`) for skip-or-create. Two scopes, no overlap. To add a new architecture row in Notion, set `Priority = [DETAILS INSIDE]` — no code change needed.
+
+## Org Chart DB
+
+Source of truth for which Meeting Notes DBs the pipeline polls and how each
+member's pages are processed. One row per active team member.
+
+| Property | Type | Values / Notes |
+|----------|------|----------------|
+| Name | title | Member full name |
+| Email | email | Used to match Google Calendar attendees → Org Chart names |
+| Active | checkbox | `true` = polled by registry; `false` removes the member from the run without deleting the row |
+| Meeting Notes DB | url | Member's personal Meeting Notes DB. Required — rows without a URL are skipped |
+| **Auto-extract Tasks** | checkbox | **`true`** = run the full transcript pipeline (correct → extract → classify). **`false`** = literal-notes path: a single light LLM call (gpt-5-mini) on the page's notes content, using the Notion-hosted prompt at `LITERAL_NOTES_EXTRACTION_PROMPT_PAGE_ID` that instructs the model to keep titles verbatim and split assignees into internal/external. The same classifier as the transcript path resolves category/parent/`assignee_id` afterwards. Defaults to `true` when the column is missing or unset. |
+| Role | rich_text | Free-text role used by the transcript pipeline for speaker identification |
+| Department | select | Used by the transcript pipeline |
+| Seniority | select | Used by the transcript pipeline |
+| Typical Topics | multi_select | Used by the transcript pipeline |
+
+**Joiner / leaver workflow:** create the row in Notion, paste the Meeting
+Notes DB URL into `Meeting Notes DB`, set `Active = true`. To remove a
+member without losing history, flip `Active = false`. No code change or
+redeploy needed in either direction.
+
+**Auto-extract Tasks override (CLI):** `python -m src.main --sync
+--auto-extract-tasks` and `--no-auto-extract-tasks` force the path for
+every page in the run, ignoring the per-row Org Chart flag. Useful for
+debugging without touching Notion.
 
 ## Deal Workplans DB (Investment Team)
 

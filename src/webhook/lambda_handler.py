@@ -9,6 +9,7 @@ import logfire
 from notion_client import Client as NotionClient
 
 from src.config import load_config
+from src.meeting_db_registry import load_registry
 from src.notion_client_wrapper import NotionClientWrapper
 from src.pipeline import run_sync_for_page, _archive_done_tasks
 from src.sources.single_source import SingleSource
@@ -45,10 +46,13 @@ def handler(event, context):
 
     Routes based on event source:
     - API Gateway (has "requestContext") → template injection via webhook
-    - CloudWatch Events (has "source": "aws.events") → scheduled extraction
+    - CloudWatch Events with {"job": "weekly_archive"} → weekly Done-task sweep
+    - CloudWatch Events (default) → scheduled extraction
     """
     # CloudWatch Events cron — silent unless there's actual work
     if event.get("source") == "aws.events":
+        if event.get("job") == "weekly_archive":
+            return _handle_weekly_archive(event, context)
         return _handle_extraction(event, context)
 
     # API Gateway (has requestContext or pathParameters)
@@ -101,30 +105,62 @@ def _handle_extraction(event, context):
     INFO when there's no work — only logs once a page is found.
     """
     config, client = _init()
-    source = SingleSource(client, config.meeting_notes_db_id)
 
-    pages = source.get_ready_pages(idle_minutes=config.idle_minutes)
-    if not pages:
-        logger.debug("cron tick: 0 pages ready")
-        return {"statusCode": 200, "body": json.dumps({"processed": 0})}
-
-    logger.info("cron tick: %d page(s) ready for extraction", len(pages))
-    processed = 0
-    for page in pages:
-        page_id = page["id"]
-        try:
-            run_sync_for_page(config, client, page_id)
-            processed += 1
-        except Exception:
-            logger.exception("Failed to process page %s — will retry next cycle", page_id)
-
-    # Archive done tasks (3-day grace period)
     try:
-        _archive_done_tasks(
-            client, config.team_tracker_db_id, grace_days=3, dry_run=config.dry_run,
-        )
+        registry = load_registry(config, client)
     except Exception:
-        logger.exception("Failed to archive done tasks")
+        logger.exception("Failed to load Meeting Notes DB registry — aborting tick")
+        return {"statusCode": 500, "body": json.dumps({"error": "registry load failed"})}
 
-    logger.info("cron tick complete: %d page(s) processed", processed)
+    # Gather ready pages across all per-member DBs.
+    ready: list[tuple[dict, str]] = []  # (page, owner_name)
+    for member_db in registry:
+        try:
+            source = SingleSource(client, member_db.db_id)
+            for page in source.get_ready_pages(idle_minutes=config.idle_minutes):
+                ready.append((page, member_db.owner_name or "?"))
+        except Exception:
+            logger.exception(
+                "Failed to query ready pages for db=%s (%s) — skipping this DB",
+                member_db.db_id, member_db.owner_name or "?",
+            )
+
+    processed = 0
+    if ready:
+        logger.info(
+            "cron tick: %d page(s) ready for extraction across %d DB(s)",
+            len(ready), len(registry),
+        )
+        for page, owner in ready:
+            page_id = page["id"]
+            try:
+                run_sync_for_page(config, client, page_id)
+                processed += 1
+            except Exception:
+                logger.exception(
+                    "Failed to process page %s (db_owner=%s) — will retry next cycle",
+                    page_id, owner,
+                )
+    else:
+        logger.debug("cron tick: 0 pages ready across %d DB(s)", len(registry))
+
+    logger.info("cron tick complete: processed=%d", processed)
     return {"statusCode": 200, "body": json.dumps({"processed": processed})}
+
+
+def _handle_weekly_archive(event, context):
+    """Weekly Sunday sweep: copy Done tasks (idle >5 days) to the archive DB."""
+    config, client = _init()
+    try:
+        archived = _archive_done_tasks(
+            client,
+            config.team_tracker_db_id,
+            config.task_archive_db_id,
+            grace_days=5,
+            dry_run=config.dry_run,
+        )
+        logger.info("weekly archive complete: archived=%d", archived)
+        return {"statusCode": 200, "body": json.dumps({"archived": archived})}
+    except Exception:
+        logger.exception("Weekly archive sweep failed")
+        return {"statusCode": 500, "body": json.dumps({"error": "archive failed"})}

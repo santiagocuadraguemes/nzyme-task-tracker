@@ -19,18 +19,15 @@ def find_meeting_notes_block(blocks: list[dict[str, Any]]) -> dict[str, Any] | N
     return None
 
 
-def extract_transcript_block_id(mn_block: dict[str, Any]) -> str:
+def extract_transcript_block_id(mn_block: dict[str, Any]) -> str | None:
     """Extract the transcript_block_id from a meeting_notes block.
 
-    Raises ValueError if the expected structure is missing.
+    Returns None when transcription is paused/disabled and the key is absent.
+    Callers route those pages through the notes-only fallback in `pipeline.py`.
     """
-    try:
-        return mn_block["meeting_notes"]["children"]["transcript_block_id"]
-    except (KeyError, TypeError) as exc:
-        raise ValueError(
-            f"meeting_notes block missing transcript_block_id. "
-            f"Block structure: {json.dumps(mn_block.get('meeting_notes', {}), indent=2)}"
-        ) from exc
+    children = (mn_block or {}).get("meeting_notes", {}).get("children") or {}
+    block_id = children.get("transcript_block_id")
+    return block_id if isinstance(block_id, str) and block_id else None
 
 
 def fetch_notes_text(
@@ -82,6 +79,19 @@ def build_user_lookup(client: NotionClientWrapper) -> dict[str, str]:
         name = user.get("name") or user.get("person", {}).get("email", uid)
         lookup[uid] = name
     return lookup
+
+
+def extract_ai_summary(page: dict[str, Any]) -> str:
+    """Read the Notion-AI-generated 'AI Summary' page property as plain text.
+
+    Returns "" when the property is missing or empty. The property is a
+    rich_text auto-fill populated by Notion AI from the meeting transcript.
+    """
+    prop = page.get("properties", {}).get("AI Summary", {})
+    if prop.get("type") != "rich_text":
+        return ""
+    parts = prop.get("rich_text", []) or []
+    return "".join(p.get("plain_text", "") for p in parts).strip()
 
 
 def extract_governance_attendees(page: dict[str, Any]) -> list[dict[str, str]]:
@@ -189,6 +199,14 @@ def fetch_transcript(
 
     # 3. Extract and fetch transcript
     transcript_block_id = extract_transcript_block_id(mn_block)
+    if transcript_block_id is None:
+        print(
+            f"ERROR: meeting_notes block on page {page_id} has no transcript_block_id "
+            f"(transcription paused/disabled). Block structure:\n"
+            f"{json.dumps(mn_block.get('meeting_notes', {}), indent=2)}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     transcript_blocks = client.get_block_children(transcript_block_id)
 
     if not transcript_blocks:

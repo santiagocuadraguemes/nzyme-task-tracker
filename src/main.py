@@ -11,7 +11,7 @@ from notion_client import Client as NotionClient
 from src.config import SyncConfig, load_config
 from src.utils.logger import setup_logging, get_logger
 from src.notion_client_wrapper import NotionClientWrapper
-from src.pipeline import run_inject_templates, run_sync
+from src.pipeline import run_inject_templates, run_sync, _archive_done_tasks
 
 logger = get_logger(__name__)
 
@@ -37,6 +37,11 @@ def parse_args() -> argparse.Namespace:
         help="Run the AI extraction pipeline (one-shot)",
     )
     parser.add_argument(
+        "--archive",
+        action="store_true",
+        help="Run the Done-task archive sweep once (mirrors the weekly Sunday Lambda job).",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         default=None,
@@ -46,6 +51,50 @@ def parse_args() -> argparse.Namespace:
         "--verbose",
         action="store_true",
         help="Set log level to DEBUG",
+    )
+    parser.add_argument(
+        "--db-id",
+        metavar="NOTION_DB_ID",
+        help="Process a single Meeting Notes DB (overrides Org Chart discovery). "
+             "Equivalent to setting MEETING_NOTES_DB_ID.",
+    )
+    parser.add_argument(
+        "--correction-model",
+        metavar="MODEL",
+        help="Override the transcript-correction model for this run. "
+             "Provider is auto-detected from the prefix (gemini-* uses GEMINI_API_KEY, "
+             "everything else uses OPENAI_API_KEY).",
+    )
+    parser.add_argument(
+        "--extraction-model",
+        metavar="MODEL",
+        help="Override the task-extraction model for this run.",
+    )
+    parser.add_argument(
+        "--classification-model",
+        metavar="MODEL",
+        help="Override the task-classification model for this run.",
+    )
+
+    auto_group = parser.add_mutually_exclusive_group()
+    auto_group.add_argument(
+        "--auto-extract-tasks",
+        dest="auto_extract_tasks_override",
+        action="store_const",
+        const=True,
+        default=None,
+        help="Force the transcript pipeline (correct → extract → classify) "
+             "for every page in this run, ignoring the per-member "
+             "`Auto-extract Tasks` flag on the Org Chart.",
+    )
+    auto_group.add_argument(
+        "--no-auto-extract-tasks",
+        dest="auto_extract_tasks_override",
+        action="store_const",
+        const=False,
+        help="Force the literal-notes path (verbatim titles, deterministic "
+             "assignees) for every page in this run, ignoring the per-member "
+             "`Auto-extract Tasks` flag on the Org Chart.",
     )
     return parser.parse_args()
 
@@ -90,6 +139,18 @@ def main() -> None:
         config = config.model_copy(update={"dry_run": args.dry_run})
     if args.verbose:
         config = config.model_copy(update={"log_level": "DEBUG"})
+    if args.db_id:
+        config = config.model_copy(update={"meeting_notes_db_id": args.db_id})
+    if args.correction_model:
+        config = config.model_copy(update={"correction_model": args.correction_model})
+    if args.extraction_model:
+        config = config.model_copy(update={"extraction_model": args.extraction_model})
+    if args.classification_model:
+        config = config.model_copy(update={"classification_model": args.classification_model})
+    if args.auto_extract_tasks_override is not None:
+        config = config.model_copy(
+            update={"auto_extract_tasks_override": args.auto_extract_tasks_override},
+        )
 
     setup_logging(config.log_level)
 
@@ -101,6 +162,22 @@ def main() -> None:
 
     if args.watch:
         run_watch(config, client)
+        return
+
+    if args.archive:
+        logger.info("Starting archive sweep (dry_run=%s)", config.dry_run)
+        try:
+            archived = _archive_done_tasks(
+                client,
+                config.team_tracker_db_id,
+                config.task_archive_db_id,
+                grace_days=5,
+                dry_run=config.dry_run,
+            )
+            logger.info("Archive sweep complete: archived=%d", archived)
+        except Exception:
+            logger.exception("Archive sweep failed")
+            sys.exit(1)
         return
 
     # One-shot mode: if neither flag is set, run both (backwards compatible)

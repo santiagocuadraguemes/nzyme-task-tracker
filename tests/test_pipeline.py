@@ -1,12 +1,14 @@
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 from src.config import SyncConfig
 from src.deal_context import DealInfo, DealWorkstream
 from src.pipeline import (
     run_inject_templates, run_sync, _archive_done_tasks,
+    _copy_property_for_write,
     _inject_templates, _flatten_hierarchy, _load_existing_tasks,
     _substitute_placeholders, _format_existing_tasks, _format_team_members,
     _format_deal_context, _detect_deals_from_title, _run_semantic_dedup,
+    _meeting_fingerprint, _resolve_stage_creds, OPENAI_DEFAULT_BASE_URL,
 )
 
 
@@ -86,7 +88,9 @@ class TestRunSync:
 
         run_sync(config, client)
 
-        mock_source.get_unprocessed_pages.assert_called_once_with(2)
+        # _make_config defaults set meeting_notes_db_id, so the buffer is
+        # auto-disabled (treated as a manual single-DB run).
+        mock_source.get_unprocessed_pages.assert_called_once_with(None)
         extract_kwargs = mock_extractor_cls.return_value.extract.call_args.kwargs
         assert "system_prompt" in extract_kwargs
         assert "user_prompt" in extract_kwargs
@@ -170,65 +174,242 @@ class TestRunSync:
         mock_source.mark_page_processed.assert_called_with("p2")
 
 
-class TestArchiveDoneTasks:
-    def test_archives_done_tasks(self):
-        client = MagicMock()
-        client.query_database.return_value = {
-            "results": [
-                {
-                    "id": "task-1",
-                    "properties": {"Task": {"type": "title", "title": [{"plain_text": "Old done task"}]}},
+def _done_task_page(page_id: str, title: str, **extra_props) -> dict:
+    """Build a fake Notion page payload (read shape) for a Done task."""
+    props = {
+        "Task": {"type": "title", "title": [{"plain_text": title}]},
+        "Status": {"type": "status", "status": {"name": "Done"}},
+    }
+    props.update(extra_props)
+    return {"id": page_id, "properties": props}
+
+
+def _archive_listing(*source_ids: str) -> dict:
+    """Build a fake archive-DB query response listing already-archived rows."""
+    return {
+        "results": [
+            {
+                "id": f"archived-{i}",
+                "properties": {
+                    "Source Page ID": {
+                        "type": "rich_text",
+                        "rich_text": [{"plain_text": sid}],
+                    }
                 },
-                {
-                    "id": "task-2",
-                    "properties": {"Task": {"type": "title", "title": [{"plain_text": "Another done"}]}},
-                },
-            ]
+            }
+            for i, sid in enumerate(source_ids)
+        ]
+    }
+
+
+class TestCopyPropertyForWrite:
+    def test_title_read_to_write_shape(self):
+        prop = {"type": "title", "title": [{"plain_text": "Hello"}]}
+        assert _copy_property_for_write(prop) == {
+            "title": [{"text": {"content": "Hello"}}]
         }
 
-        archived = _archive_done_tasks(client, "db-tracker", grace_days=3)
+    def test_rich_text_read_to_write_shape(self):
+        prop = {"type": "rich_text", "rich_text": [{"plain_text": "ABC"}]}
+        assert _copy_property_for_write(prop) == {
+            "rich_text": [{"text": {"content": "ABC"}}]
+        }
+
+    def test_people_drops_metadata(self):
+        prop = {
+            "type": "people",
+            "people": [
+                {"id": "u1", "name": "Santiago", "avatar_url": "x", "email": "y"},
+                {"id": "u2", "name": "Ana"},
+            ],
+        }
+        assert _copy_property_for_write(prop) == {
+            "people": [{"id": "u1"}, {"id": "u2"}]
+        }
+
+    def test_date_strips_null_end_and_tz(self):
+        prop = {
+            "type": "date",
+            "date": {"start": "2026-04-28", "end": None, "time_zone": None},
+        }
+        assert _copy_property_for_write(prop) == {"date": {"start": "2026-04-28"}}
+
+    def test_date_keeps_end_when_set(self):
+        prop = {
+            "type": "date",
+            "date": {"start": "2026-04-28", "end": "2026-04-29", "time_zone": None},
+        }
+        assert _copy_property_for_write(prop) == {
+            "date": {"start": "2026-04-28", "end": "2026-04-29"}
+        }
+
+    def test_date_null_passes_through(self):
+        prop = {"type": "date", "date": None}
+        assert _copy_property_for_write(prop) == {"date": None}
+
+    def test_select_pass_through(self):
+        prop = {"type": "select", "select": {"name": "High", "color": "red"}}
+        assert _copy_property_for_write(prop) == {"select": {"name": "High"}}
+
+    def test_select_null_pass_through(self):
+        prop = {"type": "select", "select": None}
+        assert _copy_property_for_write(prop) == {"select": None}
+
+    def test_status_pass_through(self):
+        prop = {"type": "status", "status": {"name": "Done"}}
+        assert _copy_property_for_write(prop) == {"status": {"name": "Done"}}
+
+    def test_multi_select(self):
+        prop = {"type": "multi_select", "multi_select": [{"name": "A"}, {"name": "B"}]}
+        assert _copy_property_for_write(prop) == {
+            "multi_select": [{"name": "A"}, {"name": "B"}]
+        }
+
+    def test_relation(self):
+        prop = {"type": "relation", "relation": [{"id": "page-1"}, {"id": "page-2"}]}
+        assert _copy_property_for_write(prop) == {
+            "relation": [{"id": "page-1"}, {"id": "page-2"}]
+        }
+
+    def test_scalars(self):
+        assert _copy_property_for_write({"type": "checkbox", "checkbox": True}) == {"checkbox": True}
+        assert _copy_property_for_write({"type": "number", "number": 42}) == {"number": 42}
+        assert _copy_property_for_write({"type": "url", "url": "https://x"}) == {"url": "https://x"}
+        assert _copy_property_for_write({"type": "email", "email": "a@b.c"}) == {"email": "a@b.c"}
+
+    def test_read_only_types_return_none(self):
+        for ptype in ("formula", "rollup", "created_time", "last_edited_time",
+                      "created_by", "last_edited_by", "unique_id"):
+            assert _copy_property_for_write({"type": ptype}) is None, ptype
+
+    def test_unknown_type_returns_none(self):
+        assert _copy_property_for_write({"type": "totally_made_up"}) is None
+
+
+class TestArchiveDoneTasks:
+    def test_copies_to_archive_then_archives_originals(self):
+        client = MagicMock()
+        client.query_database.side_effect = [
+            {"results": [
+                _done_task_page("task-1", "Old done task"),
+                _done_task_page("task-2", "Another done"),
+            ]},
+            _archive_listing(),  # archive DB is empty
+        ]
+
+        archived = _archive_done_tasks(
+            client, "db-tracker", "db-archive", grace_days=3,
+        )
 
         assert archived == 2
+        # Each task: one create_page in archive + one archive_page on source
+        assert client.create_page.call_count == 2
         assert client.archive_page.call_count == 2
         client.archive_page.assert_any_call("task-1")
         client.archive_page.assert_any_call("task-2")
+        # Source Page ID marker is present on the archive copy
+        first_call = client.create_page.call_args_list[0]
+        payload = first_call.kwargs["properties"]
+        assert payload["Source Page ID"]["rich_text"][0]["text"]["content"] == "task-1"
+        assert first_call.kwargs["parent_database_id"] == "db-archive"
 
-    def test_dry_run_does_not_archive(self):
+    def test_idempotent_skips_already_archived(self):
         client = MagicMock()
-        client.query_database.return_value = {
-            "results": [
-                {"id": "task-1", "properties": {"Task": {"type": "title", "title": [{"plain_text": "Done task"}]}}},
-            ]
-        }
+        client.query_database.side_effect = [
+            {"results": [
+                _done_task_page("task-1", "Already archived"),
+                _done_task_page("task-2", "New one"),
+            ]},
+            _archive_listing("task-1"),  # task-1 already in archive
+        ]
 
-        archived = _archive_done_tasks(client, "db-tracker", grace_days=3, dry_run=True)
+        archived = _archive_done_tasks(
+            client, "db-tracker", "db-archive", grace_days=3,
+        )
+
+        assert archived == 1
+        assert client.create_page.call_count == 1
+        # Only task-2 gets archived on the source
+        client.archive_page.assert_called_once_with("task-2")
+
+    def test_skips_parent_and_subitem_relations_on_copy(self):
+        client = MagicMock()
+        page = _done_task_page(
+            "task-1", "Task with hierarchy",
+            **{
+                "Parent item": {"type": "relation", "relation": [{"id": "parent-1"}]},
+                "Sub-item": {"type": "relation", "relation": [{"id": "sub-1"}]},
+                "Meeting - Relation": {"type": "relation", "relation": [{"id": "meeting-1"}]},
+            },
+        )
+        client.query_database.side_effect = [
+            {"results": [page]},
+            _archive_listing(),
+        ]
+
+        _archive_done_tasks(client, "db-tracker", "db-archive", grace_days=3)
+
+        payload = client.create_page.call_args.kwargs["properties"]
+        assert "Parent item" not in payload
+        assert "Sub-item" not in payload
+        # Cross-DB relations DO survive
+        assert payload["Meeting - Relation"] == {"relation": [{"id": "meeting-1"}]}
+
+    def test_dry_run_does_not_write_or_archive(self):
+        client = MagicMock()
+        client.query_database.side_effect = [
+            {"results": [_done_task_page("task-1", "Done task")]},
+            _archive_listing(),
+        ]
+
+        archived = _archive_done_tasks(
+            client, "db-tracker", "db-archive", grace_days=3, dry_run=True,
+        )
 
         assert archived == 0
+        client.create_page.assert_not_called()
         client.archive_page.assert_not_called()
 
     def test_no_done_tasks(self):
         client = MagicMock()
         client.query_database.return_value = {"results": []}
 
-        archived = _archive_done_tasks(client, "db-tracker", grace_days=3)
+        archived = _archive_done_tasks(
+            client, "db-tracker", "db-archive", grace_days=3,
+        )
 
         assert archived == 0
+        client.create_page.assert_not_called()
+        client.archive_page.assert_not_called()
+
+    def test_no_archive_db_configured_is_noop(self):
+        client = MagicMock()
+
+        archived = _archive_done_tasks(client, "db-tracker", None, grace_days=3)
+
+        assert archived == 0
+        client.query_database.assert_not_called()
+        client.create_page.assert_not_called()
         client.archive_page.assert_not_called()
 
     def test_continues_on_individual_failure(self):
         client = MagicMock()
-        client.query_database.return_value = {
-            "results": [
-                {"id": "task-1", "properties": {"Task": {"type": "title", "title": [{"plain_text": "Fail"}]}}},
-                {"id": "task-2", "properties": {"Task": {"type": "title", "title": [{"plain_text": "OK"}]}}},
-            ]
-        }
-        client.archive_page.side_effect = [Exception("API error"), {"id": "task-2"}]
+        client.query_database.side_effect = [
+            {"results": [
+                _done_task_page("task-1", "Fail"),
+                _done_task_page("task-2", "OK"),
+            ]},
+            _archive_listing(),
+        ]
+        client.create_page.side_effect = [Exception("API error"), {"id": "archived-2"}]
 
-        archived = _archive_done_tasks(client, "db-tracker", grace_days=3)
+        archived = _archive_done_tasks(
+            client, "db-tracker", "db-archive", grace_days=3,
+        )
 
         assert archived == 1
-        assert client.archive_page.call_count == 2
+        # Source archive only happens after successful copy
+        client.archive_page.assert_called_once_with("task-2")
 
 
 class TestInjectTemplates:
@@ -638,3 +819,298 @@ class TestCrossMeetingDedupContext:
         system_prompt_2 = second_call_kwargs["system_prompt"]
         assert "Task from Meeting A" in system_prompt_2
         assert "(under: Ops)" in system_prompt_2
+
+
+class TestMeetingFingerprint:
+    """The (db_id, title, date) fingerprint is what makes the multi-DB model safe."""
+
+    def test_same_meeting_in_different_dbs_does_not_collapse(self):
+        """Two team members capturing the same meeting must NOT dedup."""
+        santiago_db = "34583e67-e2e7-8081-b515-f5e33926f153"
+        reyes_db = "b0797647-2620-499f-a4b8-9be7b03c07d0"
+
+        fp_santiago = _meeting_fingerprint(santiago_db, "Reyes <> Santiago", "2026-04-24")
+        fp_reyes = _meeting_fingerprint(reyes_db, "Reyes <> Santiago", "2026-04-24")
+
+        assert fp_santiago != fp_reyes
+
+    def test_notion_dup_suffix_within_same_db_collapses(self):
+        """Within one DB, Notion's ' (1)' suffix on duplicate pages still collapses."""
+        db_id = "34583e67-e2e7-8081-b515-f5e33926f153"
+
+        fp_a = _meeting_fingerprint(db_id, "Standup", "2026-04-24")
+        fp_b = _meeting_fingerprint(db_id, "Standup (1)", "2026-04-24")
+        fp_c = _meeting_fingerprint(db_id, "  STANDUP  ", "2026-04-24")
+
+        assert fp_a == fp_b == fp_c
+
+    def test_db_id_normalized_independent_of_dashes(self):
+        """Same DB ID with/without dashes produces the same fingerprint."""
+        with_dashes = "34583e67-e2e7-8081-b515-f5e33926f153"
+        no_dashes = "34583e67e2e78081b515f5e33926f153"
+
+        assert (
+            _meeting_fingerprint(with_dashes, "Standup", "2026-04-24")
+            == _meeting_fingerprint(no_dashes, "Standup", "2026-04-24")
+        )
+
+
+
+
+class TestResolveStageCreds:
+    """`gemini-` prefix routes through Gemini creds; everything else → OpenAI."""
+
+    def test_gemini_prefix_returns_gemini_creds(self):
+        config = _make_config(
+            gemini_api_key="gem-secret",
+            gemini_base_url="https://gemini.example/v1/",
+        )
+        api_key, base_url = _resolve_stage_creds("gemini-3-flash-preview", config)
+        assert api_key == "gem-secret"
+        assert base_url == "https://gemini.example/v1/"
+
+    def test_non_gemini_prefix_returns_openai_creds(self):
+        config = _make_config(openai_api_key="sk-openai-secret")
+        api_key, base_url = _resolve_stage_creds("gpt-5-mini", config)
+        assert api_key == "sk-openai-secret"
+        assert base_url == OPENAI_DEFAULT_BASE_URL
+
+    def test_gemini_prefix_without_key_raises(self):
+        config = _make_config(gemini_api_key=None)
+        try:
+            _resolve_stage_creds("gemini-3-flash-preview", config)
+        except RuntimeError as exc:
+            assert "GEMINI_API_KEY" in str(exc)
+        else:
+            raise AssertionError("expected RuntimeError when gemini_api_key is missing")
+
+
+def _meeting_notes_block(
+    transcript_block_id: str | None = None,
+    notes_block_id: str | None = "notes-block-1",
+) -> dict:
+    """Build a fake meeting_notes block. Transcription paused → no transcript_block_id."""
+    children: dict = {}
+    if notes_block_id:
+        children["notes_block_id"] = notes_block_id
+    if transcript_block_id:
+        children["transcript_block_id"] = transcript_block_id
+    return {
+        "type": "meeting_notes",
+        "id": "mn-block-1",
+        "meeting_notes": {
+            "title": [{"plain_text": "Meeting", "type": "text"}],
+            "status": "transcribed" if transcript_block_id else "transcription_paused",
+            "children": children,
+            "calendar_event": {"attendees": [], "start_time": "", "end_time": ""},
+        },
+    }
+
+
+class TestMeetingNotesNoTranscriptRouting:
+    """When mn_block exists but transcript_block_id is missing, fall back to
+    the notes-extraction path against the meeting_notes block's notes."""
+
+    @patch("src.pipeline.SemanticDedup")
+    @patch("src.pipeline.OpenAI")
+    @patch("src.pipeline.TeamTaskTrackerWriter")
+    @patch("src.pipeline.AIExtractor")
+    @patch("src.pipeline.HierarchyLoader")
+    @patch("src.pipeline._fetch_page_text")
+    @patch("src.pipeline.SingleSource")
+    @patch("src.pipeline._load_categories")
+    def test_notes_only_fallback_runs_when_transcript_missing(
+        self, mock_load_cats, mock_source_cls, mock_fetch_text,
+        mock_hierarchy_cls, mock_extractor_cls, mock_writer_cls,
+        mock_openai_cls, mock_dedup_cls,
+    ):
+        config = _make_config()
+        client = MagicMock()
+        client.list_users.return_value = []
+
+        mn_block = _meeting_notes_block(transcript_block_id=None)
+        # First call: page-level blocks → contains mn_block.
+        # Second call: notes_block_id children → notes paragraph.
+        client.get_block_children.side_effect = [
+            [mn_block],
+            [{"type": "paragraph", "paragraph": {"rich_text": [
+                {"plain_text": "Reyes - send portfolio mgmt agreement"},
+            ]}}],
+        ]
+
+        mock_load_cats.return_value = ["Operations", "Other"]
+        mock_source = mock_source_cls.return_value
+        mock_source.get_unprocessed_pages.return_value = [_make_page("p1", "Cuatrecasas")]
+        mock_source.get_page_metadata.return_value = {
+            "title": "Cuatrecasas",
+            "date": "2026-04-28",
+            "meeting_type": "Other",
+            "attendees": [],
+            "created_by": {"id": "u1", "name": "Santiago"},
+        }
+        mock_fetch_text.return_value = (
+            "tpl {{CATEGORIES}} {{HIERARCHY}} {{EXISTING_TASKS}} {{TEAM_MEMBERS}} "
+            "{{ATTENDEES}} {{MEETING_CREATOR}} content={{MEETING_CONTENT}}"
+        )
+        mock_hierarchy_cls.return_value.load.return_value = []
+        mock_extractor_cls.return_value.extract.return_value = [
+            {"title": "Send portfolio mgmt agreement", "priority": "High"},
+        ]
+        mock_writer_cls.return_value.write_batch.return_value = [{"id": "new-1"}]
+        mock_writer_cls.return_value._existing_titles = set()
+        mock_dedup_cls.return_value.is_duplicate.return_value = (False, None, 0.0)
+        client.query_database.return_value = {"results": []}
+
+        run_sync(config, client)
+
+        # Notes-extraction path ran (AIExtractor.extract was called).
+        mock_extractor_cls.return_value.extract.assert_called_once()
+        user_prompt = mock_extractor_cls.return_value.extract.call_args.kwargs["user_prompt"]
+        # The notes content from inside the meeting_notes block flows into the prompt.
+        assert "send portfolio mgmt agreement" in user_prompt.lower()
+        mock_writer_cls.return_value.write_batch.assert_called_once()
+        mock_source.mark_page_processed.assert_called_once_with("p1")
+
+    @patch("src.pipeline.SemanticDedup")
+    @patch("src.pipeline.OpenAI")
+    @patch("src.pipeline.TeamTaskTrackerWriter")
+    @patch("src.pipeline.AIExtractor")
+    @patch("src.pipeline.HierarchyLoader")
+    @patch("src.pipeline._fetch_page_text")
+    @patch("src.pipeline.SingleSource")
+    @patch("src.pipeline._load_categories")
+    def test_no_transcript_no_notes_marks_processed_and_skips(
+        self, mock_load_cats, mock_source_cls, mock_fetch_text,
+        mock_hierarchy_cls, mock_extractor_cls, mock_writer_cls,
+        mock_openai_cls, mock_dedup_cls,
+    ):
+        config = _make_config()
+        client = MagicMock()
+        client.list_users.return_value = []
+
+        mn_block = _meeting_notes_block(transcript_block_id=None)
+        # Page blocks → mn_block; notes children → empty list (no notes content).
+        client.get_block_children.side_effect = [[mn_block], []]
+
+        mock_load_cats.return_value = ["Other"]
+        mock_source = mock_source_cls.return_value
+        mock_source.get_unprocessed_pages.return_value = [_make_page("p1", "Empty meeting")]
+        mock_source.get_page_metadata.return_value = {
+            "title": "Empty meeting",
+            "date": "2026-04-28",
+            "meeting_type": "Other",
+            "attendees": [],
+            "created_by": {"id": "u1", "name": "Santiago"},
+        }
+        mock_fetch_text.return_value = "tpl"
+        mock_hierarchy_cls.return_value.load.return_value = []
+        mock_writer_cls.return_value._existing_titles = set()
+        client.query_database.return_value = {"results": []}
+
+        run_sync(config, client)
+
+        # No extraction, no writes — but page is still marked processed so
+        # the cycle doesn't churn on it forever.
+        mock_extractor_cls.return_value.extract.assert_not_called()
+        mock_writer_cls.return_value.write_batch.assert_not_called()
+        mock_source.mark_page_processed.assert_called_once_with("p1")
+
+
+class TestBufferAutoDisable:
+    """`--db-id` (i.e. `meeting_notes_db_id` set) → buffer auto-disabled."""
+
+    @patch("src.pipeline.SemanticDedup")
+    @patch("src.pipeline.OpenAI")
+    @patch("src.pipeline.TeamTaskTrackerWriter")
+    @patch("src.pipeline.AIExtractor")
+    @patch("src.pipeline.HierarchyLoader")
+    @patch("src.pipeline._fetch_page_text")
+    @patch("src.pipeline.SingleSource")
+    @patch("src.pipeline._load_categories")
+    def test_db_id_set_passes_none_buffer(
+        self, mock_load_cats, mock_source_cls, mock_fetch_text,
+        mock_hierarchy_cls, mock_extractor_cls, mock_writer_cls,
+        mock_openai_cls, mock_dedup_cls,
+    ):
+        config = _make_config(meeting_notes_db_id="db-meetings", buffer_hours=2)
+        client = MagicMock()
+        client.list_users.return_value = []
+
+        mock_load_cats.return_value = ["Other"]
+        mock_source_cls.return_value.get_unprocessed_pages.return_value = []
+        mock_fetch_text.return_value = "tpl"
+        mock_hierarchy_cls.return_value.load.return_value = []
+        mock_writer_cls.return_value._existing_titles = set()
+        client.query_database.return_value = {"results": []}
+
+        run_sync(config, client)
+
+        mock_source_cls.return_value.get_unprocessed_pages.assert_called_once_with(None)
+
+    @patch("src.pipeline.load_registry")
+    @patch("src.pipeline.SemanticDedup")
+    @patch("src.pipeline.OpenAI")
+    @patch("src.pipeline.TeamTaskTrackerWriter")
+    @patch("src.pipeline.AIExtractor")
+    @patch("src.pipeline.HierarchyLoader")
+    @patch("src.pipeline._fetch_page_text")
+    @patch("src.pipeline.SingleSource")
+    @patch("src.pipeline._load_categories")
+    def test_no_db_id_keeps_buffer(
+        self, mock_load_cats, mock_source_cls, mock_fetch_text,
+        mock_hierarchy_cls, mock_extractor_cls, mock_writer_cls,
+        mock_openai_cls, mock_dedup_cls, mock_load_registry,
+    ):
+        from src.meeting_db_registry import MeetingDB
+
+        config = _make_config(
+            meeting_notes_db_id=None, org_chart_db_id="db-org", buffer_hours=2,
+        )
+        client = MagicMock()
+        client.list_users.return_value = []
+
+        mock_load_registry.return_value = [
+            MeetingDB(db_id="db-discovered", owner_name="Reyes", owner_email="r@x.com"),
+        ]
+        mock_load_cats.return_value = ["Other"]
+        mock_source_cls.return_value.get_unprocessed_pages.return_value = []
+        mock_fetch_text.return_value = "tpl"
+        mock_hierarchy_cls.return_value.load.return_value = []
+        mock_writer_cls.return_value._existing_titles = set()
+        client.query_database.return_value = {"results": []}
+
+        run_sync(config, client)
+
+        # Production-like multi-DB run keeps the configured buffer.
+        mock_source_cls.return_value.get_unprocessed_pages.assert_called_once_with(2)
+
+
+class TestExtractTranscriptBlockIdOptional:
+    """The helper now returns None instead of raising on missing transcript."""
+
+    def test_returns_id_when_present(self):
+        from src.transcript_pipeline.fetch_transcript import extract_transcript_block_id
+
+        block = {
+            "meeting_notes": {
+                "children": {"transcript_block_id": "t-123", "notes_block_id": "n-1"},
+            },
+        }
+        assert extract_transcript_block_id(block) == "t-123"
+
+    def test_returns_none_when_missing(self):
+        from src.transcript_pipeline.fetch_transcript import extract_transcript_block_id
+
+        block = {
+            "meeting_notes": {
+                "status": "transcription_paused",
+                "children": {"notes_block_id": "n-1"},
+            },
+        }
+        assert extract_transcript_block_id(block) is None
+
+    def test_returns_none_when_children_missing(self):
+        from src.transcript_pipeline.fetch_transcript import extract_transcript_block_id
+
+        assert extract_transcript_block_id({"meeting_notes": {}}) is None
+        assert extract_transcript_block_id({}) is None

@@ -23,8 +23,42 @@ class SyncConfig(BaseModel):
         "https://generativelanguage.googleapis.com/v1beta/openai/",
         description="Gemini OpenAI-compatible base URL for heavy calls",
     )
-    meeting_notes_db_id: str = Field(..., description="Meeting Notes DB ID")
+    # Per-stage model overrides (manual CLI runs / experiments).
+    # When set, take precedence over openai_model / gemini_model for that
+    # stage. Provider is inferred from the model name prefix:
+    # `gemini-*` → Gemini key + base URL, anything else → OpenAI key + base URL.
+    correction_model: str | None = Field(None, description="Override model for transcript correction stage")
+    extraction_model: str | None = Field(None, description="Override model for task extraction stage")
+    classification_model: str | None = Field(None, description="Override model for task classification stage")
+    # CLI override for the per-member `Auto-extract Tasks` Org Chart flag.
+    # When None, the registry value applies (default True). When True/False,
+    # forces every page in this run onto that path regardless of the Org
+    # Chart. Used for debugging — not loaded from .env.
+    auto_extract_tasks_override: bool | None = Field(
+        None,
+        description=(
+            "CLI override for the Org Chart `Auto-extract Tasks` flag. "
+            "When set, applies to every page processed in this run."
+        ),
+    )
+    meeting_notes_db_id: str | None = Field(
+        None,
+        description=(
+            "Single Meeting Notes DB ID — overrides Org Chart discovery when "
+            "set. Useful for tests and dev runs against one DB. In production, "
+            "leave unset and let `meeting_db_registry.discover_meeting_dbs` "
+            "read the per-member URLs from the Org Chart."
+        ),
+    )
     team_tracker_db_id: str = Field(..., description="Team Task Tracker DB ID")
+    task_archive_db_id: str | None = Field(
+        None,
+        description=(
+            "Team Task Tracker — Archive DB ID. Destination for Done tasks "
+            "swept by the weekly Sunday job. When unset, the weekly archive "
+            "job is a no-op."
+        ),
+    )
     system_prompt_page_id: str = Field(..., description="Notion page ID for AI system prompt")
     user_prompt_page_id: str = Field(..., description="Notion page ID for AI user prompt")
     buffer_hours: int = Field(2, description="Hours to wait after meeting date")
@@ -44,6 +78,15 @@ class SyncConfig(BaseModel):
     terminology_db_id: str | None = Field(None, description="Terminology Dictionary DB ID (transcript correction)")
     org_chart_db_id: str | None = Field(None, description="Org Chart DB ID (transcript speaker identification)")
     classifier_prompt_page_id: str | None = Field(None, description="Notion page ID for transcript classifier prompt")
+    literal_notes_extraction_prompt_page_id: str | None = Field(
+        None,
+        description=(
+            "Notion page ID for the literal-notes extraction prompt — used "
+            "when an Org Chart row has `Auto-extract Tasks = false`. The "
+            "prompt instructs the model to return one task per `## Action "
+            "Items` bullet with the title kept verbatim."
+        ),
+    )
     # Webhook / Lambda mode
     webhook_path_token: str | None = Field(None, description="Secret URL token for webhook auth")
     idle_minutes: int = Field(3, description="Minutes of inactivity before AI extraction triggers")
@@ -106,8 +149,12 @@ def load_config() -> SyncConfig:
             "GEMINI_BASE_URL",
             "https://generativelanguage.googleapis.com/v1beta/openai/",
         ),
-        meeting_notes_db_id=os.environ["MEETING_NOTES_DB_ID"],
+        correction_model=os.getenv("CORRECTION_MODEL") or None,
+        extraction_model=os.getenv("EXTRACTION_MODEL") or None,
+        classification_model=os.getenv("CLASSIFICATION_MODEL") or None,
+        meeting_notes_db_id=os.getenv("MEETING_NOTES_DB_ID") or None,
         team_tracker_db_id=os.environ["TEAM_TRACKER_DB_ID"],
+        task_archive_db_id=os.getenv("TASK_ARCHIVE_DB_ID") or None,
         system_prompt_page_id=os.environ["SYSTEM_PROMPT_PAGE_ID"],
         user_prompt_page_id=os.environ["USER_PROMPT_PAGE_ID"],
         logfire_token=os.getenv("LOGFIRE_TOKEN"),
@@ -122,6 +169,9 @@ def load_config() -> SyncConfig:
         terminology_db_id=os.getenv("TERMINOLOGY_DB_ID"),
         org_chart_db_id=os.getenv("ORG_CHART_DB_ID"),
         classifier_prompt_page_id=os.getenv("CLASSIFIER_PROMPT_PAGE_ID"),
+        literal_notes_extraction_prompt_page_id=os.getenv(
+            "LITERAL_NOTES_EXTRACTION_PROMPT_PAGE_ID",
+        ),
         watch_interval=int(os.getenv("WATCH_INTERVAL", "10")),
         sync_interval=int(os.getenv("SYNC_INTERVAL", "300")),
         webhook_path_token=os.getenv("WEBHOOK_PATH_TOKEN"),

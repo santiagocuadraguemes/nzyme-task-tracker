@@ -2,27 +2,59 @@
 
 ## Pipeline Overview
 
-The pipeline is transcript-first: if a meeting page has a `meeting_notes` block (Notion AI recording), it uses the 3-LLM-call transcript path. Otherwise, it falls back to the notes-based extraction.
+The pipeline routes each meeting through one of three extraction paths. The first decision is the per-member `Auto-extract Tasks` flag on the Org Chart (default `true`). For members who opt out (`false`), the **literal-notes path** runs instead of the transcript pipeline: a single light LLM call (gpt-5-mini) on the page's notes content, using the Notion-hosted prompt at `LITERAL_NOTES_EXTRACTION_PROMPT_PAGE_ID` that instructs the model to keep titles verbatim. For members who opt in (default), the pipeline is transcript-first and falls back to a notes-based AI extractor when no transcript exists. It iterates over a **registry of per-member Meeting Notes databases** discovered from the Org Chart (one DB per active team member).
 
 ```
 main.py → pipeline.run_sync():
-  0. template_injector → inject "Your own notes" section (if enabled)
-  then for each unprocessed meeting:
-    1. Load shared context (hierarchy, categories, users, deals, terminology, org chart, classifier prompt)
-    2. Check for meeting_notes block on page
-    IF transcript exists:
-      a. Resolve attendees (GCal → Notion → governance fallback)
-      b. Correct transcript (LLM call 1)
-      c. Extract tasks (LLM call 2)
-      d. Classify tasks (LLM call 3)
-    ELSE (notes fallback):
-      a. Fetch page content as plain text
-      b. AI extract + classify (1 LLM call)
-    3. Semantic dedup → filter duplicates
-    4. Assignee fallback → default to meeting creator
-    5. team_writer → create task pages in Team Task Tracker
-    6. Mark meeting page as Processed
+  0. template_injector → inject `## Action Items` + `## Notes` headings across every DB (if enabled)
+  Discover registry from Org Chart (active rows with a "Meeting Notes DB" URL,
+                                    each carrying owner.auto_extract_tasks)
+  Load shared context once (hierarchy, categories, users, deals, terminology, org chart,
+                            classifier prompt, literal-notes extraction prompt)
+  for each member DB:
+    Build (db_id, title, date) fingerprint set from already-processed meetings in this DB
+    for each unprocessed meeting in this DB:
+      1. Skip if fingerprint matches a processed meeting in THIS DB
+      2. Decide path on owner.auto_extract_tasks (CLI override wins when set):
+         IF auto_extract_tasks is False:
+           a. Resolve attendees (GCal → Notion → governance fallback) — used as LLM context
+           b. literal_notes_extractor.extract → 1 LIGHT LLM call (gpt-5-mini) with the
+              Notion-hosted prompt; returns tasks shaped for the classifier:
+              {title (verbatim), assignee, internal_assignees, external_assignees, supporting_quote}.
+              If the model returns 0 tasks → log WARNING and mark Processed (no further fallback).
+           c. TaskClassifier → category, parent, deal_page_id, assignee_id
+              (resolves internal_assignees against the Team Members list).
+         ELIF transcript_block_id present:
+           a. Resolve attendees (GCal → Notion → governance fallback)
+           b. Correct transcript (LLM call 1)
+           c. Extract tasks (LLM call 2)
+           d. Classify tasks (LLM call 3)
+         ELIF meeting_notes block present (transcription paused/disabled):
+           a. Notes-only AIExtractor on the meeting_notes notes container
+         ELSE:
+           a. Notes-only AIExtractor on the page's plain-text content
+      3. Semantic dedup → filter duplicates (workspace-wide, cross-DB)
+      4. Assignee fallback → default to meeting creator on every path
+      5. team_writer → create task pages in Team Task Tracker
+      6. Mark meeting page as Processed
 ```
+
+CLI override (debugging only): `python -m src.main --sync --auto-extract-tasks` or `--no-auto-extract-tasks` forces every page in the run onto that path regardless of the per-row Org Chart flag. The override sets `SyncConfig.auto_extract_tasks_override` and is consulted by `_should_auto_extract(config, owner)` before the registry value.
+
+## Per-member Meeting Notes DBs
+
+Each team member has their own Meeting Notes database. The same meeting commonly appears in multiple DBs (each attendee's personal notes capture different commitments from their own perspective). The pipeline polls every DB on every cycle.
+
+**Registry source of truth:** the Nzyme Org Chart DB. Every active row carries a `Meeting Notes DB` URL property pointing at that member's database. `src/meeting_db_registry.py` reads these rows once per cycle and returns one `MeetingDB(db_id, owner_name, owner_email)` per active member with a URL set. Joiners and leavers are managed entirely in Notion (no redeploy):
+
+- **Add a member:** create their DB, set `Active=true` on their Org Chart row, paste the DB URL into `Meeting Notes DB`.
+- **Remove a member:** flip `Active=false` (or clear the URL).
+
+`MEETING_NOTES_DB_ID` env var is an **override** — when set, registry discovery is bypassed and only that DB is polled. Useful for tests and single-DB dev runs. In production, leave it unset and let the Org Chart drive.
+
+**Cross-DB fingerprint:** `_meeting_fingerprint(db_id, title, date)` prefixes the dedup key with the DB ID. Two team members' notes about the same meeting (identical title + date in their own DBs) therefore produce different fingerprints and are both processed. Duplicate task titles across DBs are caught later by the workspace-wide semantic dedup layer. Within a single DB, Notion's `(1)` / `(2)` suffix on duplicate pages still collapses correctly.
+
+**Webhook setup stays per-DB:** each member's Notion automation must point at the same API Gateway URL. No workspace-level webhook exists in Notion.
 
 ## Entry Point (`src/main.py`)
 
@@ -47,36 +79,55 @@ Fetches the meeting note template from Notion (`MEETING_TEMPLATE_PAGE_ID`), then
 
 Instantiates all components with a shared `NotionClientWrapper`, then:
 
-1. **Load shared context** (`_load_sync_context()`) — prompts, hierarchy, categories, users, deals, semantic dedup, terminology, org chart, classifier prompt. Abort on prompt load failure (required). Other context degrades gracefully.
-2. **Poll unprocessed meetings** — `Date < (now - buffer_hours)` AND `Processed = false`
-3. **Build dedup fingerprints** — loads already-processed meetings for cross-cycle dedup
-4. **For each meeting page:**
-   - Check fingerprint `(normalized_title|date)` against dedup set; skip duplicates
-   - Check for `meeting_notes` block → transcript path or notes fallback
-   - **Transcript path:** resolve attendees → correct → extract → classify (3 LLM calls)
-   - **Notes fallback:** fetch content → AI extract + classify (1 LLM call)
-   - Semantic dedup → assignee fallback → write tasks → mark Processed
-5. **Archive done tasks** (3-day grace period)
-6. **Log summary** — total tasks processed
+1. **Discover registry** (`load_registry()`) — reads active Org Chart rows with a `Meeting Notes DB` URL set, returns a list of `MeetingDB` entries. Aborts the cycle on failure.
+2. **Load shared context** (`_load_sync_context()`) — prompts, hierarchy, categories, users, deals, semantic dedup, terminology, org chart, classifier prompt. Loaded **once** per cycle (not per DB) since none of it varies by member DB. Abort on prompt load failure (required). Other context degrades gracefully.
+3. **For each member DB in the registry:**
+   a. **Poll unprocessed meetings** — `created_time < (now - buffer_hours)` AND `Processed = false`
+   b. **Build per-DB fingerprints** — loads already-processed meetings in THIS DB
+   c. **For each meeting page:**
+      - Check fingerprint `(db_id, normalized_title, date)` against this DB's dedup set; skip duplicates
+      - Check for `meeting_notes` block → transcript path or notes fallback
+      - **Transcript path:** resolve attendees → correct → extract → classify (3 LLM calls)
+      - **Notes fallback:** fetch content → AI extract + classify (1 LLM call)
+      - Semantic dedup → assignee fallback → write tasks → mark Processed
+4. **Log summary** — total tasks processed across all DBs
+
+(The Done-task archive sweep no longer runs every cycle — it has been moved to a dedicated weekly Sunday cron. See "Done-task archive sweep" below.)
 
 Helper functions:
+- `_should_auto_extract(config, owner)` — combines the CLI override with the per-member registry flag; returns the boolean used to gate the routing decision
+- `_process_via_literal_notes()` — light LLM extraction with the Notion-hosted prompt at `LITERAL_NOTES_EXTRACTION_PROMPT_PAGE_ID`, then the standard classifier. Title preservation is enforced by the prompt, not by code
 - `_process_via_transcript()` — transcript extraction path (correct → extract → classify)
-- `_process_via_notes()` — notes extraction path (AIExtractor, fallback)
+- `_process_via_notes()` — notes extraction path (AIExtractor, AI-driven fallback)
 - `_resolve_attendees()` — GCal → Notion → governance attendee chain
-- `_meeting_fingerprint()` — strips Notion's `(1)`, `(2)` suffixes, lowercases, combines with date
+- `_meeting_fingerprint(db_id, title, date)` — strips Notion's `(1)`, `(2)` suffixes, lowercases, combines with db_id + date
 - `_load_categories()` — reads Category select options from DB schema
-- `_build_seen_fingerprints()` — collects fingerprints from processed meetings
+- `_build_seen_fingerprints(source, db_id)` — collects fingerprints from processed meetings in one DB
 
 ## Component Details
+
+### MeetingDBRegistry (`src/meeting_db_registry.py`)
+
+- **Input:** `SyncConfig` + `NotionClientWrapper`
+- **Output:** `list[MeetingDB(db_id, owner_name, owner_email, auto_extract_tasks)]`
+- `discover_meeting_dbs(client, org_chart_db_id)` queries the Org Chart for `Active=true` rows, parses the `Meeting Notes DB` URL property, reads the `Auto-extract Tasks` checkbox (default `True` when missing), and returns one entry per parseable URL (skipping rows without a URL, with an unparseable URL, or with a URL already claimed by an earlier row)
+- `load_registry(config, client)` returns the override (single-DB list from `MEETING_NOTES_DB_ID`) when set, else discovers from the Org Chart; raises if neither is configured
+- `find_owner_for_page(registry, page_database_id)` returns the registry entry matching a page's parent DB
+- Notion DB IDs are normalized (dashes stripped, lowercased) before comparison, so registry entries with hyphenated UUIDs match payload IDs without hyphens
+
+### Fundraising branch — multi-DB behavior
+
+If two Kibo members independently capture the same LP meeting in their respective DBs, both pages fire the Affinity post and the LP opportunity ends up with two notes. That's intentional: each member's notes capture distinct insights and are independently valuable on the LP timeline. An earlier creator-owns-DB guard tried to enforce "exactly one post per meeting" by skipping when `page.creator != db.owner`, but its premise was false (a meeting recorded by member A in member B's DB has no parallel page in A's DB), so it silently dropped legitimate posts. Removing it favors a small chance of duplicates over the certainty of missed posts.
 
 ### TemplateInjector (`src/template_injector.py`)
 
 - **Input:** NotionClientWrapper + template page ID + target page ID
 - **Output:** Boolean (True if template was injected)
-- Fetches template blocks dynamically from a Notion template page (`MEETING_TEMPLATE_PAGE_ID`), converts from "read" to "create" format, filters out AI blocks
-- Detects if template is already injected by checking for the first heading match (idempotent)
-- On empty/new pages the blocks land at the top; if AI content already exists they go at the bottom (the pipeline filters by block type regardless of position)
-- Edit the template in Notion to change what gets injected — no code changes needed
+- Fetches template blocks dynamically from a normal Notion page (`MEETING_TEMPLATE_PAGE_ID`, e.g. the "Generic Template" page under the Templates folder), converts from "read" to "create" format, filters out AI blocks
+- **Injects INSIDE the page's `meeting_notes` block** — locates the AI Meeting block on the target page, reads `meeting_notes.children.notes_block_id`, and appends template blocks at the start of that human-notes container (not at the page root)
+- Retries the meeting_notes lookup a few times (~3 × 1s) to absorb the race between page creation and Notion attaching the block; if still missing, returns False and the next cron tick retries
+- Idempotency: scans the children of `notes_block_id` for the template's first heading; skips if already present
+- Edit the template page in Notion to change what gets injected — no code changes needed
 
 ### PlaybookLoader (`src/playbook_loader.py`)
 
@@ -225,14 +276,17 @@ Meeting Notes DB page (no meeting_notes block)
 | Empty meeting content | Mark processed, skip extraction (no tasks to create) |
 | Duplicate meeting | Skip extraction, mark processed (fingerprint-based dedup) |
 
-## Auto-Archiving
+## Done-task archive sweep
 
-At the end of each sync cycle, the pipeline archives tasks where `Status = Done` and `last_edited_time` is older than 3 days. This keeps the tracker clean while giving the team a grace period to review completed work in standups.
+A dedicated weekly Lambda job sweeps Done tasks out of the live Team Task Tracker and into a separate **Team Task Tracker — Archive** DB. Filter: `Status = Done` AND `last_edited_time` older than 3 days (the grace window so the team sees completed work in the next Monday standup).
 
-- Runs every cycle, even when there are no unprocessed meetings
-- Per-task error handling: one failed archive doesn't block others
-- Respects dry-run mode (logs what would be archived)
-- Archived pages go to Notion's trash and can be restored if needed
+- **Schedule:** Sunday 06:00 UTC, declared as the `WeeklyArchive` event on `NzymeFunction` in `template.yaml`. The schedule sends `{"job":"weekly_archive"}` as the event input; the unified Lambda handler routes that to `_handle_weekly_archive`.
+- **Behavior:** for each match, copy properties to the archive DB (write-shape conversion done by `_copy_property_for_write`) → soft-delete the original via `archive_page`. Re-runs are idempotent: an archive copy carries a `Source Page ID` rich-text marker, and `_load_archived_source_ids` builds the skip-set on each run.
+- **Hierarchy relations are dropped on copy** (`Parent item`, `Sub-item`) — once parents are also archived, references would dangle. Cross-DB relations (`Meeting - Relation`, `Deal Relation`) are preserved so the archived task still links back to the original meeting / deal.
+- **Read-only types skipped on copy:** `formula`, `rollup`, `created_time`, `last_edited_time`, `created_by`, `last_edited_by`, `unique_id`. Notion auto-populates the relevant ones on the new page.
+- **Configuration:** `TASK_ARCHIVE_DB_ID` env var (SAM parameter `TaskArchiveDbId`). When unset, the weekly job logs a warning and exits as a no-op — useful for environments where the archive DB doesn't exist yet.
+- **Manual trigger:** `python -m src.main --archive` runs the same sweep locally (respects `--dry-run`).
+- **Per-task error handling:** one failed archive (copy or source-archive) doesn't block the rest of the batch.
 
 ## Webhook / Lambda Mode
 
@@ -240,21 +294,31 @@ An alternative to local polling, the webhook mode uses AWS Lambda for serverless
 
 ```
 [Template Injection — event-driven]
-Notion Automation (page created) → API Gateway → Lambda: webhook_handler
+Notion Automation (page created in any per-member DB) → API Gateway → Lambda: webhook_handler
+  → load registry, validate page's parent DB is in it
   → inject template → set "Template Injected" = true
 
 [AI Extraction — scheduled]
 CloudWatch Events (every 1 min) → Lambda: extraction_handler
-  → query: Processed=false AND Date<=now AND last_edited_time < now-3min
-  → for each ready page: run AI extraction, write tasks, mark Processed=true
+  → load registry from Org Chart
+  → for each member DB: query Processed=false AND last_edited_time < now-3min
+  → for each ready page: run_sync_for_page
+
+[Done-task archive — weekly]
+CloudWatch Events (Sun 06:00 UTC, Input={"job":"weekly_archive"}) → Lambda: _handle_weekly_archive
+  → query Team Task Tracker for Status=Done AND last_edited_time < now-3d
+  → for each match: copy properties to TASK_ARCHIVE_DB_ID, archive original
 ```
+
+The registry is reloaded once per cron tick — one extra Notion query per minute — so joiner/leaver changes in the Org Chart take effect within a minute without any redeploy.
 
 ### Components
 
 | File | Responsibility |
 |------|---------------|
-| `src/webhook/handler.py` | Parses Notion automation payload, validates DB, calls template injection |
+| `src/webhook/handler.py` | Parses Notion automation payload, validates against discovered registry, sets `Date = page.created_time` (with hour), calls template injection |
 | `src/webhook/lambda_handler.py` | Two Lambda entry points: `webhook_handler` (API Gateway) and `extraction_handler` (CloudWatch cron) |
+| `src/meeting_db_registry.py` | Reads active Org Chart rows' `Meeting Notes DB` URL property, returns `[MeetingDB]` |
 
 ### Single-Page Entry Points (`src/pipeline.py`)
 

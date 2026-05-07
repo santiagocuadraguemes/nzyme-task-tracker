@@ -156,6 +156,15 @@ class TaskClassifier:
 
         raw = response.choices[0].message.content or "{}"
 
+        usage = getattr(response, "usage", None)
+        if usage is not None:
+            logger.info(
+                "Classification tokens: %d in / %d out (model=%s)",
+                getattr(usage, "prompt_tokens", 0),
+                getattr(usage, "completion_tokens", 0),
+                self._model,
+            )
+
         data = json.loads(raw)
         classified = data.get("tasks", [])
 

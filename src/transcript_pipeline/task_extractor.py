@@ -200,5 +200,13 @@ class TaskExtractor:
         data = json.loads(raw)
         tasks = data.get("tasks", [])
 
-        logger.debug("Extracted %d tasks", len(tasks))
+        usage = getattr(response, "usage", None)
+        if usage is not None:
+            logger.info(
+                "Extraction tokens: %d in / %d out (model=%s)",
+                getattr(usage, "prompt_tokens", 0),
+                getattr(usage, "completion_tokens", 0),
+                self._model,
+            )
+
         return tasks

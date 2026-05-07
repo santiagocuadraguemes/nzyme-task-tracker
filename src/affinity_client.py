@@ -45,7 +45,7 @@ class AffinityClient:
         api_key: str,
         *,
         rate_limiter: RateLimiter | None = None,
-        max_retries: int = 3,
+        max_retries: int = 5,
         timeout: float = 20.0,
     ) -> None:
         if not api_key:

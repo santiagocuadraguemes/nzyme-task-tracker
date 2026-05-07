@@ -119,10 +119,13 @@ class TranscriptCorrector:
 
         corrected = response.choices[0].message.content or ""
 
-        logger.debug(
-            "Correction complete: %d input chars → %d output chars",
-            len(transcript),
-            len(corrected),
-        )
+        usage = getattr(response, "usage", None)
+        if usage is not None:
+            logger.info(
+                "Correction tokens: %d in / %d out (model=%s)",
+                getattr(usage, "prompt_tokens", 0),
+                getattr(usage, "completion_tokens", 0),
+                self._model,
+            )
 
         return corrected

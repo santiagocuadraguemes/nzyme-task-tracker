@@ -8,6 +8,7 @@ import pytest
 from src.affinity_client import AffinityError
 from src.fundraising.affinity_writer import (
     post_meeting_note_to_lp,
+    post_meeting_note_to_lps,
     write_next_step_to_lp,
 )
 
@@ -226,3 +227,73 @@ class TestPostMeetingNoteToLp:
             notion_url="",
         )
         client.create_note.assert_called_once()
+
+
+class TestPostMeetingNoteToLps:
+    def test_all_lps_receive_the_note(self, client):
+        posted, failed = post_meeting_note_to_lps(
+            client,
+            opportunity_entity_ids=[701, 702, 703],
+            meeting_title="LP X & Y intro",
+            meeting_date="2026-04-17",
+            summary="Both LPs are interested.",
+            notion_url="https://notion.so/p",
+        )
+        assert posted == [701, 702, 703]
+        assert failed == []
+        assert client.create_note.call_count == 3
+        # Each call attaches to exactly ONE opportunity (separate notes).
+        for call in client.create_note.call_args_list:
+            assert len(call.kwargs["opportunity_ids"]) == 1
+
+    def test_partial_failure_records_error_per_lp(self, client):
+        seen: list[int] = []
+
+        def flaky(content, content_type, opportunity_ids, **kwargs):
+            opp = opportunity_ids[0]
+            seen.append(opp)
+            if opp == 702:
+                raise AffinityError(500, "boom", "/notes")
+            return {"id": opp + 9000}
+
+        client.create_note.side_effect = flaky
+        posted, failed = post_meeting_note_to_lps(
+            client,
+            opportunity_entity_ids=[701, 702, 703],
+            meeting_title="t",
+            meeting_date="2026-04-17",
+            summary="s",
+            notion_url="",
+        )
+        assert seen == [701, 702, 703]
+        assert posted == [701, 703]
+        assert len(failed) == 1
+        opp_id, err_msg = failed[0]
+        assert opp_id == 702
+        assert "boom" in err_msg
+
+    def test_single_lp_path_still_works(self, client):
+        posted, failed = post_meeting_note_to_lps(
+            client,
+            opportunity_entity_ids=[701],
+            meeting_title="LP X",
+            meeting_date="2026-04-17",
+            summary="Send deck.",
+            notion_url="https://notion.so/p",
+        )
+        assert posted == [701]
+        assert failed == []
+        client.create_note.assert_called_once()
+
+    def test_empty_list_is_a_noop(self, client):
+        posted, failed = post_meeting_note_to_lps(
+            client,
+            opportunity_entity_ids=[],
+            meeting_title="t",
+            meeting_date="2026-04-17",
+            summary="s",
+            notion_url="",
+        )
+        assert posted == []
+        assert failed == []
+        client.create_note.assert_not_called()

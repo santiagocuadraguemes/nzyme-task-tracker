@@ -126,6 +126,23 @@ class TestDealContextLoader:
 
         assert len(deals) == 0
 
+    def test_tracker_page_id_dropped_when_not_in_valid_parent_ids(self):
+        """A deal whose Team Task Tracker relation points outside the hierarchy
+        (e.g., at an extracted task) has tracker_page_id nulled so the
+        classifier prompt never receives that id as a 'valid' parent_task_id."""
+        deal_pages = [
+            _make_deal_page("deal-good", "GoodDeal", tracker_rel_id="org-node-1"),
+            _make_deal_page("deal-bad", "BadDeal", tracker_rel_id="extracted-task-99"),
+        ]
+        client = self._make_client(deal_pages)
+        loader = DealContextLoader(client, "deal-wp-db")
+
+        deals = loader.load_deals(valid_parent_ids={"org-node-1"})
+
+        by_name = {d.name: d for d in deals}
+        assert by_name["GoodDeal"].tracker_page_id == "org-node-1"
+        assert by_name["BadDeal"].tracker_page_id is None
+
     def test_individual_deal_failure_doesnt_abort(self):
         deal_pages = [
             _make_deal_page("deal-ok", "GoodDeal", "tracker-ok"),

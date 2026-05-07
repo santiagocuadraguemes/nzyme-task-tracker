@@ -41,9 +41,20 @@ class TeamTaskTrackerWriter:
         return ""
 
     def _load_existing_titles(self) -> None:
-        """Query all tasks in the tracker and cache their titles for dedup."""
+        """Query existing tasks in the tracker and cache their titles for dedup.
+
+        Architecture/hierarchy rows carry Priority=[DETAILS INSIDE] and are
+        excluded so the dedup corpus contains only real tasks — that way new
+        tasks aren't compared against category labels.
+        """
         try:
-            response = self._client.query_database(database_id=self._db_id)
+            response = self._client.query_database(
+                database_id=self._db_id,
+                filter={
+                    "property": "Priority",
+                    "select": {"does_not_equal": "[DETAILS INSIDE]"},
+                },
+            )
             for page in response.get("results", []):
                 title = self._get_title(page)
                 if title:
@@ -83,7 +94,7 @@ class TeamTaskTrackerWriter:
                 "date": {"start": task["due_date"]}
             }
 
-        if task.get("priority"):
+        if task.get("priority") and task["priority"] != "[DETAILS INSIDE]":
             properties["Priority"] = {"select": {"name": task["priority"]}}
 
         if task.get("category"):

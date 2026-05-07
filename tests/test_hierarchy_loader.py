@@ -3,7 +3,13 @@ from unittest.mock import MagicMock
 from src.hierarchy_loader import HierarchyLoader
 
 
-def _make_page(page_id: str, title: str, category: str = "", parent_id: str | None = None) -> dict:
+def _make_page(
+    page_id: str,
+    title: str,
+    category: str = "",
+    parent_id: str | None = None,
+    meeting_relation_id: str | None = None,
+) -> dict:
     """Helper to build a minimal Notion page object."""
     props: dict = {
         "Task": {"type": "title", "title": [{"plain_text": title}]},
@@ -17,6 +23,13 @@ def _make_page(page_id: str, title: str, category: str = "", parent_id: str | No
         props["Parent item"] = {"type": "relation", "relation": [{"id": parent_id}]}
     else:
         props["Parent item"] = {"type": "relation", "relation": []}
+    if meeting_relation_id:
+        props["Meeting - Relation"] = {
+            "type": "relation",
+            "relation": [{"id": meeting_relation_id}],
+        }
+    else:
+        props["Meeting - Relation"] = {"type": "relation", "relation": []}
 
     return {"id": page_id, "properties": props}
 
@@ -109,16 +122,39 @@ class TestHierarchyLoader:
         assert "has_children" not in result[0]
         assert "has_children" not in result[0]["children"][0]
 
-    def test_filters_done_tasks_and_extracted_tasks(self):
+    def test_server_filter_excludes_done_only(self):
+        """Only Status is filtered server-side; Meeting - Relation is filtered in Python."""
         client = self._make_client([])
         loader = HierarchyLoader(client, "db-tracker")
         loader.load()
 
         call_kwargs = client.query_database.call_args
         db_filter = call_kwargs.kwargs["filter"]
-        # Compound filter: exclude Done tasks + exclude extracted tasks (with Meeting - Relation)
-        assert "and" in db_filter
-        conditions = db_filter["and"]
-        props = [c["property"] for c in conditions]
-        assert "Status" in props
-        assert "Meeting - Relation" in props
+        # Single Status-only filter — we no longer trust server-side relation.is_empty.
+        assert db_filter == {
+            "property": "Status",
+            "status": {"does_not_equal": "Done"},
+        }
+
+    def test_python_side_filter_drops_extracted_tasks(self):
+        """Pages with a non-empty Meeting - Relation are dropped in Python."""
+        pages = [
+            _make_page("org", "Operations", "Operations"),
+            # Extracted task that the server-side filter failed to exclude.
+            _make_page(
+                "extracted",
+                "Send term sheet to Meteoros",
+                parent_id="org",
+                meeting_relation_id="meeting-1",
+            ),
+        ]
+        client = self._make_client(pages)
+        loader = HierarchyLoader(client, "db-tracker")
+
+        result = loader.load()
+
+        # Only the organizational node survives.
+        assert len(result) == 1
+        assert result[0]["title"] == "Operations"
+        # The extracted task is not attached as a child.
+        assert result[0]["children"] == []
