@@ -35,6 +35,7 @@ Globals:
         TERMINOLOGY_DB_ID: !Ref TerminologyDbId
         ORG_CHART_DB_ID: !Ref OrgChartDbId
         CLASSIFIER_PROMPT_PAGE_ID: !Ref ClassifierPromptPageId
+        LITERAL_NOTES_EXTRACTION_PROMPT_PAGE_ID: !Ref LiteralNotesExtractionPromptPageId
         LOGFIRE_TOKEN: !Ref LogfireToken
         FUNDRAISING_BRANCH_ENABLED: !Ref FundraisingBranchEnabled
         AFFINITY_API_KEY: !Ref AffinityApiKey
@@ -128,6 +129,14 @@ Parameters:
     Type: String
     Default: ''
     Description: Notion page ID for the transcript classifier system prompt.
+  LiteralNotesExtractionPromptPageId:
+    Type: String
+    Default: ''
+    Description: |
+      Notion page ID for the literal-notes extraction prompt. Required when any
+      Org Chart row has Auto-extract Tasks = false (i.e. all of them in MVP).
+      The pipeline reads this page on every run so prompt edits take effect
+      live without redeploy.
   LogfireToken:
     Type: String
     Default: ''

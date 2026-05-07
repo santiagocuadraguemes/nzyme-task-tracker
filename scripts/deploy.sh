@@ -63,6 +63,7 @@ add_param "LogfireToken"                   "${LOGFIRE_TOKEN:-}"
 add_param "FundraisingBranchEnabled"       "${FUNDRAISING_BRANCH_ENABLED:-}"
 add_param "AffinityApiKey"                 "${AFFINITY_API_KEY:-}"
 add_param "AffinityLpFunnelListId"         "${AFFINITY_LP_FUNNEL_LIST_ID:-}"
+add_param "LiteralNotesExtractionPromptPageId" "${LITERAL_NOTES_EXTRACTION_PROMPT_PAGE_ID:-}"
 
 echo "=== Building SAM application ==="
 sam build
