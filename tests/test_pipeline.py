@@ -98,10 +98,12 @@ class TestRunSync:
         # Verify placeholders were substituted
         assert "{{CATEGORIES}}" not in extract_kwargs["system_prompt"]
         assert "Santiago" in extract_kwargs["system_prompt"]  # team member
-        write_call_args = mock_writer_cls.return_value.write_batch.call_args
-        tasks_written = write_call_args.args[0]
-        assert tasks_written[0]["meeting_page_id"] == "p1"
         mock_writer_cls.return_value.write_batch.assert_called_once()
+        # Reverse linkage: the meeting page's `Task - Relation` is patched
+        # with the new task IDs after they're written.
+        mock_writer_cls.return_value.link_tasks_to_meeting.assert_called_once_with(
+            "p1", ["new-task-1"],
+        )
         mock_source.mark_page_processed.assert_called_once_with("p1")
 
     @patch("src.pipeline.SemanticDedup")
@@ -339,7 +341,9 @@ class TestArchiveDoneTasks:
             **{
                 "Parent item": {"type": "relation", "relation": [{"id": "parent-1"}]},
                 "Sub-item": {"type": "relation", "relation": [{"id": "sub-1"}]},
-                "Meeting - Relation": {"type": "relation", "relation": [{"id": "meeting-1"}]},
+                "Deal Relation (only for deal tasks)": {
+                    "type": "relation", "relation": [{"id": "deal-1"}],
+                },
             },
         )
         client.query_database.side_effect = [
@@ -353,7 +357,9 @@ class TestArchiveDoneTasks:
         assert "Parent item" not in payload
         assert "Sub-item" not in payload
         # Cross-DB relations DO survive
-        assert payload["Meeting - Relation"] == {"relation": [{"id": "meeting-1"}]}
+        assert payload["Deal Relation (only for deal tasks)"] == {
+            "relation": [{"id": "deal-1"}]
+        }
 
     def test_dry_run_does_not_write_or_archive(self):
         client = MagicMock()

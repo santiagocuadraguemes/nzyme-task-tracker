@@ -22,7 +22,7 @@ main.py -> pipeline.run_sync() -> for each unprocessed meeting:
 - *Meeting-level:* Title + date fingerprinting skips meetings already processed (handles Notion's `(1)` suffixes on duplicates)
 - *Task-level:* Existing task titles are cached on startup; new tasks with matching titles are skipped
 
-**Meeting relations:** Each created task links back to its source meeting via the "Meeting - Relation" property (bidirectional -- the meeting's "Task - Relation" auto-populates).
+**Meeting relations:** Each per-member Meeting Notes DB has a one-way `Task - Relation` pointing into the Team Task Tracker. After tasks are written, the pipeline patches the source meeting page's `Task - Relation` with the new task IDs. (No reverse property on the tracker side -- a single relation can't span N member DBs.)
 
 ## Setup
 

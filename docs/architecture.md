@@ -208,7 +208,8 @@ If two Kibo members independently capture the same LP meeting in their respectiv
 ### TeamTaskTrackerWriter (`src/tracker/team_writer.py`)
 
 - **On init:** Queries all existing task titles for dedup (normalized: `.strip().lower()`)
-- **`create_task(task)`** — Maps dict to Notion properties, creates page. Skips if title already exists. Sets "Meeting - Relation" to link back to the source meeting (bidirectional — auto-populates "Task - Relation" on the meeting page).
+- **`create_task(task)`** — Maps dict to Notion properties, creates page. Skips if title already exists.
+- **`link_tasks_to_meeting(meeting_page_id, task_ids)`** — After a batch is written, patches the source meeting page's `Task - Relation` to include the new task IDs (merging with any existing list). This is the only meeting↔task linkage now: the reverse `Meeting - Relation` on the tracker was removed when DBs went per-member, since one relation can't span N source DBs.
 - **`write_batch(tasks)`** — Creates multiple tasks. Per-task error handling; failures don't abort batch.
 - **Dry-run mode:** Logs what would be created, updates in-memory cache, but doesn't write to Notion.
 
@@ -282,7 +283,7 @@ A dedicated weekly Lambda job sweeps Done tasks out of the live Team Task Tracke
 
 - **Schedule:** Sunday 06:00 UTC, declared as the `WeeklyArchive` event on `NzymeFunction` in `template.yaml`. The schedule sends `{"job":"weekly_archive"}` as the event input; the unified Lambda handler routes that to `_handle_weekly_archive`.
 - **Behavior:** for each match, copy properties to the archive DB (write-shape conversion done by `_copy_property_for_write`) → soft-delete the original via `archive_page`. Re-runs are idempotent: an archive copy carries a `Source Page ID` rich-text marker, and `_load_archived_source_ids` builds the skip-set on each run.
-- **Hierarchy relations are dropped on copy** (`Parent item`, `Sub-item`) — once parents are also archived, references would dangle. Cross-DB relations (`Meeting - Relation`, `Deal Relation`) are preserved so the archived task still links back to the original meeting / deal.
+- **Hierarchy relations are dropped on copy** (`Parent item`, `Sub-item`) — once parents are also archived, references would dangle. The cross-DB `Deal Relation` is preserved. Meeting backlinks aren't preserved: the reverse linkage now lives on the Meeting Notes side as `Task - Relation`, and the archived task page doesn't reciprocate that.
 - **Read-only types skipped on copy:** `formula`, `rollup`, `created_time`, `last_edited_time`, `created_by`, `last_edited_by`, `unique_id`. Notion auto-populates the relevant ones on the new page.
 - **Configuration:** `TASK_ARCHIVE_DB_ID` env var (SAM parameter `TaskArchiveDbId`). When unset, the weekly job logs a warning and exits as a no-op — useful for environments where the archive DB doesn't exist yet.
 - **Manual trigger:** `python -m src.main --archive` runs the same sweep locally (respects `--dry-run`).

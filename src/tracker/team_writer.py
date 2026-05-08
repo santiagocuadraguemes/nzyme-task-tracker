@@ -110,11 +110,6 @@ class TeamTaskTrackerWriter:
                 "relation": [{"id": task["deal_page_id"]}]
             }
 
-        if task.get("meeting_page_id"):
-            properties["Meeting - Relation"] = {
-                "relation": [{"id": task["meeting_page_id"]}]
-            }
-
         if self._dry_run:
             logger.info("DRY RUN — would create: %s", title[:80])
             self._existing_titles.add(normalized)
@@ -154,3 +149,41 @@ class TeamTaskTrackerWriter:
             except Exception:
                 logger.exception("Failed to create: %s", task.get("title", "?")[:80])
         return created
+
+    def link_tasks_to_meeting(
+        self, meeting_page_id: str, task_ids: list[str],
+    ) -> None:
+        """Append the given task IDs onto the meeting page's `Task - Relation`.
+
+        Per-member Meeting Notes DBs each carry a one-way `Task - Relation`
+        pointing into the Team Task Tracker (the reverse `Meeting - Relation`
+        was removed when we moved to per-member DBs). The pipeline owns this
+        relation at processing time, so on a manual re-trigger we merge with
+        whatever's already there to avoid orphaning previously-linked tasks.
+        """
+        if not task_ids or self._dry_run:
+            return
+        try:
+            page = self._client.get_page(meeting_page_id)
+            existing = (
+                (page.get("properties") or {})
+                .get("Task - Relation", {})
+                .get("relation", [])
+            )
+            existing_ids = {r["id"] for r in existing if r.get("id")}
+            merged = list(existing) + [
+                {"id": tid} for tid in task_ids if tid and tid not in existing_ids
+            ]
+            self._client.update_page(
+                page_id=meeting_page_id,
+                properties={"Task - Relation": {"relation": merged}},
+            )
+            logger.debug(
+                "Linked %d new task(s) to meeting %s (now %d total)",
+                len(merged) - len(existing), meeting_page_id, len(merged),
+            )
+        except Exception:
+            logger.exception(
+                "Failed to update Task - Relation on meeting page %s",
+                meeting_page_id,
+            )

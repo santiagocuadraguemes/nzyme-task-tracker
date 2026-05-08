@@ -36,29 +36,6 @@ class HierarchyLoader:
         )
         pages = response.get("results", [])
 
-        # Defense-in-depth: drop anything with "Meeting - Relation" set. After
-        # the Priority=[DETAILS INSIDE] migration, an extracted task should
-        # never carry that marker, so a leak here means operator error
-        # (someone marked a real task as architecture).
-        clean_pages: list[dict[str, Any]] = []
-        leaked = 0
-        for p in pages:
-            rel = (
-                p.get("properties", {})
-                .get("Meeting - Relation", {})
-                .get("relation", [])
-            )
-            if rel:
-                leaked += 1
-                continue
-            clean_pages.append(p)
-        if leaked:
-            logger.warning(
-                "hierarchy: dropped %d extracted task(s) marked Priority=[DETAILS INSIDE] — fix in Notion",
-                leaked,
-            )
-        pages = clean_pages
-
         # Index all pages
         page_map: dict[str, dict[str, Any]] = {}
         for page in pages:

@@ -97,8 +97,8 @@ def _load_existing_tasks(
 ) -> list[dict]:
     """Load recently-created extracted tasks for AI dedup context.
 
-    Returns tasks created in the last 30 minutes that have a Meeting - Relation,
-    with their title and parent title for context.
+    Returns tasks created in the last 30 minutes excluding architecture rows
+    (`Priority = [DETAILS INSIDE]`), with their title and parent title.
     """
     parent_titles = _flatten_hierarchy(hierarchy)
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=30)
@@ -108,7 +108,7 @@ def _load_existing_tasks(
             database_id=database_id,
             filter={
                 "and": [
-                    {"property": "Meeting - Relation", "relation": {"is_not_empty": True}},
+                    {"property": "Priority", "select": {"does_not_equal": "[DETAILS INSIDE]"}},
                     {"timestamp": "created_time", "created_time": {"after": cutoff.isoformat()}},
                 ]
             },
@@ -1310,15 +1310,14 @@ def run_sync(config: SyncConfig, client: NotionClientWrapper) -> None:
                                         task.get("title", "?")[:60],
                                     )
 
-                        # Common post-processing for both paths
-                        for task in tasks:
-                            task["meeting_page_id"] = page_id
-
                         # Semantic dedup: filter out tasks similar to existing ones
                         tasks = _run_semantic_dedup(tasks, ctx.get("semantic_dedup"))
 
                         if tasks:
                             created = ctx["writer"].write_batch(tasks)
+                            created_ids = [c["id"] for c in created if c.get("id")]
+                            if created_ids:
+                                ctx["writer"].link_tasks_to_meeting(page_id, created_ids)
                             total_tasks += len(created) if not config.dry_run else len(tasks)
                             logger.info("[%s] Page '%s': %d tasks created", label, title, len(tasks))
 
@@ -1637,15 +1636,14 @@ def run_sync_for_page(
                             task.get("title", "?")[:60],
                         )
 
-            # Common post-processing for both paths
-            for task in tasks:
-                task["meeting_page_id"] = page_id
-
             # Semantic dedup: filter out tasks similar to existing ones
             tasks = _run_semantic_dedup(tasks, ctx.get("semantic_dedup"))
 
             if tasks:
-                ctx["writer"].write_batch(tasks)
+                created = ctx["writer"].write_batch(tasks)
+                created_ids = [c["id"] for c in created if c.get("id")]
+                if created_ids:
+                    ctx["writer"].link_tasks_to_meeting(page_id, created_ids)
 
             # Fundraising add-on: mirror the next step to Affinity's LP Funnel
             # when this is a fundraising meeting. Soft-fails; errors do not

@@ -16,7 +16,6 @@ class TestTeamTaskTrackerWriter:
             "priority": "High",
             "category": "Sourcing / Investing / Divesting",
             "parent_task_id": "parent-1",
-            "meeting_page_id": "meeting-1",
             "status": "Not Started",
         }
         result = writer.create_task(task)
@@ -31,7 +30,7 @@ class TestTeamTaskTrackerWriter:
         assert props["Priority"]["select"]["name"] == "High"
         assert props["Category"]["select"]["name"] == "Sourcing / Investing / Divesting"
         assert props["Parent item"]["relation"][0]["id"] == "parent-1"
-        assert props["Meeting - Relation"]["relation"][0]["id"] == "meeting-1"
+        assert "Meeting - Relation" not in props
 
     def test_create_task_with_deal_relation(self):
         client = MagicMock()
@@ -44,7 +43,6 @@ class TestTeamTaskTrackerWriter:
             "category": "Sourcing / Investing / Divesting",
             "deal_page_id": "deal-citadel-123",
             "parent_task_id": "tracker-citadel-456",
-            "meeting_page_id": "meeting-1",
         }
         writer.create_task(task)
 
@@ -164,3 +162,59 @@ class TestTeamTaskTrackerWriter:
         written = props["Task"]["title"][0]["text"]["content"]
         assert written.startswith("[Ext: Ext Person] ")
         assert len(written) <= 2000
+
+    def test_link_tasks_to_meeting_writes_relation(self):
+        client = MagicMock()
+        client.get_page.return_value = {"properties": {}}
+        writer = TeamTaskTrackerWriter(client, "db-tracker")
+
+        writer.link_tasks_to_meeting("meeting-1", ["task-a", "task-b"])
+
+        update_kwargs = client.update_page.call_args.kwargs
+        assert update_kwargs["page_id"] == "meeting-1"
+        rel = update_kwargs["properties"]["Task - Relation"]["relation"]
+        assert [r["id"] for r in rel] == ["task-a", "task-b"]
+
+    def test_link_tasks_to_meeting_merges_with_existing(self):
+        client = MagicMock()
+        client.get_page.return_value = {
+            "properties": {
+                "Task - Relation": {
+                    "relation": [{"id": "existing-1"}, {"id": "task-a"}],
+                },
+            },
+        }
+        writer = TeamTaskTrackerWriter(client, "db-tracker")
+
+        writer.link_tasks_to_meeting("meeting-1", ["task-a", "task-b"])
+
+        rel = client.update_page.call_args.kwargs["properties"]["Task - Relation"]["relation"]
+        assert [r["id"] for r in rel] == ["existing-1", "task-a", "task-b"]
+
+    def test_link_tasks_to_meeting_dry_run_skips(self):
+        client = MagicMock()
+        writer = TeamTaskTrackerWriter(client, "db-tracker", dry_run=True)
+
+        writer.link_tasks_to_meeting("meeting-1", ["task-a"])
+
+        client.get_page.assert_not_called()
+        client.update_page.assert_not_called()
+
+    def test_link_tasks_to_meeting_empty_list_skips(self):
+        client = MagicMock()
+        writer = TeamTaskTrackerWriter(client, "db-tracker")
+
+        writer.link_tasks_to_meeting("meeting-1", [])
+
+        client.get_page.assert_not_called()
+        client.update_page.assert_not_called()
+
+    def test_link_tasks_to_meeting_swallows_api_errors(self):
+        client = MagicMock()
+        client.get_page.side_effect = Exception("API down")
+        writer = TeamTaskTrackerWriter(client, "db-tracker")
+
+        # Must not raise — failure is logged but pipeline continues
+        writer.link_tasks_to_meeting("meeting-1", ["task-a"])
+
+        client.update_page.assert_not_called()

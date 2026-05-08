@@ -24,7 +24,7 @@ Workspace: `kiboventures.notion.so`
 | Processed | checkbox | `false` = unprocessed, `true` = AI extraction completed |
 | Template Injected | checkbox | `false` = template not yet injected, `true` = template applied |
 | Processing | checkbox | Concurrency lock — `true` while a Lambda is extracting tasks from this page |
-| Task - Relation | relation | Relation to Team Task Tracker (auto-populated when tasks set "Meeting - Relation") |
+| Task - Relation | relation | One-way relation to Team Task Tracker. The pipeline patches this property after creating tasks for the meeting. |
 | Created | created_time | Auto-set by Notion |
 | Created by | created_by | Auto-set by Notion |
 
@@ -74,7 +74,8 @@ sort: created_time descending
 | Parent item | relation | Self-relation to Team Task Tracker (hierarchy parent) |
 | Sub-item | relation | Self-relation (hierarchy children, inverse of Parent item) |
 | Deal Relation (only for deal tasks) | relation | Relation to Deal Workplans DB (set by pipeline when AI identifies a deal-related task) |
-| Meeting - Relation | relation | Relation to Meeting Notes DB (set automatically by pipeline on task creation) |
+
+**Meeting linkage:** Meeting → task is one-way only, owned by each per-member Meeting Notes DB via its `Task - Relation`. The previous reverse `Meeting - Relation` on the tracker was deleted when the meeting database split into one DB per member.
 
 **Category options** (7 values, read dynamically via `_load_categories()`):
 - Sourcing / Investing / Divesting

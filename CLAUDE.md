@@ -372,13 +372,13 @@ Possible status values: `Posted`, `Skipped: no external attendees`, `Skipped: no
 The tracker contains two types of items — never delete or archive parent items.
 
 - **Parent/hierarchy items** (e.g. "Investing", "Nzyme Operations", "Value Creation") carry **`Priority = [DETAILS INSIDE]`**. They form the organizational structure used by `hierarchy_loader.py` to give the classifier context for categorizing tasks and assigning `parent_task_id`. Deleting them breaks the hierarchy.
-- **Extracted tasks** are created by the AI pipeline with `Priority` set to `High`/`Medium`/`Low` (or unset) and **always have `Meeting - Relation`** linking back to the source meeting page.
+- **Extracted tasks** are created by the AI pipeline with `Priority` set to `High`/`Medium`/`Low` (or unset).
 
 The `[DETAILS INSIDE]` marker is the single source of truth for the hierarchy/task split. It scopes the classifier (sees architecture only) and the deduper (sees tasks only — `_load_existing_titles` excludes architecture rows so new task titles aren't compared against category labels).
 
 To add a new architecture row in Notion: create the page and set `Priority = [DETAILS INSIDE]`. No code change needed.
 
-When cleaning up test data, only archive items that have a `Meeting - Relation` value (i.e. extracted tasks).
+**Meeting → Task linkage (one-way):** Each per-member Meeting Notes DB has a one-way `Task - Relation` property pointing into the Team Task Tracker. After tasks are written, the pipeline patches the source meeting page's `Task - Relation` to include the new task IDs (merging with anything already there). The reverse property `Meeting - Relation` on the tracker side was removed in the multi-DB migration — a single relation can't span N member DBs.
 
 ## Weekly Done-task archive sweep
 
@@ -387,7 +387,7 @@ Done tasks are swept out of the live Team Task Tracker once a week and copied in
 - **Schedule:** Sunday 06:00 UTC (`cron(0 6 ? * SUN *)`) — declared as the `WeeklyArchive` event on `NzymeFunction` in `template.yaml`. Triggers Lambda with input `{"job":"weekly_archive"}` so the unified handler routes to `_handle_weekly_archive`.
 - **Filter:** `Status = Done` AND `last_edited_time` older than 5 days.
 - **Behavior:** copy properties to the archive DB → soft-delete (`archive_page`) the original. Re-runs are idempotent via the `Source Page ID` rich-text marker on each archive copy.
-- **Hierarchy relations dropped on copy:** `Parent item` and `Sub-item` are skipped; the archive is a flat record of completed work and would otherwise produce dangling relations as parents are also archived. Cross-DB relations (`Meeting - Relation`, `Deal Relation`) are preserved.
+- **Hierarchy relations dropped on copy:** `Parent item` and `Sub-item` are skipped; the archive is a flat record of completed work and would otherwise produce dangling relations as parents are also archived. The cross-DB `Deal Relation` is preserved. (Meeting → task linkage now lives on the Meeting Notes side as `Task - Relation`, so archived tasks don't carry meeting backlinks — reverse-link via Notion if needed.)
 - **Env var:** `TASK_ARCHIVE_DB_ID`. Unset → the weekly job logs a warning and exits as a no-op.
 - **Manual trigger (testing):** `python -m src.main --archive` runs the sweep once locally.
 - **Code:** `_archive_done_tasks` + `_copy_property_for_write` + `_build_archive_payload` + `_load_archived_source_ids` in `src/pipeline.py`.
