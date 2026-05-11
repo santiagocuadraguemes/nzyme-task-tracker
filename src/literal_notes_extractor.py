@@ -17,10 +17,12 @@ Pipeline shape:
    system prompt + a code-built user message containing meeting context
    and the notes markdown. The model returns:
      {"tasks": [{"title", "assignee", "internal_assignees",
-                 "external_assignees", "supporting_quote"}]}
+                 "external_assignees", "due_date", "priority",
+                 "supporting_quote"}]}
 4. The downstream classifier (same one used by the transcript path) adds
    category, parent, deal — and resolves `assignee_id` from the
-   internal/external split.
+   internal/external split. `due_date` and `priority` are pass-through
+   to the writer.
 """
 from __future__ import annotations
 
@@ -143,10 +145,15 @@ def extract(
 
     Returns a list of task dicts shaped for the classifier:
         {
-          "title": str,                       # verbatim per the prompt
+          "title": str,                       # cleaned, self-contained
           "assignee": str,                    # human-readable display string
           "internal_assignees": list[str],    # Kibo team-member names
           "external_assignees": list[str],    # outsider names
+          "due_date": str | None,             # ISO YYYY-MM-DD if model
+                                              # resolved an inline deadline
+          "priority": str | None,             # "High" / "Medium" / "Low"
+                                              # only when bullet has an
+                                              # urgency signal
           "supporting_quote": str,            # original bullet text
         }
     Returns [] when no notes content was found.
@@ -211,11 +218,22 @@ def extract(
         title = (entry.get("title") or "").strip()
         if not title:
             continue
+
+        due_date = entry.get("due_date")
+        if not isinstance(due_date, str) or not due_date.strip():
+            due_date = None
+
+        priority = entry.get("priority")
+        if priority not in ("High", "Medium", "Low"):
+            priority = None
+
         tasks.append({
             "title": title,
             "assignee": entry.get("assignee") or "",
             "internal_assignees": list(entry.get("internal_assignees") or []),
             "external_assignees": list(entry.get("external_assignees") or []),
+            "due_date": due_date,
+            "priority": priority,
             "supporting_quote": entry.get("supporting_quote") or title,
         })
 
