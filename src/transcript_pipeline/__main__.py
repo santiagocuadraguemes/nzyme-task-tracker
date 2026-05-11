@@ -150,6 +150,9 @@ def main() -> None:
     parser.add_argument("--correct", action="store_true", help="Run LLM correction on the transcript (implies --context)")
     parser.add_argument("--model", type=str, default=None, help="Override LLM model for correction + extraction")
     parser.add_argument("--classifier-model", type=str, default=None, help="Override LLM model for classification (defaults to --model)")
+    parser.add_argument("--correction-model", type=str, default=None, help="[--write only] Override the transcript-correction model. Provider auto-detected from prefix.")
+    parser.add_argument("--extraction-model", type=str, default=None, help="[--write only] Override the task-extraction model. Provider auto-detected from prefix.")
+    parser.add_argument("--classification-model", type=str, default=None, help="[--write only] Override the task-classification model. Provider auto-detected from prefix.")
     parser.add_argument("--extract", action="store_true", help="Extract tasks from corrected transcript (implies --correct)")
     parser.add_argument("--write", action="store_true", help="Write extracted tasks to Team Task Tracker (implies --extract)")
     parser.add_argument("--dry-run", action="store_true", help="Log tasks that would be written without creating them (requires --write)")
@@ -373,6 +376,12 @@ def _run_write_mode(args: argparse.Namespace) -> None:
         overrides["dry_run"] = True
     if args.model:
         overrides["openai_model"] = args.model
+    if args.correction_model:
+        overrides["correction_model"] = args.correction_model
+    if args.extraction_model:
+        overrides["extraction_model"] = args.extraction_model
+    if args.classification_model:
+        overrides["classification_model"] = args.classification_model
     if args.openai:
         overrides["openai_base_url"] = "https://api.openai.com/v1"
     if overrides:
@@ -381,8 +390,8 @@ def _run_write_mode(args: argparse.Namespace) -> None:
     logfire.configure(token=cfg.logfire_token, service_name="nzyme-transcript")
     logfire.instrument_openai()
 
-    log_level = logging.DEBUG if args.verbose else logging.INFO
-    logging.basicConfig(level=log_level, format="%(levelname)s: %(message)s")
+    from src.utils.logger import setup_logging
+    setup_logging("DEBUG" if args.verbose else "INFO")
 
     client = _create_client()
 
