@@ -7,6 +7,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Default to the company AWS account (migrated 2026-05-11). Override by exporting
+# AWS_PROFILE before invoking.
+export AWS_PROFILE="${AWS_PROFILE:-company}"
+
 BUILD_DIR=".aws-sam/build/NzymeFunction"
 
 if [ ! -d "$BUILD_DIR" ]; then

@@ -13,6 +13,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Default to the company AWS account (migrated 2026-05-11). Override by exporting
+# AWS_PROFILE before invoking, e.g. `AWS_PROFILE=default ./scripts/deploy.sh`.
+export AWS_PROFILE="${AWS_PROFILE:-company}"
+
 # Load .env for parameter values
 if [ -f .env ]; then
     set -a

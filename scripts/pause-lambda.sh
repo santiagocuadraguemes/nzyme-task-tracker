@@ -12,6 +12,10 @@
 
 set -euo pipefail
 
+# Default to the company AWS account (migrated 2026-05-11). Override by exporting
+# AWS_PROFILE before invoking.
+export AWS_PROFILE="${AWS_PROFILE:-company}"
+
 REGION="${AWS_REGION:-eu-west-1}"
 
 RULE_NAME=$(aws events list-rules \
