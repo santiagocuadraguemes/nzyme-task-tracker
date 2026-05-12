@@ -39,6 +39,7 @@ from src.transcript_pipeline.fetch_transcript import (
     build_user_lookup,
     fetch_notes_text,
 )
+from src.transcript_pipeline.transcript_cleaner import clean as clean_transcript
 from src.utils.blocks_to_text import blocks_to_text
 
 logger = logging.getLogger(__name__)
@@ -413,6 +414,16 @@ def _process_via_transcript(
         logger.warning("Transcript text is empty — no tasks to extract")
         return []
 
+    # Deterministic noise cleanup (timestamps, bare speaker labels,
+    # same-speaker run collapse, adjacent-identical sentence dedup).
+    cleaned = clean_transcript(transcript_text)
+    if cleaned.chars_before:
+        logger.info(
+            "Transcript cleaned: %d → %d chars (%.0f%% kept)",
+            cleaned.chars_before, cleaned.chars_after, cleaned.ratio * 100,
+        )
+    transcript_text = cleaned.text
+
     # Fetch human notes from meeting_notes block
     notes_text = fetch_notes_text(mn_block, client)
 
@@ -426,59 +437,89 @@ def _process_via_transcript(
         len(transcript_text) / 1024, len(transcript_text),
     )
 
-    # Step 1: Correct transcript
-    correction_model = config.correction_model or config.gemini_model
-    correction_key, correction_base = _resolve_stage_creds(correction_model, config)
-    corrector = TranscriptCorrector(
-        api_key=correction_key,
-        model=correction_model,
-        base_url=correction_base,
-    )
-    t0 = time.perf_counter()
-    corrected = corrector.correct(
-        transcript_text,
-        ctx["terminology"],
-        attendees,
-        enriched_attendee_str=enriched_attendee_str,
-        notes_text=notes_text,
-    )
-    logger.info(
-        "Corrected transcript (%s, %.1fs, %d → %d chars)",
-        correction_model, time.perf_counter() - t0,
-        len(transcript_text), len(corrected),
-    )
-    logger.debug("Corrected transcript text:\n%s", corrected)
-
-    # Step 2: Extract tasks
     extraction_model = config.extraction_model or config.gemini_model
     extraction_key, extraction_base = _resolve_stage_creds(extraction_model, config)
-    extractor = TaskExtractor(
-        api_key=extraction_key,
-        model=extraction_model,
-        base_url=extraction_base,
-    )
-    t0 = time.perf_counter()
-    tasks = extractor.extract(
-        corrected,
-        attendees,
-        org_chart=ctx["org_chart_text"],
-        terminology=ctx["terminology"],
-        meeting_title=metadata.get("title", ""),
-        meeting_date=metadata.get("date", ""),
-        enriched_attendee_str=enriched_attendee_str,
-        notes_text=notes_text,
-    )
-    extract_elapsed = time.perf_counter() - t0
-    if not tasks:
-        logger.info(
-            "Extracted 0 tasks (%s, %.1fs)", extraction_model, extract_elapsed,
+
+    if config.transcript_merged_extraction:
+        # Merged path: single LLM call does correction + extraction inline.
+        extractor = TaskExtractor(
+            api_key=extraction_key,
+            model=extraction_model,
+            base_url=extraction_base,
         )
-        return []
-    logger.info(
-        "Extracted %d tasks (%s, %.1fs)",
-        len(tasks), extraction_model, extract_elapsed,
-    )
-    logger.debug("Extracted task payload: %s", json.dumps(tasks, ensure_ascii=False, indent=2))
+        t0 = time.perf_counter()
+        tasks = extractor.extract_from_raw(
+            transcript_text,
+            attendees,
+            org_chart=ctx["org_chart_text"],
+            terminology=ctx["terminology"],
+            meeting_title=metadata.get("title", ""),
+            meeting_date=metadata.get("date", ""),
+            enriched_attendee_str=enriched_attendee_str,
+            notes_text=notes_text,
+        )
+        extract_elapsed = time.perf_counter() - t0
+        if not tasks:
+            logger.info(
+                "Merged-extracted 0 tasks (%s, %.1fs)", extraction_model, extract_elapsed,
+            )
+            return []
+        logger.info(
+            "Merged-extracted %d tasks (%s, %.1fs)",
+            len(tasks), extraction_model, extract_elapsed,
+        )
+        logger.debug("Extracted task payload: %s", json.dumps(tasks, ensure_ascii=False, indent=2))
+    else:
+        # Legacy 2-call path: correct, then extract.
+        correction_model = config.correction_model or config.gemini_model
+        correction_key, correction_base = _resolve_stage_creds(correction_model, config)
+        corrector = TranscriptCorrector(
+            api_key=correction_key,
+            model=correction_model,
+            base_url=correction_base,
+        )
+        t0 = time.perf_counter()
+        corrected = corrector.correct(
+            transcript_text,
+            ctx["terminology"],
+            attendees,
+            enriched_attendee_str=enriched_attendee_str,
+            notes_text=notes_text,
+        )
+        logger.info(
+            "Corrected transcript (%s, %.1fs, %d → %d chars)",
+            correction_model, time.perf_counter() - t0,
+            len(transcript_text), len(corrected),
+        )
+        logger.debug("Corrected transcript text:\n%s", corrected)
+
+        extractor = TaskExtractor(
+            api_key=extraction_key,
+            model=extraction_model,
+            base_url=extraction_base,
+        )
+        t0 = time.perf_counter()
+        tasks = extractor.extract(
+            corrected,
+            attendees,
+            org_chart=ctx["org_chart_text"],
+            terminology=ctx["terminology"],
+            meeting_title=metadata.get("title", ""),
+            meeting_date=metadata.get("date", ""),
+            enriched_attendee_str=enriched_attendee_str,
+            notes_text=notes_text,
+        )
+        extract_elapsed = time.perf_counter() - t0
+        if not tasks:
+            logger.info(
+                "Extracted 0 tasks (%s, %.1fs)", extraction_model, extract_elapsed,
+            )
+            return []
+        logger.info(
+            "Extracted %d tasks (%s, %.1fs)",
+            len(tasks), extraction_model, extract_elapsed,
+        )
+        logger.debug("Extracted task payload: %s", json.dumps(tasks, ensure_ascii=False, indent=2))
 
     # Step 3: Classify tasks
     if not ctx["classifier_prompt"]:

@@ -30,6 +30,14 @@ class SyncConfig(BaseModel):
     correction_model: str | None = Field(None, description="Override model for transcript correction stage")
     extraction_model: str | None = Field(None, description="Override model for task extraction stage")
     classification_model: str | None = Field(None, description="Override model for task classification stage")
+    # Rollout flag for the merged correction+extraction call. When True, the
+    # transcript pipeline skips TranscriptCorrector and does both jobs in a
+    # single LLM call (TaskExtractor.extract_from_raw). When False (default),
+    # runs the legacy 2-call flow.
+    transcript_merged_extraction: bool = Field(
+        False,
+        description="If True, transcript path uses a single merged correction+extraction LLM call.",
+    )
     # CLI override for the per-member `Auto-extract Tasks` Org Chart flag.
     # When None, the registry value applies (default True). When True/False,
     # forces every page in this run onto that path regardless of the Org
@@ -152,6 +160,8 @@ def load_config() -> SyncConfig:
         correction_model=os.getenv("CORRECTION_MODEL") or None,
         extraction_model=os.getenv("EXTRACTION_MODEL") or None,
         classification_model=os.getenv("CLASSIFICATION_MODEL") or None,
+        transcript_merged_extraction=os.getenv("TRANSCRIPT_MERGED_EXTRACTION", "false").lower()
+        in ("true", "1", "yes"),
         meeting_notes_db_id=os.getenv("MEETING_NOTES_DB_ID") or None,
         team_tracker_db_id=os.environ["TEAM_TRACKER_DB_ID"],
         task_archive_db_id=os.getenv("TASK_ARCHIVE_DB_ID") or None,

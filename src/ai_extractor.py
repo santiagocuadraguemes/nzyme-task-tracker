@@ -6,6 +6,8 @@ import logging
 
 from openai import OpenAI
 
+from src.utils.llm_logging import log_usage
+
 logger = logging.getLogger(__name__)
 
 
@@ -100,6 +102,8 @@ class AIExtractor:
             tools=[_build_tool_definition(categories)],
             tool_choice="auto",
         )
+
+        log_usage(response, self._model, stage="AI extraction", logger=logger)
 
         tasks: list[dict] = []
         tool_calls = response.choices[0].message.tool_calls

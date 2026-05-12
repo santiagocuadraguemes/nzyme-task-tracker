@@ -35,6 +35,7 @@ from openai import OpenAI
 from src.notion_client_wrapper import NotionClientWrapper
 from src.transcript_pipeline.fetch_transcript import find_meeting_notes_block
 from src.utils.blocks_to_text import blocks_to_text
+from src.utils.llm_logging import log_usage
 
 logger = logging.getLogger(__name__)
 
@@ -188,14 +189,7 @@ def extract(
 
     raw = response.choices[0].message.content or "{}"
 
-    usage = getattr(response, "usage", None)
-    if usage is not None:
-        logger.info(
-            "literal-notes extraction tokens: %d in / %d out (model=%s)",
-            getattr(usage, "prompt_tokens", 0),
-            getattr(usage, "completion_tokens", 0),
-            model,
-        )
+    log_usage(response, model, stage="literal-notes extraction", logger=logger)
 
     try:
         data = json.loads(raw)

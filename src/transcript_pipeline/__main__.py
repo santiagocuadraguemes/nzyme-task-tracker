@@ -153,12 +153,20 @@ def main() -> None:
     parser.add_argument("--correction-model", type=str, default=None, help="[--write only] Override the transcript-correction model. Provider auto-detected from prefix.")
     parser.add_argument("--extraction-model", type=str, default=None, help="[--write only] Override the task-extraction model. Provider auto-detected from prefix.")
     parser.add_argument("--classification-model", type=str, default=None, help="[--write only] Override the task-classification model. Provider auto-detected from prefix.")
-    parser.add_argument("--extract", action="store_true", help="Extract tasks from corrected transcript (implies --correct)")
+    parser.add_argument("--extract", action="store_true", help="Extract tasks (merged single-call path by default; uses 2-call flow only when --legacy-2call is set)")
     parser.add_argument("--write", action="store_true", help="Write extracted tasks to Team Task Tracker (implies --extract)")
     parser.add_argument("--dry-run", action="store_true", help="Log tasks that would be written without creating them (requires --write)")
     parser.add_argument("--openai", action="store_true", help="Force OpenAI endpoint for correction + extraction")
     parser.add_argument("--classifier-openai", action="store_true", help="Force OpenAI endpoint for classification (defaults to --openai)")
     parser.add_argument("--gcal", action="store_true", help="Test GCal attendee lookup only (no transcript fetch)")
+    parser.add_argument(
+        "--legacy-2call",
+        action="store_true",
+        help=(
+            "Force the legacy 2-call flow (TranscriptCorrector → TaskExtractor). "
+            "Diagnostic only — production path is controlled by TRANSCRIPT_MERGED_EXTRACTION."
+        ),
+    )
     args = parser.parse_args()
 
     if args.gcal:
@@ -170,10 +178,12 @@ def main() -> None:
         _run_write_mode(args)
         return
 
-    # --extract implies --correct, --correct implies --context
-    if args.extract:
+    # Diagnostic modes: --extract uses the merged call by default;
+    # --legacy-2call falls back to the old corrector → extractor flow.
+    use_merged = args.extract and not args.legacy_2call
+    if args.extract and args.legacy_2call:
         args.correct = True
-    load_context = args.context or args.correct
+    load_context = args.context or args.correct or use_merged
 
     if args.dry_run:
         print("Note: --dry-run has no effect without --write", file=sys.stderr)
@@ -260,6 +270,75 @@ def main() -> None:
         print()
         print("=== ORG CHART CONTEXT ===")
         print(org_chart if org_chart else "  (no active members)")
+
+    # Merged single-call path (default for --extract without --legacy-2call)
+    if use_merged:
+        if not cfg:
+            from src.config import load_config
+            cfg = load_config()
+        logfire.configure(token=cfg.logfire_token, service_name="nzyme-transcript")
+        logfire.instrument_openai()
+
+        if not transcript_text:
+            print("\nERROR: No transcript to extract from.", file=sys.stderr)
+            sys.exit(1)
+
+        # Deterministic noise cleanup — mirrors what _process_via_transcript
+        # does in the production pipeline, so --extract is a faithful
+        # diagnostic of what the LLM actually sees.
+        from src.transcript_pipeline.transcript_cleaner import clean as clean_transcript
+
+        cleaned = clean_transcript(transcript_text)
+        if cleaned.chars_before:
+            print(
+                f"Transcript cleaned: {cleaned.chars_before} → {cleaned.chars_after} "
+                f"chars ({cleaned.ratio * 100:.0f}% kept)",
+                file=sys.stderr,
+            )
+        transcript_text = cleaned.text
+
+        from src.transcript_pipeline.task_extractor import TaskExtractor
+
+        model = args.model or args.extraction_model or cfg.gemini_model
+        base_url = "https://api.openai.com/v1" if args.openai else cfg.gemini_base_url
+        api_key = cfg.openai_api_key if args.openai else (cfg.gemini_api_key or cfg.openai_api_key)
+
+        print(f"Merged-extracting tasks with {model} (single call)...", file=sys.stderr)
+        extractor = TaskExtractor(api_key=api_key, model=model, base_url=base_url)
+        tasks = extractor.extract_from_raw(
+            transcript_text,
+            attendees,
+            org_chart=org_chart,
+            terminology=terminology,
+            meeting_title=metadata.get("title", ""),
+            meeting_date=metadata.get("date", ""),
+            enriched_attendee_str=enriched_attendee_str,
+            notes_text=notes_text,
+        )
+
+        print()
+        print(f"=== EXTRACTED TASKS ({len(tasks)}) ===")
+        if tasks:
+            for i, t in enumerate(tasks, 1):
+                priority = t.get("priority", "?")
+                title = t.get("title", "(no title)")
+                assignee = t.get("assignee") or "Unassigned"
+                due = t.get("due_date") or "—"
+                confidence = t.get("confidence", "?")
+                commitment = t.get("commitment_type", "?")
+                context = t.get("context", "")
+                reasoning = t.get("speaker_reasoning", "")
+                print()
+                print(f"  {i}. [{priority}] {title}  (confidence: {confidence}, commitment: {commitment})")
+                print(f"     Assignee: {assignee}")
+                print(f"     Due: {due}")
+                if reasoning:
+                    print(f"     Why: {reasoning}")
+                if context:
+                    print(f'     Context: "{context}"')
+        else:
+            print("  (no tasks found)")
+        return
 
     # Run LLM correction
     if args.correct:
@@ -384,6 +463,8 @@ def _run_write_mode(args: argparse.Namespace) -> None:
         overrides["classification_model"] = args.classification_model
     if args.openai:
         overrides["openai_base_url"] = "https://api.openai.com/v1"
+    if args.legacy_2call:
+        overrides["transcript_merged_extraction"] = False
     if overrides:
         cfg = cfg.model_copy(update=overrides)
 

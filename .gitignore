@@ -58,3 +58,4 @@ venv/
 
 # Git worktrees
 .worktrees/
+.claude/worktrees/

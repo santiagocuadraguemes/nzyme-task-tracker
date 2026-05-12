@@ -24,11 +24,13 @@ Nzyme uses **two separate API keys** to balance cost and quality. When a run fai
 
 | Stage | Model | Env var |
 |-------|-------|---------|
-| Transcript correction (heavy) | `gemini-3-flash-preview` (Gemini 3 Flash Preview — **not** `gemini-2.5-flash`) | `GEMINI_API_KEY` |
-| Task extraction (heavy) | `gemini-3-flash-preview` (Gemini 3 Flash Preview — **not** `gemini-2.5-flash`) | `GEMINI_API_KEY` |
+| Transcript correction (heavy) — **legacy 2-call path only** | `gemini-3-flash-preview` (Gemini 3 Flash Preview — **not** `gemini-2.5-flash`) | `GEMINI_API_KEY` |
+| Task extraction (heavy) — single call in merged mode, otherwise runs after correction | `gemini-3-flash-preview` (Gemini 3 Flash Preview — **not** `gemini-2.5-flash`) | `GEMINI_API_KEY` |
 | Task classification (light) | `gpt-5-mini` | `OPENAI_API_KEY` |
 | Literal-notes extraction (light) — `Auto-extract Tasks = false` path | `gpt-5-mini` | `OPENAI_API_KEY` |
 | Semantic dedup embeddings (light) | `text-embedding-3-small` | `OPENAI_API_KEY` |
+
+`TRANSCRIPT_MERGED_EXTRACTION=true` collapses correction + extraction into a single Gemini call (no separate corrected-transcript output — domain corrections and speaker resolutions are reported as scratch fields). Saves ~60-70% per meeting on the transcript path. Default `false` keeps the legacy 2-call flow during rollout.
 
 - Endpoint `generativelanguage.googleapis.com` → it's the Gemini key (`GEMINI_API_KEY`).
 - Endpoint `api.openai.com` → it's the OpenAI key (`OPENAI_API_KEY`).
@@ -257,25 +259,64 @@ The transcript pipeline modules (`src/transcript_pipeline/`) handle transcript-b
 
 ### Pipeline steps
 
+Two modes, selected by `TRANSCRIPT_MERGED_EXTRACTION`:
+
+**Merged (default once rolled out, `TRANSCRIPT_MERGED_EXTRACTION=true`):**
 1. **Fetch** raw transcript from Notion `meeting_notes` block
 2. **Load context** from Terminology DB + Org Chart DB + Google Calendar attendees
-3. **Correct** transcript via LLM (fix domain terms, speaker identification)
-4. **Extract** action items via LLM (commitment-aware prompting)
+3. **Merged correction + extraction** — single Gemini call reads the raw transcript and emits tasks directly. Domain corrections + speaker resolutions surface as scratch fields (`domain_corrections`, `speaker_resolutions`) — no full corrected transcript is produced.
+4. **Classify** tasks via LLM (category, parent, assignee, deal mapping)
+5. **Write** classified tasks to Team Task Tracker (via `TeamTaskTrackerWriter`)
+
+**Legacy (`TRANSCRIPT_MERGED_EXTRACTION=false`, also the rollback path):**
+1. **Fetch** raw transcript from Notion `meeting_notes` block
+2. **Load context** from Terminology DB + Org Chart DB + Google Calendar attendees
+3. **Correct** transcript via LLM (`TranscriptCorrector` — fix domain terms, speaker identification, emit full corrected transcript)
+4. **Extract** action items via LLM on the corrected transcript (commitment-aware prompting)
 5. **Classify** tasks via LLM (category, parent, assignee, deal mapping)
 6. **Write** classified tasks to Team Task Tracker (via `TeamTaskTrackerWriter`)
+
+In the merged path each task carries an extra `commitment_type` field (`hard|conditional|soft|group`) and a verbatim `context` quote from the raw transcript; a soft check warns when the quote is not found in the transcript (never drops the task — the check is whitespace-lossy).
+
+### Cost reductions on the merged extraction call
+
+Two optimisations are wired into the merged path. Both fire automatically when the extraction model is `gemini-*`.
+
+- **Deterministic transcript cleanup** (`src/transcript_pipeline/transcript_cleaner.py`) — regex-only artefact removal applied before the transcript reaches the LLM. Strips pure-timestamp lines, bare speaker labels, blank-line runs; collapses consecutive same-speaker utterances; drops adjacent identical sentences. Typically shaves 10–25% off transcript chars with no semantic loss. Logged per call as `Transcript cleaned: N → M chars (X% kept)`. No NLP / spaCy.
+- **Native Gemini SDK with explicit context caching + `response_schema`** (`src/transcript_pipeline/task_extractor.py`) — when the extraction model starts with `gemini-`, the merged call uses `google-genai` directly instead of the OpenAI-compat shim. The stable system prefix (`MERGED_SYSTEM_PROMPT` + terminology + org chart) is uploaded once via `caches.create` and reused across meetings until its 1h TTL expires; cached input tokens are billed at ~25% of the standard rate. Output shape is enforced via the `MergedExtractionOutput` Pydantic schema in `src/transcript_pipeline/schemas.py` (portable across providers). Module-level `_GEMINI_CACHE_REGISTRY` keyed by SHA256 of the system prefix means changes to the org chart or terminology naturally produce a fresh cache. Non-Gemini extraction models keep the existing OpenAI-compat JSON-object path.
+
+### Validating the merge (shadow diff)
+
+Before flipping `TRANSCRIPT_MERGED_EXTRACTION=true` in production, run both paths on a fixed set of historical meetings and diff:
+
+```powershell
+# Both paths use Gemini (heavy) → GEMINI_API_KEY
+../venv/Scripts/python scripts/shadow_diff_extraction.py `
+    --pages <page_id_1> <page_id_2> <page_id_3> `
+    --out shadow-diff.json
+```
+
+`shadow-diff.json` contains `legacy.tasks` vs `merged.tasks` per page. Passing thresholds (per design doc §6): ≥90% legacy tasks have a semantic match in merged, ≥90% `internal_assignees` agreement on matched pairs, ≥85% `priority`/`due_date` agreement, task-count delta within ±15%.
 
 ### CLI (diagnostics + manual runs)
 
 ```bash
 # Full pipeline: correct → extract → classify → write
+# Routes through pipeline.run_sync_for_page(); honors TRANSCRIPT_MERGED_EXTRACTION.
 python -m src.transcript_pipeline <page_id> --write
 python -m src.transcript_pipeline <page_id> --write --dry-run
 
-# Diagnostic: just correct the transcript
-python -m src.transcript_pipeline <page_id> --correct
+# Force the legacy 2-call path for a single run (overrides env flag).
+python -m src.transcript_pipeline <page_id> --write --legacy-2call
 
-# Diagnostic: correct + extract (no write)
+# Diagnostic: extract tasks via the merged single call (no write)
 python -m src.transcript_pipeline <page_id> --extract
+
+# Diagnostic: legacy 2-call extract (correct + extract, no write)
+python -m src.transcript_pipeline <page_id> --extract --legacy-2call
+
+# Diagnostic: just correct the transcript (legacy only — requires --legacy-2call to be meaningful)
+python -m src.transcript_pipeline <page_id> --correct --legacy-2call
 
 # Override model
 python -m src.transcript_pipeline <page_id> --write --model gpt-5-mini
@@ -287,7 +328,7 @@ python -m src.transcript_pipeline <page_id> --write --openai
 python -m src.transcript_pipeline <page_id> --gcal
 ```
 
-**`--write` routes through `pipeline.run_sync_for_page()`** — the unified pipeline with dedup, classification, and all post-processing. Diagnostic flags (`--correct`, `--extract`) run standalone without the full pipeline.
+**`--write` routes through `pipeline.run_sync_for_page()`** — the unified pipeline with dedup, classification, and all post-processing. Diagnostic flags (`--correct`, `--extract`) run standalone without the full pipeline. `--legacy-2call` is diagnostic-only — production rollout is controlled by `TRANSCRIPT_MERGED_EXTRACTION`.
 
 ### Google Calendar integration
 
@@ -315,8 +356,10 @@ The `--extract` flag runs a second LLM call on the corrected transcript to extra
 | `src/transcript_pipeline/__main__.py` | CLI entry point (diagnostics + `--write` routes through pipeline) |
 | `src/transcript_pipeline/fetch_transcript.py` | Find meeting_notes block, extract transcript, resolve attendees, page metadata |
 | `src/transcript_pipeline/context_loader.py` | Load terminology dictionary + org chart from Notion DBs |
-| `src/transcript_pipeline/transcript_corrector.py` | LLM-based transcript correction (OpenAI) |
-| `src/transcript_pipeline/task_extractor.py` | LLM-based action item extraction from corrected transcript |
+| `src/transcript_pipeline/transcript_corrector.py` | LLM-based transcript correction (legacy 2-call flow + `--legacy-2call` diagnostic only) |
+| `src/transcript_pipeline/task_extractor.py` | LLM-based action item extraction. `extract` consumes a corrected transcript (legacy); `extract_from_raw` does correction + extraction in one merged call (merged path) — native `google-genai` SDK with `caches.create` + `response_schema` for Gemini models, OpenAI-compat shim otherwise |
+| `src/transcript_pipeline/schemas.py` | Pydantic `MergedExtractionOutput` schema shared by the Gemini-native (`response_schema`) and OpenAI-compat call sites |
+| `src/transcript_pipeline/transcript_cleaner.py` | Deterministic regex cleanup (Layers A + B): drops timestamps and bare speaker labels, collapses same-speaker runs, dedupes adjacent identical sentences |
 | `src/transcript_pipeline/task_classifier.py` | LLM-based task classification (category, parent, assignee, deal) |
 | `src/transcript_pipeline/gcal_attendees.py` | Google Calendar lookup via service account (DWD) — per-meeting impersonation, emails-only; names resolved downstream via Org Chart |
 

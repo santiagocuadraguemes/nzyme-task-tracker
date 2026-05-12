@@ -6,16 +6,20 @@ import logging
 
 from openai import OpenAI
 
+from src.utils.llm_logging import log_usage
+
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """\
 You are a transcript correction assistant for Kibo Ventures, a PE/VC fund.
 
-You will receive:
-1. A TERMINOLOGY DICTIONARY of domain-specific terms with their common mistranscriptions
-2. A list of MEETING ATTENDEES with their roles, seniority, and typical topics
-3. HUMAN NOTES taken by the note-taker during the meeting (high-priority ground truth)
-4. A RAW TRANSCRIPT from Notion's automatic voice transcription
+You will receive (in the system message) a TERMINOLOGY DICTIONARY of \
+domain-specific terms with their common mistranscriptions.
+
+You will then receive (in the user message):
+1. A list of MEETING ATTENDEES with their roles, seniority, and typical topics
+2. HUMAN NOTES taken by the note-taker during the meeting (high-priority ground truth)
+3. A RAW TRANSCRIPT from Notion's automatic voice transcription
 
 Your job is to correct transcription errors in the raw transcript. Rules:
 
@@ -88,10 +92,19 @@ class TranscriptCorrector:
             attendee_names = [a["name"] for a in attendees]
             enriched_attendee_str = ", ".join(attendee_names) if attendee_names else "(unknown)"
 
-        user_prompt = f"""\
-=== TERMINOLOGY DICTIONARY ===
-{terminology_context if terminology_context else "(none provided)"}
+        # Stable prefix — system message holds the instructions + the
+        # terminology dictionary, both reused across every meeting in a
+        # sync tick. Putting them here maximises the OpenAI auto-cache
+        # prefix (≥1024 tokens cached for ~5 min). Gemini's OpenAI-compat
+        # endpoint ignores this today but the layout is harmless.
+        system_message = (
+            f"{SYSTEM_PROMPT}\n\n"
+            f"=== TERMINOLOGY DICTIONARY ===\n"
+            f"{terminology_context if terminology_context else '(none provided)'}"
+        )
 
+        # Variable per meeting — attendees, notes, transcript.
+        user_prompt = f"""\
 === MEETING ATTENDEES ===
 {enriched_attendee_str}
 
@@ -112,20 +125,13 @@ class TranscriptCorrector:
         response = self._client.chat.completions.create(
             model=self._model,
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system_message},
                 {"role": "user", "content": user_prompt},
             ],
         )
 
         corrected = response.choices[0].message.content or ""
 
-        usage = getattr(response, "usage", None)
-        if usage is not None:
-            logger.info(
-                "Correction tokens: %d in / %d out (model=%s)",
-                getattr(usage, "prompt_tokens", 0),
-                getattr(usage, "completion_tokens", 0),
-                self._model,
-            )
+        log_usage(response, self._model, stage="Correction", logger=logger)
 
         return corrected
