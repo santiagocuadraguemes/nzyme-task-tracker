@@ -56,11 +56,28 @@ def _resolve_stage_creds(
 ) -> tuple[str, str]:
     """Pick (api_key, base_url) for a stage based on the model name prefix.
 
-    Convention: model names starting with `gemini-` route through the Gemini
-    OpenAI-compatible endpoint; everything else uses OpenAI directly. This
-    lets per-stage CLI overrides (--correction-model, etc.) swap providers
-    without an extra flag.
+    Convention (checked in order):
+      - Contains ``/`` → OpenRouter slug (e.g. ``google/gemini-2.5-flash-preview``,
+        ``deepseek/deepseek-chat-v3.1:free``). Routes via
+        OPENROUTER_API_KEY + openrouter_base_url. Useful as a Gemini failover
+        when Google returns 503 UNAVAILABLE on the merged-extraction call.
+      - Starts with ``gemini-`` → Google Gemini direct. Routes via
+        GEMINI_API_KEY + gemini_base_url. Only this path can use Gemini's
+        native context cache (~25% input-token discount); OpenRouter loses it.
+      - Otherwise → OpenAI direct. Routes via OPENAI_API_KEY + the hardcoded
+        OpenAI base URL.
+
+    Per-stage CLI overrides (``--correction-model``, ``--extraction-model``,
+    ``--classification-model``) swap providers by passing a model name that
+    matches one of these conventions — no extra flag needed.
     """
+    if "/" in model_name:
+        if not config.openrouter_api_key:
+            raise RuntimeError(
+                f"Model '{model_name}' looks like an OpenRouter slug but "
+                "OPENROUTER_API_KEY is not set in .env."
+            )
+        return config.openrouter_api_key, config.openrouter_base_url
     if model_name.startswith("gemini-"):
         if not config.gemini_api_key:
             raise RuntimeError(
@@ -1757,6 +1774,45 @@ def run_sync_for_page(
                     "fundraising outcome: page=%s db_owner=%s status=%s detail=%s",
                     short_id, db_owner, outcome.status.value, outcome.detail,
                 )
+
+            # Meeting Mirrors branch — clone tagged pages into topic DBs.
+            # Runs on every page; the route registry decides which (if any)
+            # mirrors apply. NO_MATCH / DISABLED outcomes are not logged so
+            # untagged pages don't flood CloudWatch.
+            if config.topic_mirror_enabled and not config.dry_run:
+                from src.topic_mirror import mirror_to_topic_dbs
+                from src.topic_mirror.outcome import MirrorStatus
+
+                # Owner identity: prefer the meeting page's Notion creator
+                # (a real user UUID, suitable for the People property);
+                # fall back to empty when created_by is missing (rare —
+                # would leave Owner unset on the mirror). db_owner is the
+                # human display name used for the merge-path H3 heading.
+                creator = metadata.get("created_by") or {}
+                owner_user_id = creator.get("id") or ""
+
+                mirror_outcome = mirror_to_topic_dbs(
+                    config=config,
+                    client=client,
+                    source_page=page,
+                    metadata=metadata,
+                    owner_user_id=owner_user_id,
+                    owner_name=db_owner,
+                )
+                if mirror_outcome.status in (
+                    MirrorStatus.FAILED, MirrorStatus.PARTIAL_FAILURE,
+                ):
+                    logger.error(
+                        "topic mirror outcome: page=%s owner=%s status=%s detail=%s",
+                        short_id, db_owner,
+                        mirror_outcome.status.value, mirror_outcome.detail,
+                    )
+                elif mirror_outcome.status == MirrorStatus.POSTED:
+                    logger.info(
+                        "topic mirror outcome: page=%s owner=%s status=%s detail=%s",
+                        short_id, db_owner,
+                        mirror_outcome.status.value, mirror_outcome.detail,
+                    )
 
             if not config.dry_run and not force:
                 source.mark_page_processed(page_id)

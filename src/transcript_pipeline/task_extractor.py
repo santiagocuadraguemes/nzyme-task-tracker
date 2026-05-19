@@ -56,6 +56,40 @@ _GEMINI_CACHE_DISABLED = False
 # via ``responseMimeType``; the prompt's output section guides the shape.
 _GEMINI_SCHEMA_DISABLED = False
 
+# Measurement-only override. ``scripts/compare_candidate.py`` calls
+# ``set_response_schema_override(MergedExtractionOutputNoSR)`` (or another
+# variant from ``schemas.CANDIDATE_SCHEMAS``) to test a candidate against
+# the corpus. Production code never sets this; default behaviour uses
+# ``MergedExtractionOutput``.
+_RESPONSE_SCHEMA_OVERRIDE: Any = None
+
+
+def set_response_schema_override(schema: Any) -> None:
+    """Force the next merged calls to use ``schema`` instead of the default.
+
+    Pass ``None`` to clear. Only used by measurement scripts.
+    """
+    global _RESPONSE_SCHEMA_OVERRIDE
+    _RESPONSE_SCHEMA_OVERRIDE = schema
+
+_TASK_FIELD_MAP = {
+    "t": "title",
+    "ia": "internal_assignees",
+    "ea": "external_assignees",
+    "ct": "commitment_type",
+    "p": "priority",
+    "dd": "due_date",
+}
+
+# Confidence is derived from commitment_type rather than emitted directly
+# (plan A3). Keeps the downstream contract — task["confidence"] — intact.
+_CT_TO_CONFIDENCE = {
+    "hard": "high",
+    "conditional": "medium",
+    "soft": "medium",
+    "group": "low",
+}
+
 SYSTEM_PROMPT = """\
 You are a task extraction assistant for Kibo Ventures, a PE/VC fund (~10-20 people).
 
@@ -175,14 +209,15 @@ You will then receive (in the user message):
 - A RAW TRANSCRIPT from Notion's automatic voice transcription
 
 Your job: read the raw transcript, mentally correct domain terms and resolve speaker labels, \
-then extract all clear action items. You do NOT output the corrected transcript — only the \
-corrections you applied, the speaker labels you resolved, and the tasks themselves.
+then extract all clear action items. You do NOT output the corrected transcript or any \
+report of the corrections / speaker resolutions you applied — only the extracted tasks.
 
-## Mental correction (report as scratch fields, not as a rewritten transcript)
+## Mental correction (apply silently — do NOT emit a report)
 
 DOMAIN TERMS:
 - Fix domain-specific terms using the terminology dictionary (e.g., "civic lend" → "Civislend")
 - Fix people's names using the attendee list (e.g., "ed vinas" → "Edvinas")
+- Apply corrections to task titles (use the canonical form), but do not list them.
 
 SPEAKER IDENTIFICATION (critical for assignee resolution):
 - HUMAN NOTES are the highest-priority signal. If notes attribute an action or topic \
@@ -198,6 +233,8 @@ soft signal — not an absolute rule — when other cues are ambiguous.
 - NEVER assign all unlabeled segments to the same person
 - Use conversational cues: questions vs answers, "tú" / "you should" vs "I will"
 
+Apply this resolution silently — do not emit reasoning text in the output.
+
 ## Language
 
 - Do NOT translate — extract tasks in the original language (Spanish, English, or mixed)
@@ -206,13 +243,12 @@ soft signal — not an absolute rule — when other cues are ambiguous.
 ## Commitment classification
 
 Classify each commitment type you find:
-- **Hard commitment**: "I will do X by Friday" → commitment_type: "hard", confidence: high
-- **Conditional commitment**: "If Y happens, I'll do X" → commitment_type: "conditional", confidence: medium
-- **Soft delegation**: "Maybe Sarah could look at this" → commitment_type: "soft", confidence: medium
-- **Group commitment**: "We should do X" / "We need to do X" → commitment_type: "group", confidence: low. \
+- **Hard commitment**: "I will do X by Friday" → commitment_type: "hard"
+- **Conditional commitment**: "If Y happens, I'll do X" → commitment_type: "conditional"
+- **Soft delegation**: "Maybe Sarah could look at this" → commitment_type: "soft"
+- **Group commitment**: "We should do X" / "We need to do X" → commitment_type: "group". \
 Try to identify the 2-3 most likely responsible people based on topic alignment \
-and roles. Use comma-separated names (e.g., "Santiago, Jacob"). Only use "Team" \
-as a last resort when no specific people can be inferred.
+and roles. Only use "Team" as a last resort when no specific people can be inferred.
 - **Vague / follow-up**: "Let's circle back on X" → do NOT extract as a task
 
 ## Speaker & Assignee Resolution (CRITICAL)
@@ -228,7 +264,7 @@ Notion-related tasks, or several deal-related tasks), they should be assigned to
 same person unless there is explicit evidence of different assignees. Group related \
 tasks mentally before assigning.
 
-For each task, include a "speaker_reasoning" field (1 sentence) explaining your assignment logic.
+Apply the assignee rules above silently — do NOT emit reasoning text. \
 NEVER default all ambiguous tasks to the same person — use topic alignment to distribute.
 
 ## Human Notes (HIGH PRIORITY)
@@ -262,7 +298,7 @@ a portfolio company, adviser, bank, or any non-Kibo organization.
 **external** unless the surrounding context clearly points to the internal person.
 
 A single task may be assigned to any mix of internal and external people. Split them \
-into two arrays (see Output below).
+into the "ia" and "ea" arrays (see Output below).
 
 ## Rules
 
@@ -270,8 +306,8 @@ into two arrays (see Output below).
 - If a passage in the raw transcript doesn't clearly support an action item, do NOT create the task
 - The transcript may be in English, Spanish, or mixed — extract tasks regardless of language
 - Write task titles in the same language they were discussed in (with domain corrections applied)
-- If multiple people are responsible for the same task, list them comma-separated in the \
-assignee field (e.g., "Santiago, Jacob") — do NOT create separate tasks
+- If multiple people are responsible for the same task, put them all in "ia" / "ea" — do NOT \
+create separate tasks
 - If a speaker refers to themselves ("I'll do it", "yo me encargo"), use speaker attribution \
 or attendee context to determine who they are
 - Use the org chart and attendee roles to resolve role-based references \
@@ -279,20 +315,20 @@ or attendee context to determine who they are
 
 ## Output
 
-Return JSON with three top-level keys:
-- "domain_corrections": list of unique "<as transcribed>→<correct term>" strings (empty if none).
-- "speaker_resolutions": list of {{"label", "name", "evidence"}} for any anonymous label you resolved (empty if none).
-- "tasks": list of task objects.
+Return a single JSON object: {{"tasks": [...]}}. Do NOT emit any other top-level keys \
+(no domain_corrections, no speaker_resolutions, no corrected transcript).
 
-Each task object has:
-- "title", "assignee", "internal_assignees", "external_assignees" (use rules above for the internal/external split — exact attendee/org-chart names for internal, comma-separated display string for assignee)
-- "commitment_type": one of "hard" | "conditional" | "soft" | "group"
-- "priority": "High" | "Medium" | "Low"
-- "due_date": ISO date "YYYY-MM-DD" or null
-- "confidence": "high" | "medium" | "low"
-- "speaker_reasoning": one sentence covering the assignment AND any external classification
+Each task object has EXACTLY these keys:
+- "t" (title): clear, actionable description (one sentence, in the original language)
+- "ia" (internal assignees): JSON array of EXACT attendee/org-chart names; [] if none
+- "ea" (external assignees): JSON array of names of external people; [] if none
+- "ct" (commitment type): one of "hard" | "conditional" | "soft" | "group"
+- "p" (priority): "High" | "Medium" | "Low"
+- "dd" (due date): ISO date "YYYY-MM-DD". OMIT this key entirely if no deadline was mentioned — do NOT emit null.
 
-If no tasks are found, return {{"domain_corrections": [...], "speaker_resolutions": [...], "tasks": []}}.
+Do NOT include any other keys (no "a", no "c", no "sr", no "context", no notes).
+
+If no tasks are found, return {{"tasks": []}}.
 """
 
 
@@ -312,6 +348,11 @@ class TaskExtractor:
         # non-Gemini runs don't import or initialise it. Stored on the
         # instance once created.
         self._genai_client: Any | None = None
+        # Set by the merged extractor after each call. Holds the raw
+        # short-key JSON (tasks + scratch fields) so measurement scripts
+        # can reconstruct what the model actually emitted, byte-for-byte.
+        # Not part of the public contract — diagnostic only.
+        self._last_raw_data: dict | None = None
 
     @property
     def _is_gemini(self) -> bool:
@@ -547,7 +588,9 @@ class TaskExtractor:
         def _build_cfg(*, use_cache: bool, use_schema: bool) -> Any:
             cfg: dict[str, Any] = {"responseMimeType": "application/json"}
             if use_schema:
-                cfg["responseSchema"] = MergedExtractionOutput
+                cfg["responseSchema"] = (
+                    _RESPONSE_SCHEMA_OVERRIDE or MergedExtractionOutput
+                )
             if use_cache and cache_name:
                 cfg["cachedContent"] = cache_name
             else:
@@ -597,6 +640,7 @@ class TaskExtractor:
 
         raw = getattr(response, "text", None) or "{}"
         data = json.loads(raw)
+        self._last_raw_data = data
         log_usage_genai(response, self._model, stage="MergedExtraction", logger=logger)
         return self._unpack_merged_response(data)
 
@@ -614,22 +658,40 @@ class TaskExtractor:
         )
         raw = response.choices[0].message.content or "{}"
         data = json.loads(raw)
+        self._last_raw_data = data
         log_usage(response, self._model, stage="MergedExtraction", logger=logger)
         return self._unpack_merged_response(data)
 
     @staticmethod
     def _unpack_merged_response(data: dict) -> list[dict]:
-        """Pull tasks out of the merged-call JSON and log scratch fields."""
+        """Pull tasks out of the merged-call JSON.
+
+        Re-derives ``assignee`` (from ia+ea — plan A2) and ``confidence``
+        (from commitment_type — plan A3) so downstream consumers
+        (classifier, writer) see the same dict shape they always have.
+        """
         tasks = data.get("tasks", []) or []
+        # Scratch fields (domain_corrections, speaker_resolutions) are no
+        # longer emitted (plan A4). data.get(...) returns [] silently if
+        # an older payload still includes them — log them when present so
+        # we can spot regressions during the rollout.
         corrections = data.get("domain_corrections", []) or []
         resolutions = data.get("speaker_resolutions", []) or []
         if corrections:
-            logger.info("Merged extraction applied %d domain correction(s)", len(corrections))
-            logger.debug("domain_corrections: %s", json.dumps(corrections, ensure_ascii=False))
+            logger.debug("domain_corrections (legacy): %s", json.dumps(corrections, ensure_ascii=False))
         if resolutions:
-            logger.info("Merged extraction resolved %d speaker label(s)", len(resolutions))
-            logger.debug("speaker_resolutions: %s", json.dumps(resolutions, ensure_ascii=False))
-        return tasks
+            logger.debug("speaker_resolutions (legacy): %s", json.dumps(resolutions, ensure_ascii=False))
+
+        unpacked: list[dict] = []
+        for task in tasks:
+            mapped = {_TASK_FIELD_MAP.get(k, k): v for k, v in task.items()}
+            ia = mapped.get("internal_assignees") or []
+            ea = mapped.get("external_assignees") or []
+            mapped["assignee"] = ", ".join([*ia, *ea]) or "Team"
+            ct = (mapped.get("commitment_type") or "").lower()
+            mapped["confidence"] = _CT_TO_CONFIDENCE.get(ct, "medium")
+            unpacked.append(mapped)
+        return unpacked
 
     def extract_from_raw(
         self,

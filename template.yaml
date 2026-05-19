@@ -32,6 +32,7 @@ Globals:
         GEMINI_MODEL: !Ref GeminiModel
         GEMINI_BASE_URL: !Ref GeminiBaseUrl
         OPENAI_MODEL: !Ref OpenAIModel
+        TRANSCRIPT_MERGED_EXTRACTION: !Ref TranscriptMergedExtraction
         TERMINOLOGY_DB_ID: !Ref TerminologyDbId
         ORG_CHART_DB_ID: !Ref OrgChartDbId
         CLASSIFIER_PROMPT_PAGE_ID: !Ref ClassifierPromptPageId
@@ -40,6 +41,10 @@ Globals:
         FUNDRAISING_BRANCH_ENABLED: !Ref FundraisingBranchEnabled
         AFFINITY_API_KEY: !Ref AffinityApiKey
         AFFINITY_LP_FUNNEL_LIST_ID: !Ref AffinityLpFunnelListId
+        TOPIC_MIRROR_ENABLED: !Ref TopicMirrorEnabled
+        TOPIC_MIRROR_ROUTES_DB_ID: !Ref TopicMirrorRoutesDbId
+        SUPABASE_URL: !Ref SupabaseUrl
+        SUPABASE_KEY: !Ref SupabaseKey
 
 Parameters:
   NotionApiToken:
@@ -114,6 +119,10 @@ Parameters:
     Type: String
     Default: gpt-5-mini
     Description: OpenAI model for light LLM calls (classifier + fundraising summary).
+  TranscriptMergedExtraction:
+    Type: String
+    Default: 'true'
+    Description: Single merged Gemini call for correction+extraction (~60-70% cheaper than the legacy 2-call flow). Set 'false' to roll back.
   TerminologyDbId:
     Type: String
     Default: ''
@@ -155,6 +164,23 @@ Parameters:
     Type: String
     Default: '168609'
     Description: Affinity list ID for Nzyme - LP Funnel.
+  TopicMirrorEnabled:
+    Type: String
+    Default: 'false'
+    Description: Enable cloning of tagged meetings into Meeting Mirrors topic DBs.
+  TopicMirrorRoutesDbId:
+    Type: String
+    Default: ''
+    Description: Notion DB ID for the Topic Mirror Routes DB (Match Property / Match Value / Target DB / Active). Required when TopicMirrorEnabled = true.
+  SupabaseUrl:
+    Type: String
+    Default: ''
+    Description: Supabase project URL (e.g. https://yphbrpbwpakjduhmoimw.supabase.co). When empty, the Supabase sync jobs are still scheduled but will fail loudly at runtime — set both this and SupabaseKey to enable.
+  SupabaseKey:
+    Type: String
+    Default: ''
+    Description: Supabase service-role key (RLS bypass — required because the meeting_transcripts table is RLS-enabled with no policies).
+    NoEcho: true
 
 Conditions:
   GCalEnabled: !Not [!Equals [!Ref GoogleServiceAccountSecretArn, '']]
@@ -205,6 +231,20 @@ Resources:
             Description: Sweep Done tasks (idle >3d) into the Team Task Tracker — Archive DB. Sunday 06:00 UTC.
             Enabled: true
             Input: '{"source": "aws.events", "job": "weekly_archive"}'
+        SupabaseSync:
+          Type: Schedule
+          Properties:
+            Schedule: rate(5 minutes)
+            Description: Incremental Notion → Supabase sync. Pulls pages where last_edited_time has advanced past the per-DB checkpoint stored in Supabase and upserts them into meeting_transcripts.
+            Enabled: true
+            Input: '{"source": "aws.events", "job": "supabase_sync"}'
+        SupabaseWeeklySync:
+          Type: Schedule
+          Properties:
+            Schedule: cron(0 7 ? * SUN *)
+            Description: Sunday safety-net — re-sync every meeting page edited in the last 14 days, regardless of checkpoint. Sunday 07:00 UTC.
+            Enabled: true
+            Input: '{"source": "aws.events", "job": "supabase_sync_full"}'
 
   HttpApi:
     Type: AWS::Serverless::HttpApi

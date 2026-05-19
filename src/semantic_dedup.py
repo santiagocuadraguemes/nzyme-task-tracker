@@ -5,6 +5,8 @@ import logging
 
 from openai import OpenAI
 
+from src.utils.llm_logging import record_embedding_usage
+
 logger = logging.getLogger(__name__)
 
 EMBEDDING_MODEL = "text-embedding-3-small"
@@ -50,6 +52,7 @@ class SemanticDedup:
                 model=EMBEDDING_MODEL,
                 input=batch,
             )
+            record_embedding_usage(response, EMBEDDING_MODEL)
             for title, data in zip(batch, response.data):
                 self._existing.append((title, data.embedding))
 
@@ -59,6 +62,7 @@ class SemanticDedup:
             model=EMBEDDING_MODEL,
             input=[text],
         )
+        record_embedding_usage(response, EMBEDDING_MODEL)
         return response.data[0].embedding
 
     def is_duplicate(self, title: str) -> tuple[bool, str | None, float]:

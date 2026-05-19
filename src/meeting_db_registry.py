@@ -136,14 +136,46 @@ def discover_meeting_dbs(
     return dbs
 
 
+# Suffix on member-DB titles in Notion (e.g. "Santiago Cuadra Meeting Notes").
+# Stripping it gives the member's full name for the single-DB override branch
+# where the Org Chart isn't being consulted.
+_MEMBER_DB_TITLE_SUFFIX = " Meeting Notes"
+
+
+def _resolve_owner_name_from_db_title(
+    client: NotionClientWrapper, db_id: str,
+) -> str:
+    """Derive a member name from a Meeting Notes DB's title.
+
+    Used by the single-DB override branch in ``load_registry`` so the
+    contributor label downstream (e.g. on Meeting Mirrors) shows a real
+    name instead of ``?``. Best-effort: returns "" on any failure.
+    """
+    try:
+        db = client.retrieve_database(db_id)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "Single-DB override: couldn't retrieve DB %s for owner name", db_id,
+            exc_info=True,
+        )
+        return ""
+    title = "".join(p.get("plain_text", "") for p in db.get("title") or []).strip()
+    if title.endswith(_MEMBER_DB_TITLE_SUFFIX):
+        title = title[: -len(_MEMBER_DB_TITLE_SUFFIX)].strip()
+    return title
+
+
 def load_registry(
     config: SyncConfig, client: NotionClientWrapper,
 ) -> list[MeetingDB]:
     """Return the active registry, honoring the single-DB override.
 
     When `MEETING_NOTES_DB_ID` is set in config, returns a one-entry registry
-    using that DB (owner fields blank). Otherwise discovers from the Org
-    Chart at `ORG_CHART_DB_ID`. Raises if neither is configured.
+    using that DB; ``owner_name`` is derived from the DB title (stripping
+    the trailing " Meeting Notes" suffix) so downstream consumers like the
+    Meeting Mirrors branch have a real contributor label to use. Otherwise
+    discovers from the Org Chart at `ORG_CHART_DB_ID`. Raises if neither is
+    configured.
     """
     if config.meeting_notes_db_id:
         # Manual single-DB runs (dev / test) keep auto_extract_tasks=True so
@@ -151,9 +183,12 @@ def load_registry(
         # never sets MEETING_NOTES_DB_ID, so this branch doesn't affect
         # prod — the discover_meeting_dbs path below honours the dataclass
         # default (False) for missing/unset rows.
+        owner_name = _resolve_owner_name_from_db_title(
+            client, config.meeting_notes_db_id,
+        )
         return [MeetingDB(
-            db_id=config.meeting_notes_db_id, owner_name="", owner_email="",
-            auto_extract_tasks=True,
+            db_id=config.meeting_notes_db_id, owner_name=owner_name,
+            owner_email="", auto_extract_tasks=True,
         )]
     if not config.org_chart_db_id:
         raise RuntimeError(

@@ -33,45 +33,110 @@ class SpeakerResolution(BaseModel):
 class ExtractedTask(BaseModel):
     """A single action item emitted by the merged extraction call.
 
-    Field order mirrors what the prompt asks for so that LLMs that emit
-    fields sequentially produce reasoning fields (e.g. speaker_reasoning)
-    *after* the upstream decisions they justify.
+    Lean shape: ``a`` (derivable from ia+ea), ``c`` (derivable from ct),
+    and ``sr`` (diagnostic-only) are intentionally absent — see
+    output-token-reduction-plan.md (A1/A2/A3). They are reconstructed in
+    ``TaskExtractor._unpack_merged_response`` so downstream code sees the
+    same dict shape it always has.
     """
 
-    title: str = Field(description="Clear, actionable description (one sentence)")
-    assignee: str = Field(description="Display string, e.g. 'Santiago, Jacob'")
-    internal_assignees: list[str] = Field(
+    t: str = Field(description="Title: clear, actionable description (one sentence)")
+    ia: list[str] = Field(
         default_factory=list,
-        description="Internal team members responsible for the task (Org Chart names)",
+        description="Internal assignees: team members responsible for the task (Org Chart names)",
     )
-    external_assignees: list[str] = Field(
+    ea: list[str] = Field(
         default_factory=list,
-        description="External people responsible (portfolio staff, advisers, etc.)",
+        description="External assignees: external people responsible (portfolio staff, advisers, etc.)",
     )
-    commitment_type: str = Field(
-        description="One of: hard | conditional | soft | group",
+    ct: str = Field(
+        description="Commitment type. One of: hard | conditional | soft | group",
     )
-    priority: str = Field(description="One of: High | Medium | Low")
-    due_date: Optional[str] = Field(
-        default=None, description="ISO date (YYYY-MM-DD) if a deadline was mentioned, else null",
-    )
-    confidence: str = Field(description="One of: high | medium | low")
-    speaker_reasoning: str = Field(
-        description="One sentence explaining the assignment + any external classification"
+    p: str = Field(description="Priority. One of: High | Medium | Low")
+    dd: Optional[str] = Field(
+        default=None,
+        description="Due date: ISO date (YYYY-MM-DD). OMIT this key entirely if no deadline.",
     )
 
 
 class MergedExtractionOutput(BaseModel):
-    """Top-level JSON the merged correction+extraction call returns."""
+    """Top-level JSON the merged correction+extraction call returns.
 
-    domain_corrections: list[str] = Field(
-        default_factory=list,
-        description="Compact 'from→to' strings; one per unique correction applied",
-    )
-    speaker_resolutions: list[SpeakerResolution] = Field(
-        default_factory=list,
-        description="Resolved anonymous speaker labels (empty if none)",
-    )
+    Scratch fields (``domain_corrections``, ``speaker_resolutions``) were
+    dropped as part of plan A4 — domain correction and speaker resolution
+    still happen mentally, just no longer reported.
+    """
+
     tasks: list[ExtractedTask] = Field(
         default_factory=list, description="Extracted action items",
     )
+
+
+# ---------------------------------------------------------------------------
+# Measurement-only candidate variants.
+#
+# These are used by scripts/compare_candidate.py to test output-token
+# reductions under a real Gemini call. Production code paths always use
+# ``MergedExtractionOutput`` above — the variants below are wired in only
+# when ``set_response_schema_override`` is called explicitly from a script.
+# ---------------------------------------------------------------------------
+
+
+class ExtractedTaskNoSR(BaseModel):
+    """Same as ExtractedTask but without the diagnostic ``sr`` field."""
+
+    t: str = Field(description="Title: clear, actionable description (one sentence)")
+    a: str = Field(description="Assignee display string, e.g. 'Santiago, Jacob'")
+    ia: list[str] = Field(default_factory=list,
+        description="Internal assignees (Org Chart names)")
+    ea: list[str] = Field(default_factory=list,
+        description="External assignees (non-Kibo)")
+    ct: str = Field(description="Commitment type. One of: hard | conditional | soft | group")
+    p: str = Field(description="Priority. One of: High | Medium | Low")
+    dd: Optional[str] = Field(default=None,
+        description="Due date: ISO date (YYYY-MM-DD) or null")
+    c: str = Field(description="Confidence. One of: high | medium | low")
+
+
+class ExtractedTaskNoSRNoA(BaseModel):
+    """Drops both ``sr`` (diagnostic) and ``a`` (derivable from ia+ea)."""
+
+    t: str = Field(description="Title: clear, actionable description (one sentence)")
+    ia: list[str] = Field(default_factory=list,
+        description="Internal assignees (Org Chart names)")
+    ea: list[str] = Field(default_factory=list,
+        description="External assignees (non-Kibo)")
+    ct: str = Field(description="Commitment type. One of: hard | conditional | soft | group")
+    p: str = Field(description="Priority. One of: High | Medium | Low")
+    dd: Optional[str] = Field(default=None,
+        description="Due date: ISO date (YYYY-MM-DD) or null")
+    c: str = Field(description="Confidence. One of: high | medium | low")
+
+
+class MergedExtractionOutputNoSR(BaseModel):
+    """Variant: drop the per-task ``sr`` diagnostic field. Scratch fields kept."""
+
+    domain_corrections: list[str] = Field(default_factory=list)
+    speaker_resolutions: list[SpeakerResolution] = Field(default_factory=list)
+    tasks: list[ExtractedTaskNoSR] = Field(default_factory=list)
+
+
+class MergedExtractionOutputNoScratch(BaseModel):
+    """Variant: drop the per-call scratch fields. Tasks kept identical."""
+
+    tasks: list[ExtractedTask] = Field(default_factory=list)
+
+
+class MergedExtractionOutputCombined(BaseModel):
+    """Variant: drop ``sr`` + ``a`` + scratch fields. The lean prod candidate."""
+
+    tasks: list[ExtractedTaskNoSRNoA] = Field(default_factory=list)
+
+
+# Lookup used by scripts/compare_candidate.py to pick a variant by flag.
+CANDIDATE_SCHEMAS = {
+    "baseline":   MergedExtractionOutput,
+    "no-sr":      MergedExtractionOutputNoSR,
+    "no-scratch": MergedExtractionOutputNoScratch,
+    "combined":   MergedExtractionOutputCombined,
+}

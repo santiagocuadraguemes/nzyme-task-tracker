@@ -47,7 +47,9 @@
       "mcp__affinity__affinity_list_opportunities",
       "mcp__affinity__affinity_list_companies",
       "mcp__affinity__affinity_get_companies_in_swimlane",
-      "mcp__claude_ai_Notion__notion-create-database"
+      "mcp__claude_ai_Notion__notion-create-database",
+      "mcp__claude_ai_Notion__notion-duplicate-page",
+      "mcp__claude_ai_Notion__notion-move-pages"
     ]
   }
 }

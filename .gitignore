@@ -59,3 +59,15 @@ venv/
 # Git worktrees
 .worktrees/
 .claude/worktrees/
+
+# Per-meeting --save-run history dumps (transcript_pipeline CLI)
+runs/
+# Corpus-level shadow-diff / candidate / baseline dumps
+baseline.json
+shadow-diff.json
+cand-*.json
+
+# Local debug artifacts (raw Notion payloads, preview dumps, ad-hoc SQL scratch)
+_payload.json
+_sql/
+preview/

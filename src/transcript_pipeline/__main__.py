@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
+import time
+from datetime import datetime, timezone
 
 import logfire
 
@@ -14,6 +17,61 @@ from pathlib import Path
 
 from src.notion_client_wrapper import NotionClientWrapper
 from src.transcript_pipeline.fetch_transcript import fetch_transcript
+from src.utils.llm_logging import get_tracker, print_usage_summary, start_tracking
+
+
+def _usage_since(tracker, marker: int) -> dict:
+    """Sum input/cached/output token counts for records added since marker.
+
+    Mirror of the helper in scripts/shadow_diff_extraction.py — same shape
+    so the JSON written by ``--save-run`` is byte-compatible with the rest
+    of the measurement harness.
+    """
+    if tracker is None:
+        return {"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0}
+    new_records = tracker.records[marker:]
+    return {
+        "input_tokens": sum(r.prompt_tokens for r in new_records),
+        "cached_input_tokens": sum(r.cached_tokens for r in new_records),
+        "output_tokens": sum(r.completion_tokens for r in new_records),
+    }
+
+
+def _append_run_history(run_dir: Path, entry: dict) -> Path:
+    """Append a run entry to ``<run_dir>/<page_id>.json`` (history log).
+
+    One file per meeting. Each run is a new entry appended to the file's
+    list. Never deduped — the file grows over time so you can scroll back
+    and see how (e.g.) output_tokens evolved as you tweaked the prompt.
+    """
+    pid = entry["page_id"]
+    run_dir.mkdir(parents=True, exist_ok=True)
+    path = run_dir / f"{pid}.json"
+
+    existing: list[dict] = []
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(existing, list):
+                raise ValueError("not a list")
+        except Exception as e:
+            print(
+                f"Warning: {path} exists but isn't a valid run-list "
+                f"({e}); starting a fresh history.",
+                file=sys.stderr,
+            )
+            existing = []
+
+    existing.append(entry)
+    path.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def _count_entries(path: Path) -> int:
+    try:
+        return len(json.loads(path.read_text(encoding="utf-8")))
+    except Exception:
+        return 0
 
 
 def _create_client() -> NotionClientWrapper:
@@ -157,6 +215,15 @@ def main() -> None:
     parser.add_argument("--write", action="store_true", help="Write extracted tasks to Team Task Tracker (implies --extract)")
     parser.add_argument("--dry-run", action="store_true", help="Log tasks that would be written without creating them (requires --write)")
     parser.add_argument("--openai", action="store_true", help="Force OpenAI endpoint for correction + extraction")
+    parser.add_argument(
+        "--openrouter",
+        action="store_true",
+        help=(
+            "Diagnostic only (--extract). Route the merged-extract call through "
+            "OpenRouter (https://openrouter.ai). Requires OPENROUTER_API_KEY in "
+            ".env and a --model slug like 'deepseek/deepseek-chat-v3.1:free'."
+        ),
+    )
     parser.add_argument("--classifier-openai", action="store_true", help="Force OpenAI endpoint for classification (defaults to --openai)")
     parser.add_argument("--gcal", action="store_true", help="Test GCal attendee lookup only (no transcript fetch)")
     parser.add_argument(
@@ -167,7 +234,38 @@ def main() -> None:
             "Diagnostic only — production path is controlled by TRANSCRIPT_MERGED_EXTRACTION."
         ),
     )
+    parser.add_argument(
+        "--save-run",
+        action="store_true",
+        help=(
+            "After --extract, append a history entry (tasks + token counts + "
+            "raw payload + UTC timestamp + optional --run-note) to "
+            "<save-run-dir>/<page_id>.json. Re-runs of the same page append a "
+            "NEW entry to the same file so you can scroll back through how "
+            "output_tokens evolved as you tweaked the prompt or schema."
+        ),
+    )
+    parser.add_argument(
+        "--save-run-dir",
+        type=Path,
+        default=Path("runs"),
+        metavar="DIR",
+        help="Directory for --save-run history files (default: ./runs).",
+    )
+    parser.add_argument(
+        "--run-note",
+        type=str,
+        default=None,
+        metavar="TEXT",
+        help=(
+            "Free-text label saved alongside the run (e.g. 'baseline', "
+            "'dropped sr field', 'shortened prompt'). Helps you scan the "
+            "history file later."
+        ),
+    )
     args = parser.parse_args()
+
+    start_tracking()
 
     if args.gcal:
         _run_gcal_test(args)
@@ -299,12 +397,35 @@ def main() -> None:
 
         from src.transcript_pipeline.task_extractor import TaskExtractor
 
-        model = args.model or args.extraction_model or cfg.gemini_model
-        base_url = "https://api.openai.com/v1" if args.openai else cfg.gemini_base_url
-        api_key = cfg.openai_api_key if args.openai else (cfg.gemini_api_key or cfg.openai_api_key)
+        if args.openrouter:
+            if not cfg.openrouter_api_key:
+                print(
+                    "\nERROR: --openrouter requires OPENROUTER_API_KEY in .env.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            if not (args.model or args.extraction_model):
+                print(
+                    "\nERROR: --openrouter requires --model (e.g. "
+                    "'deepseek/deepseek-chat-v3.1:free'). The default Gemini "
+                    "model would not route correctly via OpenRouter.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            model = args.model or args.extraction_model
+            base_url = cfg.openrouter_base_url
+            api_key = cfg.openrouter_api_key
+        else:
+            model = args.model or args.extraction_model or cfg.gemini_model
+            base_url = "https://api.openai.com/v1" if args.openai else cfg.gemini_base_url
+            api_key = cfg.openai_api_key if args.openai else (cfg.gemini_api_key or cfg.openai_api_key)
 
         print(f"Merged-extracting tasks with {model} (single call)...", file=sys.stderr)
         extractor = TaskExtractor(api_key=api_key, model=model, base_url=base_url)
+
+        tracker = get_tracker()
+        marker = len(tracker.records) if tracker else 0
+        t0 = time.perf_counter()
         tasks = extractor.extract_from_raw(
             transcript_text,
             attendees,
@@ -315,6 +436,7 @@ def main() -> None:
             enriched_attendee_str=enriched_attendee_str,
             notes_text=notes_text,
         )
+        elapsed = time.perf_counter() - t0
 
         print()
         print(f"=== EXTRACTED TASKS ({len(tasks)}) ===")
@@ -338,6 +460,34 @@ def main() -> None:
                     print(f'     Context: "{context}"')
         else:
             print("  (no tasks found)")
+
+        if args.save_run:
+            entry = {
+                "run_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "run_note": args.run_note or "",
+                "model": model,
+                "page_id": args.page_id,
+                "meeting_title": metadata.get("title", ""),
+                "meeting_date": metadata.get("date", ""),
+                "transcript_chars": len(transcript_text or ""),
+                "merged": {
+                    "tasks": tasks,
+                    "elapsed_s": round(elapsed, 2),
+                    **_usage_since(tracker, marker),
+                    "raw_data": extractor._last_raw_data,
+                },
+                "error": None,
+            }
+            path = _append_run_history(args.save_run_dir, entry)
+            usage = entry["merged"]
+            print(
+                f"Saved run #{_count_entries(path)} → {path}  "
+                f"(out tokens: {usage['output_tokens']}, "
+                f"tasks: {len(tasks)}"
+                + (f", note: {args.run_note!r}" if args.run_note else "")
+                + ")",
+                file=sys.stderr,
+            )
         return
 
     # Run LLM correction
@@ -495,3 +645,5 @@ if __name__ == "__main__":
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(1)
+    finally:
+        print_usage_summary()

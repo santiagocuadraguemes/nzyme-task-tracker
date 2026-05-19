@@ -23,6 +23,17 @@ class SyncConfig(BaseModel):
         "https://generativelanguage.googleapis.com/v1beta/openai/",
         description="Gemini OpenAI-compatible base URL for heavy calls",
     )
+    # OpenRouter (experimental — diagnostic --openrouter flag on --extract).
+    # Lets us A/B the merged-extract call against any OpenRouter-hosted model
+    # (DeepSeek, Qwen, etc.) without changing the production routing.
+    openrouter_api_key: str | None = Field(
+        None,
+        description="OpenRouter API key — diagnostic only, enables --openrouter on transcript_pipeline.",
+    )
+    openrouter_base_url: str = Field(
+        "https://openrouter.ai/api/v1",
+        description="OpenRouter OpenAI-compatible base URL.",
+    )
     # Per-stage model overrides (manual CLI runs / experiments).
     # When set, take precedence over openai_model / gemini_model for that
     # stage. Provider is inferred from the model name prefix:
@@ -35,8 +46,8 @@ class SyncConfig(BaseModel):
     # single LLM call (TaskExtractor.extract_from_raw). When False (default),
     # runs the legacy 2-call flow.
     transcript_merged_extraction: bool = Field(
-        False,
-        description="If True, transcript path uses a single merged correction+extraction LLM call.",
+        True,
+        description="If True (default), transcript path uses a single merged correction+extraction LLM call. Set TRANSCRIPT_MERGED_EXTRACTION=false to roll back to the legacy 2-call flow.",
     )
     # CLI override for the per-member `Auto-extract Tasks` Org Chart flag.
     # When None, the registry value applies (default True). When True/False,
@@ -140,6 +151,22 @@ class SyncConfig(BaseModel):
             "src/fundraising/data/kibo_user_map.json"
         ),
     )
+    # Meeting Mirrors feature (opt-in via TOPIC_MIRROR_ENABLED).
+    # Clones tagged meetings (Meeting type / Detail / External Org) into
+    # topic-specific Notion DBs. Routes are defined in the Topic Mirror
+    # Routes DB so joiners/leavers/new topics don't require a redeploy.
+    topic_mirror_enabled: bool = Field(
+        False,
+        description="Enable cloning of tagged meetings into Topic Mirror DBs",
+    )
+    topic_mirror_routes_db_id: str | None = Field(
+        None,
+        description=(
+            "Notion DB ID for the Topic Mirror Routes DB. Each row maps a tag "
+            "(Match Property + Match Value) → a target DB to mirror into. "
+            "Required when topic_mirror_enabled is True."
+        ),
+    )
 
 
 def load_config() -> SyncConfig:
@@ -157,10 +184,14 @@ def load_config() -> SyncConfig:
             "GEMINI_BASE_URL",
             "https://generativelanguage.googleapis.com/v1beta/openai/",
         ),
+        openrouter_api_key=os.getenv("OPENROUTER_API_KEY") or None,
+        openrouter_base_url=os.getenv(
+            "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1",
+        ),
         correction_model=os.getenv("CORRECTION_MODEL") or None,
         extraction_model=os.getenv("EXTRACTION_MODEL") or None,
         classification_model=os.getenv("CLASSIFICATION_MODEL") or None,
-        transcript_merged_extraction=os.getenv("TRANSCRIPT_MERGED_EXTRACTION", "false").lower()
+        transcript_merged_extraction=os.getenv("TRANSCRIPT_MERGED_EXTRACTION", "true").lower()
         in ("true", "1", "yes"),
         meeting_notes_db_id=os.getenv("MEETING_NOTES_DB_ID") or None,
         team_tracker_db_id=os.environ["TEAM_TRACKER_DB_ID"],
@@ -195,4 +226,7 @@ def load_config() -> SyncConfig:
         affinity_api_key=os.getenv("AFFINITY_API_KEY"),
         affinity_lp_funnel_list_id=int(os.getenv("AFFINITY_LP_FUNNEL_LIST_ID", "168609")),
         kibo_user_map_path=os.getenv("KIBO_USER_MAP_PATH"),
+        topic_mirror_enabled=os.getenv("TOPIC_MIRROR_ENABLED", "false").lower()
+        in ("true", "1", "yes"),
+        topic_mirror_routes_db_id=os.getenv("TOPIC_MIRROR_ROUTES_DB_ID") or None,
     )

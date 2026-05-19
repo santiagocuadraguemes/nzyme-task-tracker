@@ -9,6 +9,9 @@
 | Playbook page | `33083e67-e2e7-8108-bb08-eaeba8b65678` | "Nzyme Playbook - Task Extraction Rules" under Nzyme Home |
 | Meeting template page | `32f83e67-e2e7-8086-9863-e276b70cc5a2` | Default "New page" template in Meeting Notes DB — edit in Notion to change injected content |
 | Literal-notes extraction prompt | `35183e67-e2e7-813d-ad55-f011624d2e29` | "📝 Literal Notes Extraction Prompt" under Nzyme Prompts. Used when an Org Chart row has `Auto-extract Tasks = false`. |
+| Meeting Mirrors parent page | `36483e67e2e780a0b480ccac6a07ff2b` | "🗂️ Meeting Mirrors" — container page for every topic-mirror DB. |
+| Topic Mirror Routes DB | `daa0ef7ac48c40bea82163ebe84ade6b` | Routing config for the Meeting Mirrors feature. Editing rows takes effect on the next cron tick. |
+| Meeting Mirrors → AI & Tech | `dc0e537633cb4e8c9c2b97210878d7d2` | First topic mirror DB. Receives pages tagged `Detail = "AI & Tech"`. |
 
 Workspace: `kiboventures.notion.so`
 
@@ -130,6 +133,68 @@ redeploy needed in either direction.
 --auto-extract-tasks` and `--no-auto-extract-tasks` force the path for
 every page in the run, ignoring the per-row Org Chart flag. Useful for
 debugging without touching Notion.
+
+## Topic Mirror Routes DB
+
+`TOPIC_MIRROR_ROUTES_DB_ID` (`daa0ef7ac48c40bea82163ebe84ade6b`). Routes are
+config-as-data — each active row maps a meeting tag to a target DB. The
+pipeline reloads them once per cron tick.
+
+| Property | Type | Notes |
+|----------|------|-------|
+| Route | title | Human-readable label (e.g. `Detail = AI & Tech`). Only used in logs. |
+| Match Property | select | One of: `Meeting type`, `Detail`, `External Org`. Rows with any other value are skipped at load. |
+| Match Value | rich_text | Exact tag value to match (e.g. `AI & Tech`). Matching is case-sensitive — keep this in sync with the Meeting Notes DB select/multi-select option name. |
+| Target DB | url | Notion DB URL. The pipeline extracts the 32-char hex id from the last URL segment, stripping any `?v=…` view suffix. |
+| Active | checkbox | `false` (or unset) hides the route from the pipeline without losing the row. |
+| Notes | rich_text | Optional free-form description. |
+
+**Add a new topic mirror in two steps:**
+1. Create the destination DB under the Meeting Mirrors parent page with the agreed property convention (Meeting, Date, Meeting type, Detail, External Org, AI Summary, Tasks, Files & media, Contributors, Primary Source URL). Anything missing on the destination is silently dropped at clone time.
+2. Add a row to Topic Mirror Routes: pick `Match Property`, type the `Match Value`, paste the new DB's URL, check `Active`.
+
+## Meeting Mirror DBs
+
+Each topic mirror DB shares the same property convention. Pipeline-control
+columns (`Processed`, `Processing`, `Template Injected`, `Task - Relation`,
+`LP Emails`) intentionally don't exist here — they're silently dropped by
+Notion at clone time because they're absent from the destination schema.
+
+| Property | Type | Notes |
+|----------|------|-------|
+| Meeting | title | Re-passed at clone time by the writer (the `template_id` mechanism does NOT carry over the source's DB property values — only the body). |
+| Date | date | Re-passed at clone time (template_id otherwise resets it). |
+| Meeting type | select | Explicitly copied from the source by the writer. Define the same select options as the source Meeting Notes DB to keep names valid. |
+| Detail | multi_select | Explicitly copied. Same options as the source. |
+| External Org | select | Explicitly copied. Same options as the source. |
+| AI Summary | rich_text | Explicitly copied at clone time; Notion AI may later regenerate it from the cloned `meeting_notes` block. |
+| Files & media | files | Carried over via the body clone. |
+| Owner | people | Multi-person. First contributor is the meeting page's `created_by` user. Subsequent contributors are appended by the merge path; dedup key is the Notion user UUID, not display name. |
+| Governance: Edit & View Access | people | Explicitly copied from the source's `Governance: Edit & View Access` people property so the mirror inherits the same access list. |
+| Primary Source URL | url | Backlink to the source page the mirror was cloned from. |
+
+`Tasks` (rich_text) is intentionally not part of this convention. The action
+items already live in the Team Task Tracker, linked from the source page
+via `Task - Relation`. Reintroducing it on a topic mirror DB is harmless —
+Notion would carry through the AI-populated value — but the writer no
+longer re-passes it explicitly.
+
+**Notes-merge layout** (Option B). Inside the cloned `meeting_notes` block's
+`notes_block_id`:
+```
+## Action Items   (from template; unchanged)
+[the first contributor's action items, if any]
+## Notes          (from template; unchanged)
+[the first contributor's notes, unlabeled]
+### <Contributor 2>'s Notes   ← appended when contributor 2's page is processed
+[contributor 2's notes content]
+### <Contributor 3>'s Notes   ← appended when contributor 3's page is processed
+[contributor 3's notes content]
+```
+
+The first contributor's notes stay unlabeled because Notion's
+`blocks.children.append` has no atomic prepend — retroactive labeling
+would require delete+rebuild on AI-cloned content.
 
 ## Deal Workplans DB (Investment Team)
 

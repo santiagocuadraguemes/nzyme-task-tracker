@@ -12,6 +12,7 @@ from src.config import SyncConfig, load_config
 from src.utils.logger import setup_logging, get_logger
 from src.notion_client_wrapper import NotionClientWrapper
 from src.pipeline import run_inject_templates, run_sync, _archive_done_tasks
+from src.utils.llm_logging import print_usage_summary, start_tracking
 
 logger = get_logger(__name__)
 
@@ -153,6 +154,7 @@ def main() -> None:
         )
 
     setup_logging(config.log_level)
+    start_tracking()
 
     logfire.configure(token=config.logfire_token, service_name="nzyme")
     logfire.instrument_openai()
@@ -208,4 +210,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        print_usage_summary()

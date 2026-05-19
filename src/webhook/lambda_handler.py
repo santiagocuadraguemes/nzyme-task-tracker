@@ -13,6 +13,8 @@ from src.meeting_db_registry import load_registry
 from src.notion_client_wrapper import NotionClientWrapper
 from src.pipeline import run_sync_for_page, _archive_done_tasks
 from src.sources.single_source import SingleSource
+from src.supabase_sync import run_full as supabase_run_full
+from src.supabase_sync import run_incremental as supabase_run_incremental
 from src.utils.logger import setup_logging
 from src.webhook.handler import handle_automation_webhook
 
@@ -51,8 +53,13 @@ def handler(event, context):
     """
     # CloudWatch Events cron — silent unless there's actual work
     if event.get("source") == "aws.events":
-        if event.get("job") == "weekly_archive":
+        job = event.get("job")
+        if job == "weekly_archive":
             return _handle_weekly_archive(event, context)
+        if job == "supabase_sync":
+            return _handle_supabase_sync(event, context)
+        if job == "supabase_sync_full":
+            return _handle_supabase_sync_full(event, context)
         return _handle_extraction(event, context)
 
     # API Gateway (has requestContext or pathParameters)
@@ -146,6 +153,43 @@ def _handle_extraction(event, context):
 
     logger.info("cron tick complete: processed=%d", processed)
     return {"statusCode": 200, "body": json.dumps({"processed": processed})}
+
+
+def _handle_supabase_sync(event, context):
+    """5-min cron: incremental Notion → Supabase sync.
+
+    For each Meeting Notes DB, pull pages whose `last_edited_time` is past
+    the per-DB checkpoint stored in Supabase and upsert them. Catches new
+    meetings, async transcript completion, and any later edits.
+    """
+    config, client = _init()
+    try:
+        upserted = supabase_run_incremental(config, client)
+        if upserted:
+            logger.info("supabase sync: upserted=%d", upserted)
+        else:
+            logger.debug("supabase sync: no changes")
+        return {"statusCode": 200, "body": json.dumps({"upserted": upserted})}
+    except Exception:
+        logger.exception("Supabase incremental sync failed")
+        return {"statusCode": 500, "body": json.dumps({"error": "sync failed"})}
+
+
+def _handle_supabase_sync_full(event, context):
+    """Weekly Sunday sweep: re-sync every page edited in the last 14 days.
+
+    Safety net for the 5-min incremental — catches edits that slipped past
+    via Lambda outages, transient failures, or any case where Notion
+    advances `last_edited_time` outside the incremental's filter window.
+    """
+    config, client = _init()
+    try:
+        upserted = supabase_run_full(config, client, lookback_days=14)
+        logger.info("supabase weekly sweep: upserted=%d", upserted)
+        return {"statusCode": 200, "body": json.dumps({"upserted": upserted})}
+    except Exception:
+        logger.exception("Supabase weekly sweep failed")
+        return {"statusCode": 500, "body": json.dumps({"error": "sweep failed"})}
 
 
 def _handle_weekly_archive(event, context):
