@@ -70,6 +70,9 @@ add_param "AffinityLpFunnelListId"         "${AFFINITY_LP_FUNNEL_LIST_ID:-}"
 add_param "LiteralNotesExtractionPromptPageId" "${LITERAL_NOTES_EXTRACTION_PROMPT_PAGE_ID:-}"
 add_param "SupabaseUrl"                    "${SUPABASE_URL:-}"
 add_param "SupabaseKey"                    "${SUPABASE_KEY:-}"
+add_param "TopicMirrorEnabled"             "${TOPIC_MIRROR_ENABLED:-}"
+add_param "TopicMirrorRoutesDbId"          "${TOPIC_MIRROR_ROUTES_DB_ID:-}"
+add_param "TranscriptMergedExtraction"     "${TRANSCRIPT_MERGED_EXTRACTION:-}"
 
 echo "=== Building SAM application ==="
 sam build
