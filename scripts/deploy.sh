@@ -71,7 +71,9 @@ add_param "LiteralNotesExtractionPromptPageId" "${LITERAL_NOTES_EXTRACTION_PROMP
 add_param "SupabaseUrl"                    "${SUPABASE_URL:-}"
 add_param "SupabaseKey"                    "${SUPABASE_KEY:-}"
 add_param "TopicMirrorEnabled"             "${TOPIC_MIRROR_ENABLED:-}"
-add_param "TopicMirrorRoutesDbId"          "${TOPIC_MIRROR_ROUTES_DB_ID:-}"
+add_param "MeetingRulesDbId"               "${MEETING_RULES_DB_ID:-${TOPIC_MIRROR_ROUTES_DB_ID:-}}"
+add_param "HierarchyDbId"                  "${HIERARCHY_DB_ID:-}"
+add_param "DetailOptionsDbId"              "${DETAIL_OPTIONS_DB_ID:-}"
 add_param "TranscriptMergedExtraction"     "${TRANSCRIPT_MERGED_EXTRACTION:-}"
 
 echo "=== Building SAM application ==="

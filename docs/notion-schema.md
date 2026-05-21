@@ -107,6 +107,35 @@ Category (root level, e.g. "Sourcing / Investing / Divesting")
 
 The marker is the single source of truth for "this row is part of the architecture, not a real task." It also cleanly splits the two consumers of tracker state: the **classifier (LLM)** sees architecture rows for parent assignment, and the **deduper** (`TeamTaskTrackerWriter._load_existing_titles` + `SemanticDedup`) sees only task rows (`Priority != [DETAILS INSIDE]`) for skip-or-create. Two scopes, no overlap. To add a new architecture row in Notion, set `Priority = [DETAILS INSIDE]` — no code change needed.
 
+## Meeting Notes & Task Tracker Hierarchy DB
+
+Source of truth for the firm's work-block taxonomy as edited by humans, but the **authoritative canonical** lives in Supabase (`public.hierarchy_rows` — written daily by `canonical_mirror_sync`). Lives under **Nzyme Settings**. Tier 0 rows propagate to the `Work area` select on every member Meeting Notes DB via `macro_block_sync`, which reads the Supabase canonical and pairs each `(hierarchy_page_id, member_db_id)` to a Notion `Work area` option id via `public.work_area_option_mappings` — so renames are id-preserving PATCHes (no orphaned options). Notion's API forbids commas in select option names, so the option name written into each member DB goes through `_sanitize_option_name` (commas → spaces, whitespace collapsed); the Hierarchy DB and Supabase canonical keep commas verbatim.
+
+| Property | Type | Values / Notes |
+|----------|------|----------------|
+| Name | title | Display name (e.g. `Investor Relations & Fundraising`, `Marketing`, `Citadel`) |
+| Tier | select | `0. Macro Work Block` / `1. Project` / `2. Workstream` |
+| Active | checkbox | `true` = synced live; `false` = downstream targets renamed to `(archived) X` (never deleted) |
+| Parent item | relation | Self-relation to Hierarchy DB (parent row) |
+| Sub-item | relation | Self-relation to Hierarchy DB (children, inverse of Parent item) |
+| Tracker Node | relation | Human-readable cache of the matching `[DETAILS INSIDE]` row in the Team Task Tracker. **Authoritative mapping lives in Supabase `public.hierarchy_rows.tracker_node_page_id`** — `tracker_applier_sync` writes there first and updates this Notion column on a best-effort basis. Don't clear by hand; the next sync run heals divergence. |
+| Notes | text | One-sentence description (read by the classifier LLM to disambiguate similarly-named nodes) |
+
+The canonical mirror of this DB lives in Supabase (`public.hierarchy_rows` in the Neo project). The daily `canonical_mirror_sync` writes Notion's current state to that table and surfaces structured `created` / `edited` / `deleted` / `reactivated` events in `public.hierarchy_sync_runs` for queryable history. The companion `tracker_applier_sync` then reads that canonical to keep the Team Task Tracker `[DETAILS INSIDE]` rows aligned (rename / soft-archive / create + back-fill — never delete), and `macro_block_sync` reads it to keep each member DB's `Work area` select aligned (id-preserving renames via `public.work_area_option_mappings`).
+
+## Detail Options Settings DB
+
+Source of truth for the `Detail` multi-select on every member Meeting Notes DB. Lives in the **Nzyme Settings** page alongside the Hierarchy DB. Edited by operators in Notion; canonical mirrored to Supabase by `detail_canonical_mirror_sync` and propagated by `detail_applier_sync` (id-preserving renames via `public.detail_option_mappings`). Color is canonical-driven — recoloring a Settings row recolors that option on every member DB on the next tick.
+
+| Property | Type | Values / Notes |
+|----------|------|----------------|
+| Name | title | Display name (e.g. `Legal DD`, `Investor Relations`, `AI & Tech`) |
+| Color | select | One of Notion's 10 standard colors (`default`, `gray`, `brown`, `orange`, `yellow`, `green`, `blue`, `purple`, `pink`, `red`). Convention: matches the parent Work area's color. |
+| Parent Work area | relation | Hierarchy DB Tier 0 row this Detail belongs to. Documents intent; not yet used by the applier to drive color (operator picks color explicitly in the Color column). |
+| Active | checkbox | `true` = synced live; `false` = member-DB option renamed to `(archived) <sanitized name>` (never deleted). |
+
+Like the Hierarchy DB, `Detail Options` rows are mirrored to Supabase by `detail_canonical_mirror_sync` (table `public.detail_rows`, audit trail `public.detail_sync_runs`). The Notion side keeps commas verbatim; the Notion-option-side comma stripping happens in the applier via the same `_sanitize_option_name` rule as Work area.
+
 ## Org Chart DB
 
 Source of truth for which Meeting Notes DBs the pipeline polls and how each

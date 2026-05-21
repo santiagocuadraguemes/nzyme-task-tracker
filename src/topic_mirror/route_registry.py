@@ -1,15 +1,19 @@
-"""Topic Mirror Routes registry.
+"""Meeting Rules registry (was: Topic Mirror Routes).
 
-Reads the Topic Mirror Routes Notion DB once per pipeline tick and exposes:
+Reads the Meeting Rules Notion DB once per pipeline tick and exposes:
 
-  - ``Route`` — one routing rule (Match Property, Match Value, target DB).
+  - ``Route`` — one rule (Match Property, Match Value, Action, optional target DB).
   - ``load_routes`` — fetch every active row from the DB.
   - ``match_routes`` — given a meeting page's properties, return the
     subset of routes whose Match Property/Match Value the page satisfies.
 
 A single page can match several routes (e.g. ``Detail=["AI & Tech",
-"Legal DD"]`` plus ``External Org="White Vega"``); the orchestrator
-runs the mirror op for each match independently.
+"Legal DD"]`` plus ``Work area="LPs & Fundraising"``). Each consumer
+filters the matched list by ``action`` and runs its own operation:
+
+  - ``Mirror to DB`` (default) → consumed by ``src.topic_mirror``.
+  - ``Fire Affinity LP Funnel`` → consumed by the Fundraising branch in
+    ``src.pipeline``.
 """
 from __future__ import annotations
 
@@ -22,12 +26,20 @@ from src.notion_client_wrapper import NotionClientWrapper
 
 logger = logging.getLogger(__name__)
 
-# Match Property values defined in the Topic Mirror Routes DB schema.
-MATCH_MEETING_TYPE = "Meeting type"
+# Match Property values defined in the Meeting Rules DB schema.
+MATCH_WORK_AREA = "Work area"
 MATCH_DETAIL = "Detail"
 MATCH_EXTERNAL_ORG = "External Org"
 
-_VALID_MATCH_PROPERTIES = frozenset({MATCH_MEETING_TYPE, MATCH_DETAIL, MATCH_EXTERNAL_ORG})
+_VALID_MATCH_PROPERTIES = frozenset({MATCH_WORK_AREA, MATCH_DETAIL, MATCH_EXTERNAL_ORG})
+
+# Action values defined in the Meeting Rules DB schema. Rows with an unset
+# Action cell default to ACTION_MIRROR_TO_DB (back-compat for rows that
+# pre-date the schema change).
+ACTION_MIRROR_TO_DB = "Mirror to DB"
+ACTION_AFFINITY_LP_FUNNEL = "Fire Affinity LP Funnel"
+
+_VALID_ACTIONS = frozenset({ACTION_MIRROR_TO_DB, ACTION_AFFINITY_LP_FUNNEL})
 
 # A Notion page/DB ID is 32 hex characters; URLs may have dashes or trailing
 # query strings. Pull the last 32-char hex run from the URL.
@@ -36,10 +48,11 @@ _NOTION_ID_PATTERN = re.compile(r"([0-9a-fA-F]{32})")
 
 @dataclass(frozen=True)
 class Route:
-    match_property: str   # "Meeting type" | "Detail" | "External Org"
+    match_property: str   # "Work area" | "Detail" | "External Org"
     match_value: str      # e.g. "AI & Tech"
-    target_db_id: str     # 32-char hex DB id (extracted from the Target DB URL)
+    target_db_id: str     # 32-char hex DB id; "" when action != Mirror to DB
     label: str            # human-readable label for logs (e.g. "Detail:AI & Tech")
+    action: str = ACTION_MIRROR_TO_DB   # what consumer runs this rule
 
 
 def _extract_db_id_from_url(url: str) -> str | None:
@@ -72,11 +85,14 @@ def _read_rich_text(prop: dict[str, Any]) -> str:
 
 
 def load_routes(client: NotionClientWrapper, db_id: str) -> list[Route]:
-    """Read every active row from the Topic Mirror Routes DB.
+    """Read every active row from the Meeting Rules DB.
 
-    Skips rows where ``Active`` is unchecked, Match Property is unknown, or
-    Target DB URL doesn't yield a parseable Notion id. Logs (at INFO) the
-    skip reason so misconfigured rows surface in CloudWatch.
+    Skips rows where ``Active`` is unchecked, Match Property is unknown,
+    Match Value is empty, Action is unknown, or — for ``Mirror to DB``
+    actions specifically — the Target DB URL doesn't parse. Other actions
+    don't need a Target DB; the cell is ignored.
+
+    Logs the skip reason so misconfigured rows surface in CloudWatch.
     """
     response = client.query_database(
         database_id=db_id,
@@ -90,7 +106,7 @@ def load_routes(client: NotionClientWrapper, db_id: str) -> list[Route]:
         match_prop_name = match_prop_sel.get("name", "")
         if match_prop_name not in _VALID_MATCH_PROPERTIES:
             logger.info(
-                "Routes DB row %s skipped: Match Property %r not in %s",
+                "Meeting Rules row %s skipped: Match Property %r not in %s",
                 page.get("id", "?")[:8], match_prop_name, sorted(_VALID_MATCH_PROPERTIES),
             )
             continue
@@ -98,17 +114,29 @@ def load_routes(client: NotionClientWrapper, db_id: str) -> list[Route]:
         match_value = _read_rich_text(props.get("Match Value", {}))
         if not match_value:
             logger.info(
-                "Routes DB row %s skipped: Match Value is empty",
+                "Meeting Rules row %s skipped: Match Value is empty",
                 page.get("id", "?")[:8],
             )
             continue
 
+        # Action defaults to Mirror to DB when the cell is empty — back-compat
+        # for rows that pre-date the `Action` column.
+        action_sel = props.get("Action", {}).get("select") or {}
+        action = action_sel.get("name", "") or ACTION_MIRROR_TO_DB
+        if action not in _VALID_ACTIONS:
+            logger.info(
+                "Meeting Rules row %s skipped: Action %r not in %s",
+                page.get("id", "?")[:8], action, sorted(_VALID_ACTIONS),
+            )
+            continue
+
         target_url = (props.get("Target DB", {}).get("url") or "").strip()
-        target_db_id = _extract_db_id_from_url(target_url)
-        if not target_db_id:
+        target_db_id = _extract_db_id_from_url(target_url) or ""
+        if action == ACTION_MIRROR_TO_DB and not target_db_id:
             logger.warning(
-                "Routes DB row %s skipped: Target DB URL %r is not a parseable Notion id",
-                page.get("id", "?")[:8], target_url,
+                "Meeting Rules row %s skipped: Action='%s' needs a parseable "
+                "Target DB URL (got %r)",
+                page.get("id", "?")[:8], action, target_url,
             )
             continue
 
@@ -122,10 +150,11 @@ def load_routes(client: NotionClientWrapper, db_id: str) -> list[Route]:
                 match_value=match_value,
                 target_db_id=target_db_id,
                 label=label,
+                action=action,
             )
         )
 
-    logger.debug("Loaded %d active topic mirror route(s)", len(routes))
+    logger.debug("Loaded %d active meeting rule(s)", len(routes))
     return routes
 
 
@@ -163,9 +192,11 @@ def match_routes(routes: list[Route], page_properties: dict[str, Any]) -> list[R
 
 
 __all__ = [
+    "ACTION_AFFINITY_LP_FUNNEL",
+    "ACTION_MIRROR_TO_DB",
     "MATCH_DETAIL",
     "MATCH_EXTERNAL_ORG",
-    "MATCH_MEETING_TYPE",
+    "MATCH_WORK_AREA",
     "Route",
     "load_routes",
     "match_routes",

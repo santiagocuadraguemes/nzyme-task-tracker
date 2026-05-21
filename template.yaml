@@ -42,7 +42,13 @@ Globals:
         AFFINITY_API_KEY: !Ref AffinityApiKey
         AFFINITY_LP_FUNNEL_LIST_ID: !Ref AffinityLpFunnelListId
         TOPIC_MIRROR_ENABLED: !Ref TopicMirrorEnabled
-        TOPIC_MIRROR_ROUTES_DB_ID: !Ref TopicMirrorRoutesDbId
+        # Both env vars resolve to the same DB id for one deploy cycle.
+        # MEETING_RULES_DB_ID is the new name; TOPIC_MIRROR_ROUTES_DB_ID is
+        # kept for back-compat with .env files until the next deploy.
+        MEETING_RULES_DB_ID: !Ref MeetingRulesDbId
+        TOPIC_MIRROR_ROUTES_DB_ID: !Ref MeetingRulesDbId
+        HIERARCHY_DB_ID: !Ref HierarchyDbId
+        DETAIL_OPTIONS_DB_ID: !Ref DetailOptionsDbId
         SUPABASE_URL: !Ref SupabaseUrl
         SUPABASE_KEY: !Ref SupabaseKey
 
@@ -168,10 +174,30 @@ Parameters:
     Type: String
     Default: 'false'
     Description: Enable cloning of tagged meetings into Meeting Mirrors topic DBs.
-  TopicMirrorRoutesDbId:
+  MeetingRulesDbId:
     Type: String
     Default: ''
-    Description: Notion DB ID for the Topic Mirror Routes DB (Match Property / Match Value / Target DB / Active). Required when TopicMirrorEnabled = true.
+    Description: |
+      Notion DB ID for the Meeting Rules registry (was: Topic Mirror Routes).
+      Each row maps a tag (Match Property + Match Value) to an Action:
+      'Mirror to DB' (clone meeting into target DB) or 'Fire Affinity LP Funnel'
+      (drive Fundraising branch). Required when TopicMirrorEnabled = true or
+      FundraisingBranchEnabled = true.
+  HierarchyDbId:
+    Type: String
+    Default: ''
+    Description: |
+      Notion DB ID for the 'Meeting Notes & Task Tracker Hierarchy' database.
+      Source of truth for Tier 0 Macro Work Blocks. Required when the daily
+      Hierarchy sync cron is enabled.
+  DetailOptionsDbId:
+    Type: String
+    Default: ''
+    Description: |
+      Notion DB ID for the 'Detail Options' Settings DB. Source of truth for
+      member-DB `Detail` multi-select options. Empty disables the
+      detail_canonical_mirror_sync + detail_applier_sync sub-syncs (they skip
+      with a benign warning).
   SupabaseUrl:
     Type: String
     Default: ''
@@ -221,7 +247,7 @@ Resources:
         ScheduledExtraction:
           Type: Schedule
           Properties:
-            Schedule: rate(1 minute)
+            Schedule: rate(5 minutes)
             Description: Check for idle meeting pages and run AI extraction
             Enabled: true
         WeeklyArchive:
@@ -245,6 +271,17 @@ Resources:
             Description: Sunday safety-net — re-sync every meeting page edited in the last 14 days, regardless of checkpoint. Sunday 07:00 UTC.
             Enabled: true
             Input: '{"source": "aws.events", "job": "supabase_sync_full"}'
+        HierarchySync:
+          Type: Schedule
+          Properties:
+            Schedule: cron(0 5 * * ? *)
+            Description: >-
+              Sync Hierarchy DB → downstream Notion state (Tier 0 → member DB
+              Work area options, etc.). Daily 05:00 UTC (= 07:00 Madrid CEST,
+              06:00 Madrid CET — DST drift accepted; bump to cron(0 6 ...) in
+              winter if 06:00 local is too early).
+            Enabled: true
+            Input: '{"source": "aws.events", "job": "hierarchy_sync"}'
 
   HttpApi:
     Type: AWS::Serverless::HttpApi

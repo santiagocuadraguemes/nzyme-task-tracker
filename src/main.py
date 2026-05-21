@@ -43,6 +43,22 @@ def parse_args() -> argparse.Namespace:
         help="Run the Done-task archive sweep once (mirrors the weekly Sunday Lambda job).",
     )
     parser.add_argument(
+        "--sync-hierarchy",
+        action="store_true",
+        help="Run the Hierarchy DB → downstream Notion state sync once "
+             "(mirrors the daily 07:00 Madrid Lambda job).",
+    )
+    parser.add_argument(
+        "--sub-sync",
+        metavar="NAME",
+        action="append",
+        default=None,
+        help="Restrict --sync-hierarchy to one or more named sub-syncs "
+             "(e.g. canonical_mirror_sync, macro_block_sync). Repeat the "
+             "flag to allow multiple. Defaults to running every registered "
+             "sub-sync.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         default=None,
@@ -179,6 +195,27 @@ def main() -> None:
             logger.info("Archive sweep complete: archived=%d", archived)
         except Exception:
             logger.exception("Archive sweep failed")
+            sys.exit(1)
+        return
+
+    if args.sync_hierarchy:
+        only = list(args.sub_sync) if args.sub_sync else None
+        logger.info(
+            "Starting hierarchy sync (dry_run=%s, only=%s)",
+            config.dry_run, only or "all",
+        )
+        try:
+            from src import hierarchy
+            reports = hierarchy.run_all(client, config, only=only)
+            total_errors = sum(r.errors for r in reports)
+            logger.info(
+                "Hierarchy sync complete: sub_syncs=%d errors=%d",
+                len(reports), total_errors,
+            )
+            if total_errors:
+                sys.exit(1)
+        except Exception:
+            logger.exception("Hierarchy sync failed")
             sys.exit(1)
         return
 

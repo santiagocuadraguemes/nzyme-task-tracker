@@ -152,19 +152,40 @@ class SyncConfig(BaseModel):
         ),
     )
     # Meeting Mirrors feature (opt-in via TOPIC_MIRROR_ENABLED).
-    # Clones tagged meetings (Meeting type / Detail / External Org) into
-    # topic-specific Notion DBs. Routes are defined in the Topic Mirror
-    # Routes DB so joiners/leavers/new topics don't require a redeploy.
+    # Clones tagged meetings (Work area / Detail / External Org) into
+    # topic-specific Notion DBs. Routing rules live in the Meeting Rules
+    # DB so joiners/leavers/new topics don't require a redeploy.
     topic_mirror_enabled: bool = Field(
         False,
         description="Enable cloning of tagged meetings into Topic Mirror DBs",
     )
-    topic_mirror_routes_db_id: str | None = Field(
+    meeting_rules_db_id: str | None = Field(
         None,
         description=(
-            "Notion DB ID for the Topic Mirror Routes DB. Each row maps a tag "
-            "(Match Property + Match Value) → a target DB to mirror into. "
-            "Required when topic_mirror_enabled is True."
+            "Notion DB ID for the Meeting Rules registry (was: Topic Mirror "
+            "Routes). Each row maps a tag (Match Property + Match Value) to "
+            "an Action: 'Mirror to DB' (clone the meeting into a target DB) "
+            "or 'Fire Affinity LP Funnel' (drive the Fundraising branch). "
+            "Required when topic_mirror_enabled is True or "
+            "fundraising_branch_enabled is True."
+        ),
+    )
+    # Hierarchy DB (source of truth for work-area structure). Drives the
+    # daily Hierarchy sync (Tier 0 → member DB `Work area` options).
+    hierarchy_db_id: str | None = Field(
+        None,
+        description=(
+            "Notion DB ID for the 'Meeting Notes & Task Tracker Hierarchy' "
+            "database. Source of truth for Tier 0 Macro Work Blocks (sync'd "
+            "into every member Meeting Notes DB's `Work area` select)."
+        ),
+    )
+    detail_options_db_id: str | None = Field(
+        None,
+        description=(
+            "Notion DB ID for the 'Detail Options' Settings DB. Source of "
+            "truth for member-DB `Detail` multi-select options (sync'd by "
+            "detail_canonical_mirror_sync → detail_rows → detail_applier_sync)."
         ),
     )
 
@@ -228,5 +249,14 @@ def load_config() -> SyncConfig:
         kibo_user_map_path=os.getenv("KIBO_USER_MAP_PATH"),
         topic_mirror_enabled=os.getenv("TOPIC_MIRROR_ENABLED", "false").lower()
         in ("true", "1", "yes"),
-        topic_mirror_routes_db_id=os.getenv("TOPIC_MIRROR_ROUTES_DB_ID") or None,
+        # Prefer the new env var; fall back to the old name for one deploy
+        # cycle. Drop TOPIC_MIRROR_ROUTES_DB_ID once Lambda + .env are
+        # both updated.
+        meeting_rules_db_id=(
+            os.getenv("MEETING_RULES_DB_ID")
+            or os.getenv("TOPIC_MIRROR_ROUTES_DB_ID")
+            or None
+        ),
+        hierarchy_db_id=os.getenv("HIERARCHY_DB_ID") or None,
+        detail_options_db_id=os.getenv("DETAIL_OPTIONS_DB_ID") or None,
     )

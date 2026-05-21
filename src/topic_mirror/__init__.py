@@ -62,26 +62,33 @@ def mirror_to_topic_dbs(
     if not config.topic_mirror_enabled:
         return MirrorOutcome(status=MirrorStatus.DISABLED, detail="topic_mirror_enabled=False")
 
-    if not config.topic_mirror_routes_db_id:
+    if not config.meeting_rules_db_id:
         return MirrorOutcome(
             status=MirrorStatus.DISABLED,
-            detail="TOPIC_MIRROR_ROUTES_DB_ID not configured",
+            detail="MEETING_RULES_DB_ID not configured",
         )
 
     try:
-        all_routes = load_routes(client, config.topic_mirror_routes_db_id)
+        all_routes = load_routes(client, config.meeting_rules_db_id)
     except Exception as e:  # noqa: BLE001
-        logger.exception("Failed to load topic mirror routes")
+        logger.exception("Failed to load meeting rules")
         return MirrorOutcome(
             status=MirrorStatus.FAILED,
-            detail=f"route registry load failed: {type(e).__name__}: {e}",
+            detail=f"meeting rules load failed: {type(e).__name__}: {e}",
         )
 
-    matched = match_routes(all_routes, source_page.get("properties", {}))
+    # Only Mirror-to-DB rules are this consumer's responsibility. Other
+    # actions (e.g. ACTION_AFFINITY_LP_FUNNEL) belong to their own consumer.
+    from src.topic_mirror.route_registry import ACTION_MIRROR_TO_DB
+    mirror_routes = [r for r in all_routes if r.action == ACTION_MIRROR_TO_DB]
+    matched = match_routes(mirror_routes, source_page.get("properties", {}))
     if not matched:
         return MirrorOutcome(
             status=MirrorStatus.NO_MATCH,
-            detail=f"page tags matched 0 of {len(all_routes)} active route(s)",
+            detail=(
+                f"page tags matched 0 of {len(mirror_routes)} active "
+                f"Mirror-to-DB rule(s)"
+            ),
         )
 
     title = metadata.get("title", "")

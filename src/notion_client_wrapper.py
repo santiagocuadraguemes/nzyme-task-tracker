@@ -208,11 +208,17 @@ class NotionClientWrapper:
         )
 
     def archive_page(self, page_id: str) -> dict[str, Any]:
-        """Archive (soft-delete) a Notion page."""
+        """Move a Notion page to trash (soft-delete; recoverable for 30 days).
+
+        Notion API ``2026-03-11`` rejects the legacy ``archived=true`` body
+        field with ``"body.archived should be not present, instead was true"``
+        — the write parameter is now ``in_trash`` instead. (Responses still
+        carry both ``archived`` and ``in_trash`` for backward compat.)
+        """
         return self._call_with_retry(
             self._client.pages.update,
             page_id=page_id,
-            archived=True,
+            in_trash=True,
         )
 
     def retrieve_database(self, database_id: str) -> dict[str, Any]:
@@ -226,6 +232,41 @@ class NotionClientWrapper:
         ds_id = self._resolve_data_source_id(database_id)
         return self._call_with_retry(
             self._client.data_sources.retrieve, data_source_id=ds_id
+        )
+
+    def update_data_source(
+        self,
+        database_id: str,
+        properties: dict[str, Any],
+    ) -> dict[str, Any]:
+        """PATCH a data source's schema (e.g. add or remove select options).
+
+        Notion's PATCH supports two select-option operations cleanly:
+
+          * **Add** — include an entry without an ``id`` (just ``name`` and
+            optional ``color``). Notion assigns an id, returns it in the
+            response.
+          * **Remove** — omit the option from the array. Notion drops it.
+
+        **Renaming an existing option in place is NOT supported.** Sending
+        ``{id, name: NEW}`` returns 200 and the response echoes the new
+        state, but a fresh ``data_sources.retrieve`` shows the OLD name —
+        verified 2026-05-21 by ``scripts/diag_work_area_options.py`` across
+        ``data_sources.update`` (with and without ``color``) and the legacy
+        ``databases.update`` endpoint. Same for archive/un-archive
+        (``X`` ↔ ``(archived) X``).
+
+        To achieve a logical rename, use the saga in
+        ``src/hierarchy/_rename_saga.py``: PATCH 1 add new option → migrate
+        every tagged page via ``pages.update`` → PATCH 2 drop the old option.
+        Option IDs change as a result; the per-property mapping tables
+        (``work_area_option_mappings`` etc.) absorb the churn.
+        """
+        ds_id = self._resolve_data_source_id(database_id)
+        return self._call_with_retry(
+            self._client.data_sources.update,
+            data_source_id=ds_id,
+            properties=properties,
         )
 
     def list_users(self) -> list[dict[str, Any]]:

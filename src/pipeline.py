@@ -1725,15 +1725,44 @@ def run_sync_for_page(
             # grep-able. AffinityClient handles transient retries within the
             # same Lambda invocation; longer outages are logged loudly and
             # require a manual page re-trigger (clear `Processed`).
-            mt = metadata.get("meeting_type") or None
+            #
+            # Trigger is rule-driven: the Meeting Rules DB carries one or
+            # more rows with Action = "Fire Affinity LP Funnel" whose
+            # Match Property/Match Value identifies the work area(s) that
+            # should fire this branch. Renames in the Hierarchy DB are
+            # absorbed by editing the Match Value in Notion — no code change.
+            fundraising_rule_label = ""
+            if config.fundraising_branch_enabled and config.meeting_rules_db_id:
+                try:
+                    from src.topic_mirror.route_registry import (
+                        ACTION_AFFINITY_LP_FUNNEL, load_routes, match_routes,
+                    )
+                    all_rules = load_routes(client, config.meeting_rules_db_id)
+                    affinity_rules = [
+                        r for r in all_rules
+                        if r.action == ACTION_AFFINITY_LP_FUNNEL
+                    ]
+                    matched_affinity = match_routes(
+                        affinity_rules, page.get("properties", {}),
+                    )
+                    if matched_affinity:
+                        fundraising_rule_label = matched_affinity[0].label
+                except Exception:
+                    logger.exception(
+                        "page=%s failed to evaluate Affinity LP Funnel rules — "
+                        "treating as no match",
+                        short_id,
+                    )
+
             run_fundraising = (
                 config.fundraising_branch_enabled
-                and mt == "Fundraising"
+                and bool(fundraising_rule_label)
                 and not config.dry_run
             )
             logger.info(
-                "page=%s db_owner=%s fundraising decision: meeting_type=%r → %s",
-                short_id, db_owner, mt, "RUN" if run_fundraising else "SKIP",
+                "page=%s db_owner=%s fundraising decision: rule=%r → %s",
+                short_id, db_owner, fundraising_rule_label or None,
+                "RUN" if run_fundraising else "SKIP",
             )
 
             if run_fundraising:

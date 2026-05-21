@@ -49,7 +49,25 @@
       "mcp__affinity__affinity_get_companies_in_swimlane",
       "mcp__claude_ai_Notion__notion-create-database",
       "mcp__claude_ai_Notion__notion-duplicate-page",
-      "mcp__claude_ai_Notion__notion-move-pages"
+      "mcp__claude_ai_Notion__notion-move-pages",
+      "mcp__claude_ai_Custom_Affinity__get_lists",
+      "mcp__claude_ai_Custom_Affinity__get_list_entries",
+      "PowerShell(aws --profile company logs describe-log-groups --log-group-name-prefix '/aws/lambda/nzyme' --query 'logGroups[].logGroupName' --output text)",
+      "PowerShell($start = [int64]\\([datetime]'2026-05-20T04:55:00Z' - [datetime]'1970-01-01'\\).TotalMilliseconds; $end = [int64]\\([datetime]'2026-05-20T05:15:00Z' - [datetime]'1970-01-01'\\).TotalMilliseconds; aws --profile company logs filter-log-events --log-group-name '/aws/lambda/nzyme-task-tracker' --start-time $start --end-time $end --max-items 80 --output json | ConvertFrom-Json | Select-Object -ExpandProperty events | ForEach-Object { \"$\\($_.timestamp\\) $\\($_.message.TrimEnd\\(\\)\\)\" } | Select-Object -First 60)",
+      "PowerShell($start = [int64]\\([datetime]'2026-05-20T04:55:00Z' - [datetime]'1970-01-01'\\).TotalMilliseconds; $end = [int64]\\([datetime]'2026-05-20T05:15:00Z' - [datetime]'1970-01-01'\\).TotalMilliseconds; aws --profile company logs filter-log-events --log-group-name '/aws/lambda/nzyme-task-tracker' --start-time $start --end-time $end --filter-pattern 'hierarchy' --max-items 80 --output json | ConvertFrom-Json | Select-Object -ExpandProperty events | ForEach-Object { \"$\\($_.timestamp\\) $\\($_.message.TrimEnd\\(\\)\\)\" })",
+      "PowerShell($start = [DateTimeOffset]::Parse\\('2026-05-20T04:55:00Z'\\).ToUnixTimeMilliseconds\\(\\); $end = [DateTimeOffset]::Parse\\('2026-05-20T05:15:00Z'\\).ToUnixTimeMilliseconds\\(\\); \"Window UTC: $start to $end\"; aws --profile company logs filter-log-events --log-group-name '/aws/lambda/nzyme-task-tracker' --start-time $start --end-time $end --max-items 80 --output json | ConvertFrom-Json | Select-Object -ExpandProperty events | ForEach-Object { \"$\\($_.timestamp\\) $\\($_.message.TrimEnd\\(\\)\\)\" } | Select-Object -First 40)",
+      "PowerShell($start = [DateTimeOffset]::Parse\\('2026-05-20T00:00:00Z'\\).ToUnixTimeMilliseconds\\(\\); $end = [DateTimeOffset]::Parse\\('2026-05-20T12:00:00Z'\\).ToUnixTimeMilliseconds\\(\\); aws --profile company logs filter-log-events --log-group-name '/aws/lambda/nzyme-task-tracker' --start-time $start --end-time $end --filter-pattern 'hierarchy_sync' --max-items 40 --output json | ConvertFrom-Json | Select-Object -ExpandProperty events | ForEach-Object { \"$\\($_.timestamp\\) $\\($_.message.TrimEnd\\(\\)\\)\" })",
+      "Skill(feature)",
+      "mcp__claude_ai_Supabase__list_projects",
+      "mcp__claude_ai_Supabase__list_tables",
+      "mcp__claude_ai_Supabase__apply_migration",
+      "mcp__claude_ai_Supabase__execute_sql",
+      "mcp__claude_ai_Supabase__get_advisors",
+      "PowerShell(aws --profile company lambda get-function-configuration --function-name nzyme-task-tracker --query 'Environment.Variables | keys\\(@\\)' --output json)",
+      "mcp__claude_ai_Custom_Supabase__list_tables",
+      "PowerShell(aws lambda get-function *)",
+      "PowerShell(../venv/Scripts/python -m pytest tests/ -q --tb=short 2>&1 | Select-Object -Last 50)",
+      "PowerShell(aws lambda invoke *)"
     ]
   }
 }

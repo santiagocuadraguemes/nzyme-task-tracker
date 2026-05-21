@@ -60,6 +60,8 @@ def handler(event, context):
             return _handle_supabase_sync(event, context)
         if job == "supabase_sync_full":
             return _handle_supabase_sync_full(event, context)
+        if job == "hierarchy_sync":
+            return _handle_hierarchy_sync(event, context)
         return _handle_extraction(event, context)
 
     # API Gateway (has requestContext or pathParameters)
@@ -208,3 +210,37 @@ def _handle_weekly_archive(event, context):
     except Exception:
         logger.exception("Weekly archive sweep failed")
         return {"statusCode": 500, "body": json.dumps({"error": "archive failed"})}
+
+
+def _handle_hierarchy_sync(event, context):
+    """Daily 07:00 Madrid sync: Hierarchy DB → downstream Notion state.
+
+    Runs every registered sub-sync (currently: Tier 0 → member DB `Work area`
+    options). Each sub-sync logs its own structured ``hierarchy_sync: ...``
+    line. Returns a per-sub-sync summary.
+    """
+    from src import hierarchy
+
+    config, client = _init()
+    try:
+        reports = hierarchy.run_all(client, config)
+        summary = [
+            {
+                "name": r.name,
+                "created": r.created,
+                "renamed": r.renamed,
+                "archived": r.archived,
+                "errors": r.errors,
+            }
+            for r in reports
+        ]
+        total_errors = sum(r.errors for r in reports)
+        if total_errors:
+            return {
+                "statusCode": 500,
+                "body": json.dumps({"errors": total_errors, "reports": summary}),
+            }
+        return {"statusCode": 200, "body": json.dumps({"reports": summary})}
+    except Exception:
+        logger.exception("Hierarchy sync failed")
+        return {"statusCode": 500, "body": json.dumps({"error": "sync failed"})}
