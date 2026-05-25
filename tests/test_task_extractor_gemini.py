@@ -200,7 +200,6 @@ def test_returns_task_list_in_extractor_shape():
                 "priority": "High",
                 "due_date": "2026-05-15",
                 "confidence": "high",
-                "speaker_reasoning": "Jacob owns DD",
             }
         ],
     })

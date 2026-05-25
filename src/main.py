@@ -76,16 +76,11 @@ def parse_args() -> argparse.Namespace:
              "Equivalent to setting MEETING_NOTES_DB_ID.",
     )
     parser.add_argument(
-        "--correction-model",
-        metavar="MODEL",
-        help="Override the transcript-correction model for this run. "
-             "Provider is auto-detected from the prefix (gemini-* uses GEMINI_API_KEY, "
-             "everything else uses OPENAI_API_KEY).",
-    )
-    parser.add_argument(
         "--extraction-model",
         metavar="MODEL",
-        help="Override the task-extraction model for this run.",
+        help="Override the task-extraction model for this run. "
+             "Provider is auto-detected from the prefix (gemini-* uses GEMINI_API_KEY, "
+             "everything else uses OPENAI_API_KEY).",
     )
     parser.add_argument(
         "--classification-model",
@@ -158,8 +153,6 @@ def main() -> None:
         config = config.model_copy(update={"log_level": "DEBUG"})
     if args.db_id:
         config = config.model_copy(update={"meeting_notes_db_id": args.db_id})
-    if args.correction_model:
-        config = config.model_copy(update={"correction_model": args.correction_model})
     if args.extraction_model:
         config = config.model_copy(update={"extraction_model": args.extraction_model})
     if args.classification_model:

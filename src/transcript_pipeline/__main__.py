@@ -1,4 +1,4 @@
-"""CLI entry point: python -m src.transcript_pipeline <page_id> [--verbose] [--context] [--correct] [--extract] [--write] [--dry-run] [--gcal]"""
+"""CLI entry point: python -m src.transcript_pipeline <page_id> [--verbose] [--context] [--extract] [--write] [--dry-run] [--gcal]"""
 
 from __future__ import annotations
 
@@ -200,21 +200,19 @@ def _run_gcal_test(args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Fetch and optionally correct a meeting transcript from Notion.",
+        description="Fetch (and optionally extract tasks from) a meeting transcript in Notion.",
     )
     parser.add_argument("page_id", help="Notion page ID containing a meeting_notes block")
     parser.add_argument("--verbose", "-v", action="store_true", help="Print raw API response for debugging")
     parser.add_argument("--context", "-c", action="store_true", help="Also load terminology + org chart context")
-    parser.add_argument("--correct", action="store_true", help="Run LLM correction on the transcript (implies --context)")
-    parser.add_argument("--model", type=str, default=None, help="Override LLM model for correction + extraction")
+    parser.add_argument("--model", type=str, default=None, help="Override LLM model for extraction")
     parser.add_argument("--classifier-model", type=str, default=None, help="Override LLM model for classification (defaults to --model)")
-    parser.add_argument("--correction-model", type=str, default=None, help="[--write only] Override the transcript-correction model. Provider auto-detected from prefix.")
     parser.add_argument("--extraction-model", type=str, default=None, help="[--write only] Override the task-extraction model. Provider auto-detected from prefix.")
     parser.add_argument("--classification-model", type=str, default=None, help="[--write only] Override the task-classification model. Provider auto-detected from prefix.")
-    parser.add_argument("--extract", action="store_true", help="Extract tasks (merged single-call path by default; uses 2-call flow only when --legacy-2call is set)")
+    parser.add_argument("--extract", action="store_true", help="Extract tasks via the merged single-call transcript path")
     parser.add_argument("--write", action="store_true", help="Write extracted tasks to Team Task Tracker (implies --extract)")
     parser.add_argument("--dry-run", action="store_true", help="Log tasks that would be written without creating them (requires --write)")
-    parser.add_argument("--openai", action="store_true", help="Force OpenAI endpoint for correction + extraction")
+    parser.add_argument("--openai", action="store_true", help="Force OpenAI endpoint for extraction")
     parser.add_argument(
         "--openrouter",
         action="store_true",
@@ -226,14 +224,6 @@ def main() -> None:
     )
     parser.add_argument("--classifier-openai", action="store_true", help="Force OpenAI endpoint for classification (defaults to --openai)")
     parser.add_argument("--gcal", action="store_true", help="Test GCal attendee lookup only (no transcript fetch)")
-    parser.add_argument(
-        "--legacy-2call",
-        action="store_true",
-        help=(
-            "Force the legacy 2-call flow (TranscriptCorrector → TaskExtractor). "
-            "Diagnostic only — production path is controlled by TRANSCRIPT_MERGED_EXTRACTION."
-        ),
-    )
     parser.add_argument(
         "--save-run",
         action="store_true",
@@ -276,12 +266,9 @@ def main() -> None:
         _run_write_mode(args)
         return
 
-    # Diagnostic modes: --extract uses the merged call by default;
-    # --legacy-2call falls back to the old corrector → extractor flow.
-    use_merged = args.extract and not args.legacy_2call
-    if args.extract and args.legacy_2call:
-        args.correct = True
-    load_context = args.context or args.correct or use_merged
+    # --extract runs the merged single-call transcript path.
+    use_merged = args.extract
+    load_context = args.context or use_merged
 
     if args.dry_run:
         print("Note: --dry-run has no effect without --write", file=sys.stderr)
@@ -361,7 +348,7 @@ def main() -> None:
         print("=== HUMAN NOTES ===")
         print(notes_text)
 
-    if load_context and args.context and not args.correct:
+    if load_context and args.context and not use_merged:
         print()
         print("=== TERMINOLOGY CONTEXT ===")
         print(terminology if terminology else "  (no active terms)")
@@ -369,7 +356,7 @@ def main() -> None:
         print("=== ORG CHART CONTEXT ===")
         print(org_chart if org_chart else "  (no active members)")
 
-    # Merged single-call path (default for --extract without --legacy-2call)
+    # Merged single-call path for --extract
     if use_merged:
         if not cfg:
             from src.config import load_config
@@ -490,99 +477,16 @@ def main() -> None:
             )
         return
 
-    # Run LLM correction
-    if args.correct:
-        if not cfg:
-            from src.config import load_config
-            cfg = load_config()
-        logfire.configure(token=cfg.logfire_token, service_name="nzyme-transcript")
-        logfire.instrument_openai()
-
-        if not transcript_text:
-            print("\nERROR: No transcript to correct.", file=sys.stderr)
-            sys.exit(1)
-
-        from src.transcript_pipeline.transcript_corrector import TranscriptCorrector
-
-        model = args.model or cfg.openai_model
-        base_url = "https://api.openai.com/v1" if args.openai else cfg.openai_base_url
-        api_key = cfg.openai_api_key if args.openai else (cfg.gemini_api_key or cfg.openai_api_key)
-
-        corrector = TranscriptCorrector(
-            api_key=api_key,
-            model=model,
-            base_url=base_url,
-        )
-
-        print("Correcting transcript with", model, "...", file=sys.stderr)
-        corrected = corrector.correct(
-            transcript_text, terminology, attendees,
-            enriched_attendee_str=enriched_attendee_str,
-            notes_text=notes_text,
-        )
-
-        if not args.extract:
-            print()
-            print("=== RAW TRANSCRIPT ===")
-            print(transcript_text)
-            print()
-            print("=== CORRECTED TRANSCRIPT ===")
-            print(corrected)
-
-        # Task extraction
-        if args.extract:
-            from src.transcript_pipeline.task_extractor import TaskExtractor
-
-            print()
-            print("Extracting tasks with", model, "...", file=sys.stderr)
-            extractor = TaskExtractor(
-                api_key=api_key,
-                model=model,
-                base_url=base_url,
-            )
-            tasks = extractor.extract(
-                corrected,
-                attendees,
-                org_chart=org_chart,
-                terminology=terminology,
-                meeting_title=metadata.get("title", ""),
-                meeting_date=metadata.get("date", ""),
-                enriched_attendee_str=enriched_attendee_str,
-                notes_text=notes_text,
-            )
-
-            print()
-            print(f"=== EXTRACTED TASKS ({len(tasks)}) ===")
-            if tasks:
-                for i, t in enumerate(tasks, 1):
-                    priority = t.get("priority", "?")
-                    title = t.get("title", "(no title)")
-                    assignee = t.get("assignee") or "Unassigned"
-                    due = t.get("due_date") or "\u2014"
-                    confidence = t.get("confidence", "?")
-                    context = t.get("context", "")
-                    reasoning = t.get("speaker_reasoning", "")
-                    print()
-                    print(f"  {i}. [{priority}] {title}  (confidence: {confidence})")
-                    print(f"     Assignee: {assignee}")
-                    print(f"     Due: {due}")
-                    if reasoning:
-                        print(f"     Why: {reasoning}")
-                    if context:
-                        print(f'     Context: "{context}"')
-            else:
-                print("  (no tasks found)")
+    print()
+    print("=== TRANSCRIPT ===")
+    if transcript_text:
+        print(transcript_text)
     else:
-        print()
-        print("=== TRANSCRIPT ===")
-        if transcript_text:
-            print(transcript_text)
-        else:
-            print("  (empty — recording may not be processed yet)")
+        print("  (empty — recording may not be processed yet)")
 
 
 def _run_write_mode(args: argparse.Namespace) -> None:
-    """Run the full pipeline for a single page (correct → extract → classify → write).
+    """Run the full pipeline for a single page (extract → classify → write).
 
     Routes through pipeline.run_sync_for_page() to use the unified pipeline
     with transcript-first extraction and all post-processing (dedup, etc.).
@@ -605,16 +509,12 @@ def _run_write_mode(args: argparse.Namespace) -> None:
         overrides["dry_run"] = True
     if args.model:
         overrides["openai_model"] = args.model
-    if args.correction_model:
-        overrides["correction_model"] = args.correction_model
     if args.extraction_model:
         overrides["extraction_model"] = args.extraction_model
     if args.classification_model:
         overrides["classification_model"] = args.classification_model
     if args.openai:
         overrides["openai_base_url"] = "https://api.openai.com/v1"
-    if args.legacy_2call:
-        overrides["transcript_merged_extraction"] = False
     if overrides:
         cfg = cfg.model_copy(update=overrides)
 

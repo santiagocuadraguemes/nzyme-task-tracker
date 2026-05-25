@@ -247,9 +247,9 @@ Meeting Notes DB page
   → find_meeting_notes_block() → meeting_notes block
   → fetch transcript text + attendees + human notes
   → _resolve_attendees() (GCal → Notion → governance)
-  → TranscriptCorrector.correct() → corrected transcript (LLM call 1)
-  → TaskExtractor.extract() → raw tasks (LLM call 2)
-  → TaskClassifier.classify() → classified tasks (LLM call 3)
+  → TaskExtractor.extract_from_raw() → raw tasks (1 merged LLM call — domain
+    correction + speaker resolution + extraction inline)
+  → TaskClassifier.classify() → classified tasks (LLM call 2)
   → SemanticDedup + assignee fallback
   → TeamTaskTrackerWriter.write_batch() → Notion pages
 ```

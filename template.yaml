@@ -32,7 +32,6 @@ Globals:
         GEMINI_MODEL: !Ref GeminiModel
         GEMINI_BASE_URL: !Ref GeminiBaseUrl
         OPENAI_MODEL: !Ref OpenAIModel
-        TRANSCRIPT_MERGED_EXTRACTION: !Ref TranscriptMergedExtraction
         TERMINOLOGY_DB_ID: !Ref TerminologyDbId
         ORG_CHART_DB_ID: !Ref OrgChartDbId
         CLASSIFIER_PROMPT_PAGE_ID: !Ref ClassifierPromptPageId
@@ -126,10 +125,6 @@ Parameters:
     Type: String
     Default: gpt-5-mini
     Description: OpenAI model for light LLM calls (classifier + fundraising summary).
-  TranscriptMergedExtraction:
-    Type: String
-    Default: 'true'
-    Description: Single merged Gemini call for correction+extraction (~60-70% cheaper than the legacy 2-call flow). Set 'false' to roll back.
   TerminologyDbId:
     Type: String
     Default: ''

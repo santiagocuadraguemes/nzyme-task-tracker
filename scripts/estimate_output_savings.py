@@ -1,21 +1,24 @@
 """Offline estimator: rank candidate schema reductions WITHOUT firing real calls.
 
-Reads a ``shadow-diff.json`` produced by ``shadow_diff_extraction.py``,
-mechanically transforms each saved merged-call output into candidate-schema
-shapes (drop ``sr``, drop scratch fields, drop ``a``, short-char enums, etc.),
-re-serialises each to JSON and counts tokens with Gemini's ``count_tokens``
-API. ``count_tokens`` is free and unlimited, so this whole script costs zero.
+Reads a baseline JSON produced by ``compare_candidate.py`` (each entry
+contains a ``merged`` block with ``raw_data`` — the short-key payload
+including scratch fields), mechanically transforms each saved merged-call
+output into candidate-schema shapes (drop ``sr``, drop scratch fields,
+drop ``a``, short-char enums, etc.), re-serialises each to JSON and counts
+tokens with Gemini's ``count_tokens`` API. ``count_tokens`` is free and
+unlimited, so this whole script costs zero.
 
 Usage:
-    ../venv/Scripts/python scripts/estimate_output_savings.py shadow-diff.json
+    ../venv/Scripts/python scripts/estimate_output_savings.py baseline.json
 
 Output is a table — mean / median / total output-token estimates per
 candidate, plus % reduction vs the estimator's baseline reconstruction.
 
 Free-tier notes:
 - ``count_tokens`` does not consume any per-day quota.
-- Real shadow-diff calls (to produce the input ``shadow-diff.json``) DO
-  consume quota. Run shadow-diff once, then iterate on this estimator.
+- Real calls used to produce the input baseline DO consume quota. Run
+  ``compare_candidate.py --candidate baseline`` once, then iterate on this
+  estimator.
 
 The numbers are approximate: a real model run with a changed prompt may
 produce slightly different content. The estimator only varies the
@@ -167,7 +170,7 @@ def _serialise(payload: dict) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("baseline", type=Path,
-                        help="shadow-diff.json from shadow_diff_extraction.py")
+                        help="Baseline JSON from compare_candidate.py")
     parser.add_argument("--model", default="gemini-3-flash-preview",
                         help="Model name for count_tokens (default matches prod)")
     parser.add_argument("--candidates", nargs="*", default=None,
@@ -182,8 +185,8 @@ def main() -> None:
     if not pages:
         sys.exit(
             f"No pages in {args.baseline} carry merged.raw_data. "
-            f"Re-run shadow_diff_extraction.py with the updated harness "
-            f"so raw_data is preserved."
+            f"Re-run compare_candidate.py with --candidate baseline so "
+            f"raw_data is preserved."
         )
 
     selected = args.candidates or list(CANDIDATES)

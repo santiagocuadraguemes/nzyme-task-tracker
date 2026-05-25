@@ -24,8 +24,7 @@ Nzyme uses **two separate API keys** to balance cost and quality. When a run fai
 
 | Stage | Model | Env var |
 |-------|-------|---------|
-| Transcript correction (heavy) — **legacy 2-call path only** | `gemini-3-flash-preview` (Gemini 3 Flash Preview — **not** `gemini-2.5-flash`) | `GEMINI_API_KEY` |
-| Task extraction (heavy) — single call in merged mode, otherwise runs after correction | `gemini-3-flash-preview` (Gemini 3 Flash Preview — **not** `gemini-2.5-flash`) | `GEMINI_API_KEY` |
+| Task extraction (heavy) — single merged correction + extraction call | `gemini-3-flash-preview` (Gemini 3 Flash Preview — **not** `gemini-2.5-flash`) | `GEMINI_API_KEY` |
 | Task classification (light) | `gpt-5-mini` | `OPENAI_API_KEY` |
 | Literal-notes extraction (light) — `Auto-extract Tasks = false` path | `gpt-5-mini` | `OPENAI_API_KEY` |
 | Semantic dedup embeddings (light) | `text-embedding-3-small` | `OPENAI_API_KEY` |
@@ -35,7 +34,7 @@ Nzyme uses **two separate API keys** to balance cost and quality. When a run fai
 
 **When suggesting any run command, always prefix with this key/model split so Santiago knows which key to check if the run fails.**
 
-`TRANSCRIPT_MERGED_EXTRACTION=true` (default) collapses correction + extraction into one Gemini call (saves ~60-70% per meeting). Set to `false` to roll back to the legacy 2-call flow. See [docs/transcript-pipeline.md](docs/transcript-pipeline.md) for merged-mode internals, schema candidates, and the cost-optimisation harness.
+The transcript path runs a single merged Gemini call (correction + extraction inline; ~60-70% cheaper than a 2-call flow). See [docs/transcript-pipeline.md](docs/transcript-pipeline.md) for internals, schema candidates, and the cost-optimisation harness.
 
 ## Common commands
 

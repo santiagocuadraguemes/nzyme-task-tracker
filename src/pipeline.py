@@ -410,7 +410,6 @@ def _process_via_transcript(
     Returns list of task dicts with category, parent_task_id, assignee_id,
     deal_page_id already set by the classifier.
     """
-    from src.transcript_pipeline.transcript_corrector import TranscriptCorrector
     from src.transcript_pipeline.task_extractor import TaskExtractor
     from src.transcript_pipeline.task_classifier import TaskClassifier
 
@@ -457,87 +456,35 @@ def _process_via_transcript(
     extraction_model = config.extraction_model or config.gemini_model
     extraction_key, extraction_base = _resolve_stage_creds(extraction_model, config)
 
-    if config.transcript_merged_extraction:
-        # Merged path: single LLM call does correction + extraction inline.
-        extractor = TaskExtractor(
-            api_key=extraction_key,
-            model=extraction_model,
-            base_url=extraction_base,
-        )
-        t0 = time.perf_counter()
-        tasks = extractor.extract_from_raw(
-            transcript_text,
-            attendees,
-            org_chart=ctx["org_chart_text"],
-            terminology=ctx["terminology"],
-            meeting_title=metadata.get("title", ""),
-            meeting_date=metadata.get("date", ""),
-            enriched_attendee_str=enriched_attendee_str,
-            notes_text=notes_text,
-            system_prompt_override=ctx.get("merged_transcript_prompt") or None,
-        )
-        extract_elapsed = time.perf_counter() - t0
-        if not tasks:
-            logger.info(
-                "Merged-extracted 0 tasks (%s, %.1fs)", extraction_model, extract_elapsed,
-            )
-            return []
+    # Single merged LLM call does correction + extraction inline.
+    extractor = TaskExtractor(
+        api_key=extraction_key,
+        model=extraction_model,
+        base_url=extraction_base,
+    )
+    t0 = time.perf_counter()
+    tasks = extractor.extract_from_raw(
+        transcript_text,
+        attendees,
+        org_chart=ctx["org_chart_text"],
+        terminology=ctx["terminology"],
+        meeting_title=metadata.get("title", ""),
+        meeting_date=metadata.get("date", ""),
+        enriched_attendee_str=enriched_attendee_str,
+        notes_text=notes_text,
+        system_prompt_override=ctx.get("merged_transcript_prompt") or None,
+    )
+    extract_elapsed = time.perf_counter() - t0
+    if not tasks:
         logger.info(
-            "Merged-extracted %d tasks (%s, %.1fs)",
-            len(tasks), extraction_model, extract_elapsed,
+            "Merged-extracted 0 tasks (%s, %.1fs)", extraction_model, extract_elapsed,
         )
-        logger.debug("Extracted task payload: %s", json.dumps(tasks, ensure_ascii=False, indent=2))
-    else:
-        # Legacy 2-call path: correct, then extract.
-        correction_model = config.correction_model or config.gemini_model
-        correction_key, correction_base = _resolve_stage_creds(correction_model, config)
-        corrector = TranscriptCorrector(
-            api_key=correction_key,
-            model=correction_model,
-            base_url=correction_base,
-        )
-        t0 = time.perf_counter()
-        corrected = corrector.correct(
-            transcript_text,
-            ctx["terminology"],
-            attendees,
-            enriched_attendee_str=enriched_attendee_str,
-            notes_text=notes_text,
-        )
-        logger.info(
-            "Corrected transcript (%s, %.1fs, %d → %d chars)",
-            correction_model, time.perf_counter() - t0,
-            len(transcript_text), len(corrected),
-        )
-        logger.debug("Corrected transcript text:\n%s", corrected)
-
-        extractor = TaskExtractor(
-            api_key=extraction_key,
-            model=extraction_model,
-            base_url=extraction_base,
-        )
-        t0 = time.perf_counter()
-        tasks = extractor.extract(
-            corrected,
-            attendees,
-            org_chart=ctx["org_chart_text"],
-            terminology=ctx["terminology"],
-            meeting_title=metadata.get("title", ""),
-            meeting_date=metadata.get("date", ""),
-            enriched_attendee_str=enriched_attendee_str,
-            notes_text=notes_text,
-        )
-        extract_elapsed = time.perf_counter() - t0
-        if not tasks:
-            logger.info(
-                "Extracted 0 tasks (%s, %.1fs)", extraction_model, extract_elapsed,
-            )
-            return []
-        logger.info(
-            "Extracted %d tasks (%s, %.1fs)",
-            len(tasks), extraction_model, extract_elapsed,
-        )
-        logger.debug("Extracted task payload: %s", json.dumps(tasks, ensure_ascii=False, indent=2))
+        return []
+    logger.info(
+        "Merged-extracted %d tasks (%s, %.1fs)",
+        len(tasks), extraction_model, extract_elapsed,
+    )
+    logger.debug("Extracted task payload: %s", json.dumps(tasks, ensure_ascii=False, indent=2))
 
     # Step 3: Classify tasks
     if not ctx["classifier_prompt"]:

@@ -58,13 +58,72 @@ from src.transcript_pipeline.task_extractor import (  # noqa: E402
 )
 from src.utils.llm_logging import get_tracker, start_tracking  # noqa: E402
 
-# Reuse the same attendee-resolution helper used by shadow_diff. scripts/
-# isn't a Python package, so we import as a top-level module via the
-# SCRIPTS_DIR sys.path entry above.
-from shadow_diff_extraction import (  # noqa: E402
-    _resolve_attendees_for_diagnostic,
-    _usage_since,
-)
+def _usage_since(tracker, marker: int) -> dict:
+    """Sum prompt/cached/completion tokens for records added since ``marker``."""
+    if tracker is None:
+        return {"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0}
+    new_records = tracker.records[marker:]
+    return {
+        "input_tokens": sum(r.prompt_tokens for r in new_records),
+        "cached_input_tokens": sum(r.cached_tokens for r in new_records),
+        "output_tokens": sum(r.completion_tokens for r in new_records),
+    }
+
+
+def _resolve_attendees_for_diagnostic(
+    client: NotionClientWrapper,
+    cfg,
+    page_id: str,
+    metadata: dict,
+    notion_attendees: list[dict],
+    governance_attendees: list[dict],
+    org_chart_rows: list[dict],
+) -> list[dict]:
+    """Mirror pipeline._resolve_attendees minus the import cycle."""
+    attendees = list(notion_attendees)
+    if (
+        cfg.gcal_enabled
+        and metadata.get("title")
+        and metadata.get("date")
+    ):
+        try:
+            from src.pipeline import _resolve_delegated_user
+            from src.transcript_pipeline.gcal_attendees import get_gcal_attendees
+
+            created_by_id = (
+                (metadata.get("created_by") or {}).get("id", "")
+                or metadata.get("created_by_id", "")
+            )
+            delegated_user = _resolve_delegated_user(
+                client, created_by_id, cfg.gcal_delegated_user_default,
+            )
+            if delegated_user:
+                gcal_attendees = get_gcal_attendees(
+                    metadata["title"], metadata["date"], delegated_user,
+                )
+                if gcal_attendees:
+                    attendees = [
+                        {"id": ga["email"], "name": ga["name"], "email": ga["email"]}
+                        for ga in gcal_attendees
+                    ]
+                    email_to_name = {
+                        r["email"]: r["name"]
+                        for r in (org_chart_rows or [])
+                        if r.get("email") and r.get("name")
+                    }
+                    attendees = [
+                        {**a, "name": email_to_name.get((a.get("email") or "").lower(), a["name"])}
+                        for a in attendees
+                    ]
+        except Exception:
+            logging.warning(
+                "GCal lookup failed for %s — using Notion attendees",
+                page_id, exc_info=True,
+            )
+
+    if not attendees and governance_attendees:
+        attendees = [{**g, "email": None} for g in governance_attendees]
+    return attendees
 
 
 def _make_client() -> NotionClientWrapper:
