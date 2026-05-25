@@ -31,15 +31,7 @@ def _build_tool_definition(categories: list[str]) -> dict:
                     },
                     "due_date": {
                         "type": ["string", "null"],
-                        "description": (
-                            "ISO date (YYYY-MM-DD) or null. Resolve relative dates "
-                            "using the meeting date: 'manana/tomorrow' = meeting_date + 1, "
-                            "'miercoles/Wednesday' = next occurrence, "
-                            "'viernes/Friday/end of week' = next Friday, "
-                            "'fin de mes/end of month' = last day of month, "
-                            "'esta semana/this week' = Friday of meeting week. "
-                            "Set null only if no deadline is mentioned at all."
-                        ),
+                        "description": "ISO date (YYYY-MM-DD) or null",
                     },
                     "priority": {
                         "type": "string",
