@@ -132,7 +132,7 @@ def _make_client() -> NotionClientWrapper:
     return NotionClientWrapper(notion)
 
 
-def run_one_page(client, cfg, page_id, terminology, org_chart_text, org_chart_rows):
+def run_one_page(client, cfg, page_id, terminology, org_chart_text, org_chart_rows, system_prompt):
     out = {
         "page_id": page_id,
         "meeting_title": None,
@@ -171,6 +171,7 @@ def run_one_page(client, cfg, page_id, terminology, org_chart_text, org_chart_ro
         t0 = time.perf_counter()
         tasks = extractor.extract_from_raw(
             transcript_text, attendees,
+            system_prompt=system_prompt,
             org_chart=org_chart_text,
             terminology=terminology,
             meeting_title=metadata.get("title", ""),
@@ -225,11 +226,22 @@ def main() -> None:
     org_chart_text = load_org_chart(client, cfg.org_chart_db_id) if cfg.org_chart_db_id else ""
     org_chart_rows = load_org_chart_rows(client, cfg.org_chart_db_id) if cfg.org_chart_db_id else []
 
+    # System prompt is required by extract_from_raw — load from Notion playbook.
+    from src.pipeline import _fetch_page_text
+    system_prompt = _fetch_page_text(
+        client, cfg.merged_transcript_extraction_prompt_page_id,
+    )
+    if not system_prompt.strip():
+        sys.exit(
+            "ERROR: Merged transcript extraction prompt page is empty. "
+            "Populate it in Notion before running compare_candidate.py."
+        )
+
     results: list[dict] = []
     for i, pid in enumerate(page_ids, 1):
         logging.info("[%d/%d] %s", i, len(page_ids), pid)
         results.append(
-            run_one_page(client, cfg, pid, terminology, org_chart_text, org_chart_rows)
+            run_one_page(client, cfg, pid, terminology, org_chart_text, org_chart_rows, system_prompt)
         )
 
     args.out.write_text(json.dumps(results, ensure_ascii=False, indent=2))

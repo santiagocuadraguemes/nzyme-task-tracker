@@ -465,13 +465,13 @@ def _process_via_transcript(
     tasks = extractor.extract_from_raw(
         transcript_text,
         attendees,
+        system_prompt=ctx["merged_transcript_prompt"],
         org_chart=ctx["org_chart_text"],
         terminology=ctx["terminology"],
         meeting_title=metadata.get("title", ""),
         meeting_date=metadata.get("date", ""),
         enriched_attendee_str=enriched_attendee_str,
         notes_text=notes_text,
-        system_prompt_override=ctx.get("merged_transcript_prompt") or None,
     )
     extract_elapsed = time.perf_counter() - t0
     if not tasks:
@@ -1015,30 +1015,22 @@ def _load_sync_context(
         except Exception:
             logger.exception("Failed to load classifier prompt — transcript classification will fall back to notes path")
 
-    # Merged transcript-extraction prompt (transcript path). Loading is
-    # best-effort: when the page is missing or empty, the extractor falls
-    # back to the in-code MERGED_SYSTEM_PROMPT constant.
-    merged_transcript_prompt = ""
-    if config.merged_transcript_extraction_prompt_page_id:
-        try:
-            merged_transcript_prompt = _fetch_page_text(
-                client, config.merged_transcript_extraction_prompt_page_id,
-            )
-            if merged_transcript_prompt.strip():
-                logger.debug(
-                    "Loaded merged transcript extraction prompt (%d chars)",
-                    len(merged_transcript_prompt),
-                )
-            else:
-                logger.warning(
-                    "Merged transcript extraction prompt page is empty — "
-                    "falling back to in-code MERGED_SYSTEM_PROMPT",
-                )
-        except Exception:
-            logger.exception(
-                "Failed to load merged transcript extraction prompt — "
-                "falling back to in-code MERGED_SYSTEM_PROMPT",
-            )
+    # Merged transcript-extraction prompt (transcript path). Required —
+    # no in-code fallback. A missing or empty page raises so the pipeline
+    # never runs with a silently-degraded prompt.
+    merged_transcript_prompt = _fetch_page_text(
+        client, config.merged_transcript_extraction_prompt_page_id,
+    )
+    if not merged_transcript_prompt.strip():
+        raise RuntimeError(
+            "Merged transcript extraction prompt page "
+            f"{config.merged_transcript_extraction_prompt_page_id} is empty — "
+            "populate it in Notion before running the pipeline.",
+        )
+    logger.debug(
+        "Loaded merged transcript extraction prompt (%d chars)",
+        len(merged_transcript_prompt),
+    )
 
     # Literal-notes extraction prompt (only used when an Org Chart row has
     # `Auto-extract Tasks = false`). Loading is best-effort: if the page is

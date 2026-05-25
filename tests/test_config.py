@@ -13,6 +13,7 @@ class TestSyncConfig:
             openai_api_key="sk-abc",
             meeting_notes_db_id="db-meetings",
             team_tracker_db_id="db-tracker",
+            merged_transcript_extraction_prompt_page_id="page-merged",
         )
         assert config.openai_model == "gpt-5-mini"
         assert config.gemini_model == "gemini-3-flash-preview"
@@ -27,6 +28,7 @@ class TestSyncConfig:
                 # missing openai_api_key
                 meeting_notes_db_id="db-meetings",
                 team_tracker_db_id="db-tracker",
+                merged_transcript_extraction_prompt_page_id="page-merged",
             )
 
 
@@ -36,6 +38,7 @@ class TestLoadConfig:
         "OPENAI_API_KEY": "sk-abc",
         "MEETING_NOTES_DB_ID": "db-meetings",
         "TEAM_TRACKER_DB_ID": "db-tracker",
+        "MERGED_TRANSCRIPT_EXTRACTION_PROMPT_PAGE_ID": "page-merged",
         "BUFFER_HOURS": "3",
         "DRY_RUN": "true",
     }, clear=False)

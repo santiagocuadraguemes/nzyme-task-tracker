@@ -86,12 +86,13 @@ class SyncConfig(BaseModel):
     terminology_db_id: str | None = Field(None, description="Terminology Dictionary DB ID (transcript correction)")
     org_chart_db_id: str | None = Field(None, description="Org Chart DB ID (transcript speaker identification)")
     classifier_prompt_page_id: str | None = Field(None, description="Notion page ID for transcript classifier prompt")
-    merged_transcript_extraction_prompt_page_id: str | None = Field(
-        None,
+    merged_transcript_extraction_prompt_page_id: str = Field(
+        ...,
         description=(
             "Notion page ID for the merged transcript-extraction system prompt. "
-            "Loaded once per sync tick by the transcript path. When unset, the "
-            "extractor falls back to the in-code MERGED_SYSTEM_PROMPT constant."
+            "Required — loaded once per sync tick by the transcript path. The "
+            "pipeline raises at startup if unset, and at ctx-load if the page "
+            "is empty/inaccessible."
         ),
     )
     literal_notes_extraction_prompt_page_id: str | None = Field(
@@ -215,9 +216,9 @@ def load_config() -> SyncConfig:
         terminology_db_id=os.getenv("TERMINOLOGY_DB_ID"),
         org_chart_db_id=os.getenv("ORG_CHART_DB_ID"),
         classifier_prompt_page_id=os.getenv("CLASSIFIER_PROMPT_PAGE_ID"),
-        merged_transcript_extraction_prompt_page_id=os.getenv(
-            "MERGED_TRANSCRIPT_EXTRACTION_PROMPT_PAGE_ID",
-        ),
+        merged_transcript_extraction_prompt_page_id=os.environ[
+            "MERGED_TRANSCRIPT_EXTRACTION_PROMPT_PAGE_ID"
+        ],
         literal_notes_extraction_prompt_page_id=os.getenv(
             "LITERAL_NOTES_EXTRACTION_PROMPT_PAGE_ID",
         ),

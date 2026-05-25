@@ -410,12 +410,27 @@ def main() -> None:
         print(f"Merged-extracting tasks with {model} (single call)...", file=sys.stderr)
         extractor = TaskExtractor(api_key=api_key, model=model, base_url=base_url)
 
+        # System prompt is required — load from the Notion playbook page.
+        from src.pipeline import _fetch_page_text
+
+        system_prompt = _fetch_page_text(
+            client, cfg.merged_transcript_extraction_prompt_page_id,
+        )
+        if not system_prompt.strip():
+            print(
+                "\nERROR: Merged transcript extraction prompt page is empty. "
+                "Populate it in Notion before running --extract.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
         tracker = get_tracker()
         marker = len(tracker.records) if tracker else 0
         t0 = time.perf_counter()
         tasks = extractor.extract_from_raw(
             transcript_text,
             attendees,
+            system_prompt=system_prompt,
             org_chart=org_chart,
             terminology=terminology,
             meeting_title=metadata.get("title", ""),

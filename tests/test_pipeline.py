@@ -18,6 +18,7 @@ def _make_config(**overrides) -> SyncConfig:
         "openai_api_key": "sk-abc",
         "meeting_notes_db_id": "db-meetings",
         "team_tracker_db_id": "db-tracker",
+        "merged_transcript_extraction_prompt_page_id": "page-merged",
         "buffer_hours": 2,
         "dry_run": False,
     }

@@ -59,6 +59,7 @@ def _wire_genai_client(extractor: TaskExtractor, *, cache_name="caches/abc123"):
 
 
 _LARGE_TERMINOLOGY = "term:" + ("x" * 5000)  # exceeds _GEMINI_CACHE_MIN_CHARS
+_TEST_PROMPT = "You are a test extractor. Emit JSON."
 
 
 def test_routes_gemini_model_to_native_path():
@@ -74,6 +75,7 @@ def test_routes_gemini_model_to_native_path():
 
     ext.extract_from_raw(
         transcript="Santiago: hi\nJacob: hello",
+        system_prompt=_TEST_PROMPT,
         attendees=[{"id": "1", "name": "Santiago"}],
         terminology=_LARGE_TERMINOLOGY,
         meeting_title="Test", meeting_date="2026-05-11",
@@ -93,6 +95,7 @@ def test_cache_is_created_once_and_reused():
     for _ in range(3):
         ext.extract_from_raw(
             transcript="Santiago: hi",
+            system_prompt=_TEST_PROMPT,
             attendees=[],
             terminology=_LARGE_TERMINOLOGY,
             meeting_title="A", meeting_date="2026-05-11",
@@ -116,6 +119,7 @@ def test_response_schema_set_on_every_call():
 
     ext.extract_from_raw(
         transcript="x",
+        system_prompt=_TEST_PROMPT,
         attendees=[],
         terminology=_LARGE_TERMINOLOGY,
         meeting_title="t", meeting_date="2026-05-11",
@@ -143,6 +147,7 @@ def test_skips_cache_for_small_system_prefix():
     try:
         ext.extract_from_raw(
             transcript="hi",
+            system_prompt=_TEST_PROMPT,
             attendees=[],
             meeting_title="t", meeting_date="2026-05-11",
         )
@@ -168,6 +173,7 @@ def test_retries_without_cache_on_expired_cached_content():
 
     ext.extract_from_raw(
         transcript="hi",
+        system_prompt=_TEST_PROMPT,
         attendees=[],
         terminology=_LARGE_TERMINOLOGY,
         meeting_title="t", meeting_date="2026-05-11",
@@ -206,6 +212,7 @@ def test_returns_task_list_in_extractor_shape():
 
     tasks = ext.extract_from_raw(
         transcript="x",
+        system_prompt=_TEST_PROMPT,
         attendees=[],
         terminology=_LARGE_TERMINOLOGY,
         meeting_title="t", meeting_date="2026-05-11",
@@ -227,6 +234,7 @@ def test_falls_back_when_cache_create_fails():
 
     ext.extract_from_raw(
         transcript="hi",
+        system_prompt=_TEST_PROMPT,
         attendees=[],
         terminology=_LARGE_TERMINOLOGY,
         meeting_title="t", meeting_date="2026-05-11",
@@ -254,6 +262,7 @@ def test_free_tier_429_disables_caching_quietly():
     for _ in range(2):
         ext.extract_from_raw(
             transcript="hi",
+            system_prompt=_TEST_PROMPT,
             attendees=[],
             terminology=_LARGE_TERMINOLOGY,
             meeting_title="t", meeting_date="2026-05-11",
@@ -282,10 +291,12 @@ def test_schema_rejection_retries_without_schema_and_sticks():
 
     ext.extract_from_raw(
         transcript="hi", attendees=[], terminology=_LARGE_TERMINOLOGY,
+        system_prompt=_TEST_PROMPT,
         meeting_title="t", meeting_date="2026-05-11",
     )
     ext.extract_from_raw(
         transcript="hi2", attendees=[], terminology=_LARGE_TERMINOLOGY,
+        system_prompt=_TEST_PROMPT,
         meeting_title="t", meeting_date="2026-05-11",
     )
 
@@ -297,7 +308,23 @@ def test_schema_rejection_retries_without_schema_and_sticks():
     assert last_cfg.response_schema is None
 
 
-def test_system_prompt_override_replaces_hardcoded_prompt():
+def test_system_prompt_is_required():
+    """``extract_from_raw`` no longer has an in-code default — callers must
+    pass the prompt loaded from the Notion playbook page."""
+    ext = TaskExtractor(api_key="k", model="gemini-3-flash-preview")
+    _wire_genai_client(ext)
+
+    with pytest.raises(TypeError):
+        ext.extract_from_raw(
+            transcript="hi",
+            system_prompt=_TEST_PROMPT,
+            attendees=[],
+            terminology=_LARGE_TERMINOLOGY,
+            meeting_title="t", meeting_date="2026-05-11",
+        )
+
+
+def test_system_prompt_flows_into_system_instruction():
     ext = TaskExtractor(api_key="k", model="gemini-3-flash-preview")
     fake = _wire_genai_client(ext)
     fake.models.generate_content.return_value = _stub_response(
@@ -308,15 +335,14 @@ def test_system_prompt_override_replaces_hardcoded_prompt():
     ext.extract_from_raw(
         transcript="hi",
         attendees=[],
+        system_prompt=custom,
         terminology=_LARGE_TERMINOLOGY,
         meeting_title="t", meeting_date="2026-05-11",
-        system_prompt_override=custom,
     )
 
     create_kwargs = fake.caches.create.call_args.kwargs
     sys_inst = create_kwargs["config"].system_instruction
     assert sys_inst.startswith(custom)
-    assert te.MERGED_SYSTEM_PROMPT not in sys_inst
 
 
 def test_non_gemini_model_uses_openai_path():
@@ -335,6 +361,7 @@ def test_non_gemini_model_uses_openai_path():
 
     ext.extract_from_raw(
         transcript="x",
+        system_prompt=_TEST_PROMPT,
         attendees=[],
         terminology=_LARGE_TERMINOLOGY,
         meeting_title="t", meeting_date="2026-05-11",

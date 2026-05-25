@@ -136,11 +136,10 @@ Parameters:
     Description: Notion page ID for the transcript classifier system prompt.
   MergedTranscriptExtractionPromptPageId:
     Type: String
-    Default: ''
     Description: |
-      Notion page ID for the merged transcript-extraction system prompt. Loaded
-      once per sync tick. When empty, the extractor falls back to the in-code
-      MERGED_SYSTEM_PROMPT constant.
+      Notion page ID for the merged transcript-extraction system prompt.
+      REQUIRED — pipeline raises at startup if unset and at ctx-load if the
+      page is empty or inaccessible. No in-code fallback.
   LiteralNotesExtractionPromptPageId:
     Type: String
     Default: ''

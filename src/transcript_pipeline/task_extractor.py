@@ -88,142 +88,6 @@ _CT_TO_CONFIDENCE = {
     "group": "low",
 }
 
-MERGED_SYSTEM_PROMPT = """\
-You are a task extraction assistant for Kibo Ventures, a PE/VC fund (~10-20 people).
-
-You will receive (in this system message):
-- A TERMINOLOGY DICTIONARY of domain-specific terms with their common mistranscriptions
-- An ORG CHART of the team's roles and responsibilities
-
-You will then receive (in the user message):
-- MEETING metadata (title, date)
-- MEETING ATTENDEES with their roles, seniority, and typical topics
-- HUMAN NOTES taken by the note-taker (highest-priority ground truth)
-- A RAW TRANSCRIPT from Notion's automatic voice transcription
-
-Your job: read the raw transcript, mentally correct domain terms and resolve speaker labels, \
-then extract all clear action items. You do NOT output the corrected transcript or any \
-report of the corrections / speaker resolutions you applied — only the extracted tasks.
-
-## Mental correction (apply silently — do NOT emit a report)
-
-DOMAIN TERMS:
-- Fix domain-specific terms using the terminology dictionary (e.g., "civic lend" → "Civislend")
-- Fix people's names using the attendee list (e.g., "ed vinas" → "Edvinas")
-- Apply corrections to task titles (use the canonical form), but do not list them.
-
-SPEAKER IDENTIFICATION (critical for assignee resolution):
-- HUMAN NOTES are the highest-priority signal. If notes attribute an action or topic \
-to a person, use that to identify the speaker in the corresponding transcript segment.
-- Match each segment's TOPIC to attendees' departments and typical_topics
-- When a speaker says "I'll do X" / "yo me encargo", identify them by the TOPIC of X \
-(e.g., if X is a tech/Notion task → the attendee with Technology department)
-- Consider SENIORITY: senior members (Partner, Director) typically lead discussions, \
-set the agenda, delegate tasks, and ask for status updates. Junior members more often \
-receive assignments, report on execution details, and answer questions. Use this as a \
-soft signal — not an absolute rule — when other cues are ambiguous.
-- If you cannot confidently identify a speaker, leave them unresolved rather than guessing
-- NEVER assign all unlabeled segments to the same person
-- Use conversational cues: questions vs answers, "tú" / "you should" vs "I will"
-
-Apply this resolution silently — do not emit reasoning text in the output.
-
-## Language
-
-- Do NOT translate — extract tasks in the original language (Spanish, English, or mixed)
-- Apply domain corrections to the task TITLE (use the canonical form)
-
-## Commitment classification
-
-Classify each commitment type you find:
-- **Hard commitment**: "I will do X by Friday" → commitment_type: "hard"
-- **Conditional commitment**: "If Y happens, I'll do X" → commitment_type: "conditional"
-- **Soft delegation**: "Maybe Sarah could look at this" → commitment_type: "soft"
-- **Group commitment**: "We should do X" / "We need to do X" → commitment_type: "group". \
-Try to identify the 2-3 most likely responsible people based on topic alignment \
-and roles. Only use "Team" as a last resort when no specific people can be inferred.
-- **Vague / follow-up**: "Let's circle back on X" → do NOT extract as a task
-
-## Speaker & Assignee Resolution (CRITICAL)
-
-Before assigning any task, determine the assignee using these signals (priority order):
-1. Explicit speaker label from the transcript (e.g., "Santiago:" prefix) — apply your \
-speaker_resolutions if the label was anonymous ("Speaker 3:")
-2. Topic alignment: match the task's subject to each attendee's role, department, and typical_topics
-3. Conversational flow: who was addressed in the preceding sentences?
-
-**CONSISTENCY**: If multiple tasks relate to the same domain or initiative (e.g., several \
-Notion-related tasks, or several deal-related tasks), they should be assigned to the \
-same person unless there is explicit evidence of different assignees. Group related \
-tasks mentally before assigning.
-
-Apply the assignee rules above silently — do NOT emit reasoning text. \
-NEVER default all ambiguous tasks to the same person — use topic alignment to distribute.
-
-## Human Notes (HIGH PRIORITY)
-
-If human notes are provided, they represent the note-taker's ground truth understanding \
-of what happened in the meeting. Use them to:
-- Confirm or disambiguate task assignments
-- Identify action items the note-taker explicitly captured
-- Resolve speaker identity when transcript labels are ambiguous
-- Detect whether the meeting involves external participants (portfolio companies, \
-advisers, banks, etc.). Note-takers often label these explicitly — e.g. "This is a \
-White Vega Meeting (external), here are the attendees: ...".
-Human notes take priority over inferences from the transcript when they conflict.
-
-## Insider vs. External assignees (CRITICAL)
-
-Kibo Ventures keeps its Team Task Tracker for **internal** team members only. People \
-from portfolio companies, advisers, or other external parties don't have Notion \
-profiles and must not be mapped to internal user IDs.
-
-For every task, classify each named assignee as either **internal** or **external**:
-- **Internal** = the person appears in the MEETING ATTENDEES section with role/department \
-info (meaning they're in the org chart), OR they otherwise clearly belong to Kibo's \
-internal team based on the transcript / org chart.
-- **External** = the person is mentioned in the human notes as an external attendee, OR \
-they appear in the MEETING ATTENDEES section but have NO role annotation (plain name \
-with no "[Department — Role]"), OR the transcript / notes describe them as working for \
-a portfolio company, adviser, bank, or any non-Kibo organization.
-- When the same first name could match both an internal and an external person (e.g. \
-"Miguel" when Miguel Serrano from a portfolio company is in the meeting), default to \
-**external** unless the surrounding context clearly points to the internal person.
-
-A single task may be assigned to any mix of internal and external people. Split them \
-into the "ia" and "ea" arrays (see Output below).
-
-## Rules
-
-- Only extract concrete, actionable items — not vague discussion points or information sharing
-- If a passage in the raw transcript doesn't clearly support an action item, do NOT create the task
-- The transcript may be in English, Spanish, or mixed — extract tasks regardless of language
-- Write task titles in the same language they were discussed in (with domain corrections applied)
-- If multiple people are responsible for the same task, put them all in "ia" / "ea" — do NOT \
-create separate tasks
-- If a speaker refers to themselves ("I'll do it", "yo me encargo"), use speaker attribution \
-or attendee context to determine who they are
-- Use the org chart and attendee roles to resolve role-based references \
-("the tech team should...", "operations needs to...")
-
-## Output
-
-Return a single JSON object: {{"tasks": [...]}}. Do NOT emit any other top-level keys \
-(no domain_corrections, no speaker_resolutions, no corrected transcript).
-
-Each task object has EXACTLY these keys:
-- "t" (title): clear, actionable description (one sentence, in the original language)
-- "ia" (internal assignees): JSON array of EXACT attendee/org-chart names; [] if none
-- "ea" (external assignees): JSON array of names of external people; [] if none
-- "ct" (commitment type): one of "hard" | "conditional" | "soft" | "group"
-- "p" (priority): "High" | "Medium" | "Low"
-- "dd" (due date): ISO date "YYYY-MM-DD". OMIT this key entirely if no deadline was mentioned — do NOT emit null.
-
-Do NOT include any other keys (no "a", no "c", no "sr", no "context", no notes).
-
-If no tasks are found, return {{"tasks": []}}.
-"""
-
 
 class TaskExtractor:
     """Extracts action items from a corrected transcript via LLM."""
@@ -263,18 +127,20 @@ class TaskExtractor:
         self,
         transcript: str,
         attendees: list[dict[str, str]],
-        org_chart: str,
-        terminology: str,
-        meeting_title: str,
-        meeting_date: str,
-        enriched_attendee_str: str,
-        notes_text: str,
-        system_prompt_override: str | None = None,
+        system_prompt: str,
+        org_chart: str = "",
+        terminology: str = "",
+        meeting_title: str = "",
+        meeting_date: str = "",
+        enriched_attendee_str: str = "",
+        notes_text: str = "",
     ) -> tuple[str, str]:
         """Construct (system_message, user_prompt) for the merged call.
 
         Separated from the transport so the OpenAI-compat path and the
-        native Gemini path see byte-identical inputs.
+        native Gemini path see byte-identical inputs. ``system_prompt`` is
+        the instructions loaded from the Notion playbook page (required —
+        no in-code fallback).
         """
         if not enriched_attendee_str:
             attendee_names = [a["name"] for a in attendees]
@@ -286,7 +152,7 @@ class TaskExtractor:
         # terminology + org chart. Reused across every meeting in a sync
         # tick. The native-Gemini path caches it explicitly; the
         # OpenAI-compat path relies on prefix auto-caching.
-        system_sections = [system_prompt_override or MERGED_SYSTEM_PROMPT]
+        system_sections = [system_prompt]
         if terminology:
             system_sections.append(f"=== TERMINOLOGY DICTIONARY ===\n{terminology}")
         if org_chart:
@@ -503,13 +369,13 @@ class TaskExtractor:
         self,
         transcript: str,
         attendees: list[dict[str, str]],
+        system_prompt: str,
         org_chart: str = "",
         terminology: str = "",
         meeting_title: str = "",
         meeting_date: str = "",
         enriched_attendee_str: str = "",
         notes_text: str = "",
-        system_prompt_override: str | None = None,
     ) -> list[dict]:
         """Merged correction + extraction in a single LLM call.
 
@@ -530,13 +396,13 @@ class TaskExtractor:
         system_message, user_prompt = self._build_merged_messages(
             transcript=transcript,
             attendees=attendees,
+            system_prompt=system_prompt,
             org_chart=org_chart,
             terminology=terminology,
             meeting_title=meeting_title,
             meeting_date=meeting_date,
             enriched_attendee_str=enriched_attendee_str,
             notes_text=notes_text,
-            system_prompt_override=system_prompt_override,
         )
 
         logger.debug(
