@@ -36,6 +36,7 @@ Globals:
         TERMINOLOGY_DB_ID: !Ref TerminologyDbId
         ORG_CHART_DB_ID: !Ref OrgChartDbId
         CLASSIFIER_PROMPT_PAGE_ID: !Ref ClassifierPromptPageId
+        MERGED_TRANSCRIPT_EXTRACTION_PROMPT_PAGE_ID: !Ref MergedTranscriptExtractionPromptPageId
         LITERAL_NOTES_EXTRACTION_PROMPT_PAGE_ID: !Ref LiteralNotesExtractionPromptPageId
         LOGFIRE_TOKEN: !Ref LogfireToken
         FUNDRAISING_BRANCH_ENABLED: !Ref FundraisingBranchEnabled
@@ -144,6 +145,13 @@ Parameters:
     Type: String
     Default: ''
     Description: Notion page ID for the transcript classifier system prompt.
+  MergedTranscriptExtractionPromptPageId:
+    Type: String
+    Default: ''
+    Description: |
+      Notion page ID for the merged transcript-extraction system prompt. Loaded
+      once per sync tick. When empty, the extractor falls back to the in-code
+      MERGED_SYSTEM_PROMPT constant.
   LiteralNotesExtractionPromptPageId:
     Type: String
     Default: ''

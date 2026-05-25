@@ -298,6 +298,28 @@ def test_schema_rejection_retries_without_schema_and_sticks():
     assert last_cfg.response_schema is None
 
 
+def test_system_prompt_override_replaces_hardcoded_prompt():
+    ext = TaskExtractor(api_key="k", model="gemini-3-flash-preview")
+    fake = _wire_genai_client(ext)
+    fake.models.generate_content.return_value = _stub_response(
+        {"domain_corrections": [], "speaker_resolutions": [], "tasks": []}
+    )
+
+    custom = "CUSTOM PROMPT TEXT FROM NOTION"
+    ext.extract_from_raw(
+        transcript="hi",
+        attendees=[],
+        terminology=_LARGE_TERMINOLOGY,
+        meeting_title="t", meeting_date="2026-05-11",
+        system_prompt_override=custom,
+    )
+
+    create_kwargs = fake.caches.create.call_args.kwargs
+    sys_inst = create_kwargs["config"].system_instruction
+    assert sys_inst.startswith(custom)
+    assert te.MERGED_SYSTEM_PROMPT not in sys_inst
+
+
 def test_non_gemini_model_uses_openai_path():
     ext = TaskExtractor(api_key="k", model="gpt-5-mini")
     # The OpenAI client is real — replace it with a mock for this test.

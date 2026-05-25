@@ -464,6 +464,7 @@ class TaskExtractor:
         meeting_date: str,
         enriched_attendee_str: str,
         notes_text: str,
+        system_prompt_override: str | None = None,
     ) -> tuple[str, str]:
         """Construct (system_message, user_prompt) for the merged call.
 
@@ -480,7 +481,7 @@ class TaskExtractor:
         # terminology + org chart. Reused across every meeting in a sync
         # tick. The native-Gemini path caches it explicitly; the
         # OpenAI-compat path relies on prefix auto-caching.
-        system_sections = [MERGED_SYSTEM_PROMPT]
+        system_sections = [system_prompt_override or MERGED_SYSTEM_PROMPT]
         if terminology:
             system_sections.append(f"=== TERMINOLOGY DICTIONARY ===\n{terminology}")
         if org_chart:
@@ -703,6 +704,7 @@ class TaskExtractor:
         meeting_date: str = "",
         enriched_attendee_str: str = "",
         notes_text: str = "",
+        system_prompt_override: str | None = None,
     ) -> list[dict]:
         """Merged correction + extraction in a single LLM call.
 
@@ -730,6 +732,7 @@ class TaskExtractor:
             meeting_date=meeting_date,
             enriched_attendee_str=enriched_attendee_str,
             notes_text=notes_text,
+            system_prompt_override=system_prompt_override,
         )
 
         logger.debug(

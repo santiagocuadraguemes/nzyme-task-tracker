@@ -474,6 +474,7 @@ def _process_via_transcript(
             meeting_date=metadata.get("date", ""),
             enriched_attendee_str=enriched_attendee_str,
             notes_text=notes_text,
+            system_prompt_override=ctx.get("merged_transcript_prompt") or None,
         )
         extract_elapsed = time.perf_counter() - t0
         if not tasks:
@@ -1129,6 +1130,31 @@ def _load_sync_context(
         except Exception:
             logger.exception("Failed to load classifier prompt — transcript classification will fall back to notes path")
 
+    # Merged transcript-extraction prompt (transcript path). Loading is
+    # best-effort: when the page is missing or empty, the extractor falls
+    # back to the in-code MERGED_SYSTEM_PROMPT constant.
+    merged_transcript_prompt = ""
+    if config.merged_transcript_extraction_prompt_page_id:
+        try:
+            merged_transcript_prompt = _fetch_page_text(
+                client, config.merged_transcript_extraction_prompt_page_id,
+            )
+            if merged_transcript_prompt.strip():
+                logger.debug(
+                    "Loaded merged transcript extraction prompt (%d chars)",
+                    len(merged_transcript_prompt),
+                )
+            else:
+                logger.warning(
+                    "Merged transcript extraction prompt page is empty — "
+                    "falling back to in-code MERGED_SYSTEM_PROMPT",
+                )
+        except Exception:
+            logger.exception(
+                "Failed to load merged transcript extraction prompt — "
+                "falling back to in-code MERGED_SYSTEM_PROMPT",
+            )
+
     # Literal-notes extraction prompt (only used when an Org Chart row has
     # `Auto-extract Tasks = false`). Loading is best-effort: if the page is
     # missing, the literal-notes path will skip with a warning rather than
@@ -1168,6 +1194,7 @@ def _load_sync_context(
         "org_chart_text": org_chart_text,
         "org_chart_rows": org_chart_rows,
         "classifier_prompt": classifier_prompt,
+        "merged_transcript_prompt": merged_transcript_prompt,
         "literal_notes_prompt": literal_notes_prompt,
     }
 
