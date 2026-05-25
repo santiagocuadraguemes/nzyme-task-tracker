@@ -487,10 +487,61 @@ def _plan_member_db_update(
     if dropped_old_ids:
         out = [o for o in out if not o.get("id") or o["id"] not in dropped_old_ids]
 
+    pending_create_names = [
+        out[idx]["name"] for idx, _ in pending_creates if idx < len(out)
+    ]
+    out = _slot_new_options_into_color_clusters(out, pending_create_names)
+
     result.changed = not _options_equal(out, current_options)
     result.new_options = out
     result._pending_creates = pending_creates  # type: ignore[attr-defined]
     result._dropped_old_ids = dropped_old_ids  # type: ignore[attr-defined]
+    return result
+
+
+def _slot_new_options_into_color_clusters(
+    out: list[dict[str, Any]],
+    pending_create_names: list[str],
+) -> list[dict[str, Any]]:
+    """Move each freshly-created option (no id yet, appended at the tail of
+    ``out``) to just after the last existing option that shares its color.
+
+    The operator owns the dropdown order on each member DB. Renames /
+    color updates / adoptions all leave existing options in their current
+    slot — only bootstrap-creates need a position chosen, and the natural
+    place is "end of the same-color cluster" so a new blue option lands
+    with the other blues rather than at the bottom of the array.
+
+    If no same-color option exists on the member DB yet, the new entry
+    stays at the tail (it becomes the start of that color's cluster).
+    """
+    if not pending_create_names:
+        return out
+
+    result = list(out)
+    for name in pending_create_names:
+        new_idx = next(
+            (
+                i for i, o in enumerate(result)
+                if o.get("name") == name and not o.get("id")
+            ),
+            None,
+        )
+        if new_idx is None:
+            continue
+        new_opt = result[new_idx]
+        new_color = new_opt.get("color") or _DEFAULT_COLOR
+        last_same_color = -1
+        for i, o in enumerate(result):
+            if i == new_idx:
+                continue
+            if (o.get("color") or _DEFAULT_COLOR) == new_color:
+                last_same_color = i
+        if last_same_color < 0 or last_same_color == new_idx - 1:
+            continue
+        result.pop(new_idx)
+        target = last_same_color + 1 if new_idx > last_same_color else last_same_color
+        result.insert(target, new_opt)
     return result
 
 

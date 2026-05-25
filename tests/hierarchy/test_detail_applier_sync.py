@@ -141,6 +141,73 @@ class TestPlanMemberDbUpdate:
         assert plan.drops == []
         assert plan.renames[0].desired_name == "(archived) Legal DD"
 
+    def test_manual_order_preserved_for_existing_options(self):
+        """Operator's manual ordering of existing options is never disturbed:
+        renames / color updates / adoptions edit options in-place; no
+        post-pass reorder reshuffles them."""
+        rows = [
+            _drow("d-1", "AI & Tech", "green"),
+            _drow("d-2", "Legal DD",  "blue"),
+            _drow("d-3", "Operations", "orange"),
+        ]
+        mappings = {
+            "d-1": _Mapping("d-1", "mdb-1", "opt-1", "AI & Tech"),
+            "d-2": _Mapping("d-2", "mdb-1", "opt-2", "Legal DD"),
+            "d-3": _Mapping("d-3", "mdb-1", "opt-3", "Operations"),
+        }
+        # Operator placed green on top, orange in middle, blue at bottom —
+        # deliberately NOT Notion palette order.
+        current = [
+            {"id": "opt-1", "name": "AI & Tech",  "color": "green"},
+            {"id": "opt-3", "name": "Operations", "color": "orange"},
+            {"id": "opt-2", "name": "Legal DD",   "color": "blue"},
+        ]
+        plan = _plan_member_db_update(rows, mappings, current, "mdb-1")
+        assert plan.changed is False
+        assert [o["id"] for o in plan.new_options] == ["opt-1", "opt-3", "opt-2"]
+
+    def test_new_option_slots_into_existing_same_color_cluster(self):
+        """A bootstrap-created option lands right after the last existing
+        option of its color, not at the bottom of the array."""
+        rows = [
+            _drow("d-1", "AI & Tech",         "green"),
+            _drow("d-2", "Finance & Reporting", "green"),
+            _drow("d-3", "Investor Relations", "pink"),
+            _drow("d-4", "HR Ops",             "green"),  # NEW
+        ]
+        mappings = {
+            "d-1": _Mapping("d-1", "mdb-1", "opt-1", "AI & Tech"),
+            "d-2": _Mapping("d-2", "mdb-1", "opt-2", "Finance & Reporting"),
+            "d-3": _Mapping("d-3", "mdb-1", "opt-3", "Investor Relations"),
+        }
+        current = [
+            {"id": "opt-1", "name": "AI & Tech",            "color": "green"},
+            {"id": "opt-2", "name": "Finance & Reporting",  "color": "green"},
+            {"id": "opt-3", "name": "Investor Relations",   "color": "pink"},
+        ]
+        plan = _plan_member_db_update(rows, mappings, current, "mdb-1")
+        assert plan.created == 1
+        names = [o.get("name") for o in plan.new_options]
+        assert names == [
+            "AI & Tech", "Finance & Reporting", "HR Ops",
+            "Investor Relations",
+        ]
+
+    def test_new_option_appends_when_no_same_color_cluster(self):
+        """First option of a never-seen color stays at the tail; it becomes
+        the start of that color's cluster for future inserts."""
+        rows = [
+            _drow("d-1", "AI & Tech",  "green"),
+            _drow("d-2", "Tech DD",    "blue"),  # NEW; no other blue yet
+        ]
+        mappings = {"d-1": _Mapping("d-1", "mdb-1", "opt-1", "AI & Tech")}
+        current = [{"id": "opt-1", "name": "AI & Tech", "color": "green"}]
+        plan = _plan_member_db_update(rows, mappings, current, "mdb-1")
+        assert plan.created == 1
+        assert [o.get("name") for o in plan.new_options] == [
+            "AI & Tech", "Tech DD",
+        ]
+
 
 class TestSync:
     def test_aborts_when_org_chart_unset(self):
