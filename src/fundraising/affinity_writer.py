@@ -1,9 +1,8 @@
 """Append-safe writer that updates the four Nzyme Next Step fields on a
 matched LP row and drops a meeting note linking back to the Notion page.
 
-All field ids are pre-known on list ``168609`` (Nzyme - LP Funnel); see
-``next_step_summarizer`` for the constants. V1 ``/fields`` returns bare
-numeric ids, so conversions are handled here.
+All field ids are pre-known on list ``168609`` (Nzyme - LP Funnel). V1
+``/fields`` returns bare numeric ids, so conversions are handled here.
 """
 from __future__ import annotations
 
@@ -13,12 +12,11 @@ from datetime import date
 from typing import Any
 
 from src.affinity_client import AffinityClient, AffinityError
-from src.fundraising.next_step_summarizer import (
-    FIELD_ID_DETAILS,
-    FIELD_ID_FOLLOW_UP_DATE,
-    FIELD_ID_NEXT_STEP_DROPDOWN,
-    FIELD_ID_OWNER,
-)
+
+FIELD_ID_NEXT_STEP_DROPDOWN = "field-5175722"
+FIELD_ID_FOLLOW_UP_DATE = "field-5171600"
+FIELD_ID_OWNER = "field-5432855"
+FIELD_ID_DETAILS = "field-5437596"
 
 logger = logging.getLogger(__name__)
 
