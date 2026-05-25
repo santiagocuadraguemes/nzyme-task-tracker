@@ -134,9 +134,12 @@ def _build_clone_properties(
     transcript, AI Summary block, notes — but does NOT carry over the
     source's database property VALUES. So every property the target DB
     expects must be re-passed here, even if the destination column exists.
-    Properties absent from the destination schema are still silently
-    dropped, which is what lets us omit pipeline-control columns
-    (``Processed``, ``Processing``, ``Task - Relation``, etc.).
+
+    Returns the FULL set of source-side properties; ``_filter_to_target_schema``
+    drops the ones the target DB doesn't declare before the actual clone call.
+    Notion 2026-03-11 rejects unknown property names on ``pages.create`` (e.g.
+    ``"External Org is not a property that exists"``) — silent-drop is no
+    longer the default, so we filter explicitly.
 
     ``owner_user_id`` is the Notion user UUID of the first contributor —
     written to the ``Owner`` people property. When empty, Owner is left
@@ -200,6 +203,153 @@ def _build_clone_properties(
         }
 
     return properties
+
+
+# Notion property write-shape type keys we may emit from _build_clone_properties.
+# Used to detect a write-value's type without baking it into each property's
+# build site.
+_WRITE_TYPE_KEYS = frozenset({
+    "title", "rich_text", "select", "multi_select", "status", "people",
+    "date", "url", "checkbox", "number", "relation", "files", "email",
+    "phone_number",
+})
+
+
+def _write_value_type(write_value: dict[str, Any]) -> str | None:
+    """Return the type key from a Notion write-shape property value.
+
+    Example: ``{"select": {"name": "AI"}}`` → ``"select"``.
+    Returns None when the shape isn't a recognised write value.
+    """
+    for k in write_value:
+        if k in _WRITE_TYPE_KEYS:
+            return k
+    return None
+
+
+def _filter_to_target_schema(
+    properties: dict[str, Any], target_schema: dict[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    """Drop properties that don't exist on *target_schema* or whose type
+    doesn't match.
+
+    The Meeting Mirrors landing DBs declare a narrow subset of the source's
+    columns on purpose (see ``docs/meeting-mirrors.md``). Notion's API used
+    to silently drop unknown property names on ``pages.create``, but the
+    ``template_id`` clone path against API ``2026-03-11`` now rejects them
+    (e.g. ``"External Org is not a property that exists"``), so we filter
+    here.
+
+    Returns (kept, dropped_names) so the caller can log what was discarded.
+    """
+    kept: dict[str, Any] = {}
+    dropped: list[str] = []
+    for name, value in properties.items():
+        target = target_schema.get(name)
+        if target is None:
+            dropped.append(name)
+            continue
+        value_type = _write_value_type(value)
+        target_type = target.get("type")
+        if value_type and target_type and value_type != target_type:
+            # Same name, different type — safer to drop than to send a value
+            # Notion will reject. Caller logs it.
+            dropped.append(f"{name}(type:{value_type}!={target_type})")
+            continue
+        kept[name] = value
+    return kept, dropped
+
+
+def _ensure_select_options_on_target(
+    client: NotionClientWrapper,
+    target_db_id: str,
+    target_schema: dict[str, Any],
+    properties_to_clone: dict[str, Any],
+    source_props: dict[str, Any],
+    route_label: str,
+) -> None:
+    """For each select / multi_select being cloned, add any option names
+    missing from the target DB's schema — preserving the source's color.
+
+    Notion's ``data_sources.update`` PATCH replaces the full options list,
+    so we re-send existing options (with their ``id`` so they're preserved)
+    plus the new option entries (no ``id`` = create). Source colors come
+    from the source page's property response, which carries
+    ``{name, id, color}`` inline for each selected option.
+
+    Failures are logged but not raised — if the PATCH fails the subsequent
+    clone will surface the real error (unknown option value) and the route
+    is marked failed by the caller. Silent fallback isn't acceptable here
+    (we'd lose data); loud-and-keep-going is.
+    """
+    patch_body: dict[str, Any] = {}
+
+    for name, write_value in properties_to_clone.items():
+        ptype = _write_value_type(write_value)
+        if ptype not in {"select", "multi_select"}:
+            continue
+        target_prop = target_schema.get(name) or {}
+        if target_prop.get("type") != ptype:
+            continue
+
+        existing_options = (target_prop.get(ptype) or {}).get("options", []) or []
+        existing_names = {o.get("name") for o in existing_options if o.get("name")}
+
+        # Pull desired option names + colors from the SOURCE page's property
+        # response — that's where the color info lives. The write_value only
+        # carries ``{name: ...}`` (no id, no color) because we built it.
+        src_prop = source_props.get(name) or {}
+        if ptype == "select":
+            src_options = [src_prop.get("select")] if src_prop.get("select") else []
+        else:
+            src_options = src_prop.get("multi_select") or []
+
+        new_entries: list[dict[str, Any]] = []
+        seen_new: set[str] = set()
+        for opt in src_options:
+            if not opt:
+                continue
+            opt_name = opt.get("name")
+            if not opt_name or opt_name in existing_names or opt_name in seen_new:
+                continue
+            entry: dict[str, Any] = {"name": opt_name}
+            color = opt.get("color")
+            if color:
+                entry["color"] = color
+            new_entries.append(entry)
+            seen_new.add(opt_name)
+
+        if not new_entries:
+            continue
+
+        full_options: list[dict[str, Any]] = []
+        for o in existing_options:
+            preserved: dict[str, Any] = {"name": o["name"]}
+            if o.get("id"):
+                preserved["id"] = o["id"]
+            if o.get("color"):
+                preserved["color"] = o["color"]
+            full_options.append(preserved)
+        full_options.extend(new_entries)
+
+        patch_body[name] = {ptype: {"options": full_options}}
+        logger.info(
+            "Mirror %s: adding %d missing %s option(s) to target.%s: %s",
+            route_label, len(new_entries), ptype, name,
+            ", ".join(e["name"] for e in new_entries),
+        )
+
+    if not patch_body:
+        return
+
+    try:
+        client.update_data_source(target_db_id, patch_body)
+    except APIResponseError as e:
+        logger.warning(
+            "Mirror %s: failed to add missing select options to target DB %s: %s — "
+            "clone will likely fail on those values",
+            route_label, target_db_id[:8], e,
+        )
 
 
 def _clone_into_target(
@@ -355,7 +505,29 @@ def clone_or_merge(
     """
     existing = find_existing_mirror(client, route.target_db_id, source_title, source_date)
     if existing is None:
+        # Retrieve target schema once so we can (a) drop source props the
+        # target doesn't declare, and (b) auto-add missing select /
+        # multi_select option values before the clone. Notion API 2026-03-11
+        # no longer silently drops unknown property names on pages.create
+        # under template_id, so this filtering step is load-bearing.
+        target_schema = (
+            client.retrieve_data_source(route.target_db_id).get("properties") or {}
+        )
         properties = _build_clone_properties(source_page, source_title, owner_user_id)
+        properties, dropped = _filter_to_target_schema(properties, target_schema)
+        if dropped:
+            logger.info(
+                "Mirror %s: dropped %d source prop(s) absent from target schema: %s",
+                route.label, len(dropped), ", ".join(dropped),
+            )
+        _ensure_select_options_on_target(
+            client=client,
+            target_db_id=route.target_db_id,
+            target_schema=target_schema,
+            properties_to_clone=properties,
+            source_props=source_page.get("properties") or {},
+            route_label=route.label,
+        )
         mirror = _clone_into_target(client, source_page, route.target_db_id, properties)
         logger.info(
             "Cloned page %s → mirror %s (route=%s owner=%s)",
