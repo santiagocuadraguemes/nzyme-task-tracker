@@ -140,14 +140,6 @@ class SyncConfig(BaseModel):
     affinity_lp_funnel_list_id: int = Field(
         168609, description="Affinity list ID for the Nzyme - LP Funnel list",
     )
-    kibo_user_map_path: str | None = Field(
-        None,
-        description=(
-            "Path to JSON file mapping Kibo team members across "
-            "Notion/email/Affinity user ids. Defaults to "
-            "src/fundraising/data/kibo_user_map.json"
-        ),
-    )
     # Meeting Mirrors feature (opt-in via TOPIC_MIRROR_ENABLED).
     # Clones tagged meetings (Work area / Detail / External Org) into
     # topic-specific Notion DBs. Routing rules live in the Meeting Rules
@@ -241,7 +233,6 @@ def load_config() -> SyncConfig:
         in ("true", "1", "yes"),
         affinity_api_key=os.getenv("AFFINITY_API_KEY"),
         affinity_lp_funnel_list_id=int(os.getenv("AFFINITY_LP_FUNNEL_LIST_ID", "168609")),
-        kibo_user_map_path=os.getenv("KIBO_USER_MAP_PATH"),
         topic_mirror_enabled=os.getenv("TOPIC_MIRROR_ENABLED", "false").lower()
         in ("true", "1", "yes"),
         # Prefer the new env var; fall back to the old name for one deploy

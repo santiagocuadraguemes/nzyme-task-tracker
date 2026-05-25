@@ -8,7 +8,7 @@ When a meeting is tagged `Meeting type = Fundraising`, the pipeline mirrors a me
 2. Composes the note body from the **user's `## Notes`** content (inside the meeting_notes block) + Notion's auto-populated **`AI Summary`** page property — no LLM call here.
 3. Posts an HTML meeting note attached to each matched LP's **opportunity** (title + composed body + Notion backlink). When neither user notes nor the AI Summary property is populated, the note degrades to title + backlink only.
 
-Field updates (`Nzyme next step`, `Follow Up Date`, `OWNER`, `DETAILS`) are **abandoned**. The previous deferred-re-enable plan (and the LLM `next_step_summarizer` that fed it) has been removed; `write_next_step_to_lp` and `_resolve_owner` remain in the module as standalone helpers but nothing in production wires them up.
+Field updates (`Nzyme next step`, `Follow Up Date`, `OWNER`, `DETAILS`) are **abandoned**. The deferred-re-enable plan has been removed in full: the LLM `next_step_summarizer`, `write_next_step_to_lp`, the `_resolve_owner` Affinity-user resolver, the `KiboUserMap` Notion↔Affinity static map, and the `kibo_user_map.json` data file are all gone. If field writes ever come back, build the new path fresh against the current Affinity V1 client.
 
 ## Email source
 
@@ -43,8 +43,7 @@ Not implemented. Manual re-trigger of an already-posted page would create a dupl
 - `src/fundraising/outcome.py` — `FundraisingStatus` enum + `FundraisingOutcome` dataclass
 - `src/fundraising/lp_matcher.py` — `resolve_lp_list_entries` returns *all* matched list_entry_ids (multi-LP meetings post to every match)
 - `src/fundraising/affinity_writer.py` — `post_meeting_note_to_lps` loops over opportunity ids and returns `(posted, failed)`
-- `src/fundraising/data/kibo_user_map.json` — static Notion/email ↔ Affinity user-id map; only needed once OWNER field writes are re-enabled
 
 ## Env vars
 
-`FUNDRAISING_BRANCH_ENABLED`, `AFFINITY_API_KEY`, `AFFINITY_LP_FUNNEL_LIST_ID` (default 168609), `KIBO_USER_MAP_PATH` (optional override).
+`FUNDRAISING_BRANCH_ENABLED`, `AFFINITY_API_KEY`, `AFFINITY_LP_FUNNEL_LIST_ID` (default 168609).

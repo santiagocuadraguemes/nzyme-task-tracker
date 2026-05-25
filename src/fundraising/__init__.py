@@ -14,17 +14,13 @@ from typing import Any
 
 from src.affinity_client import AffinityClient, AffinityError
 from src.config import SyncConfig
-from src.fundraising.affinity_writer import (
-    post_meeting_note_to_lps,
-    write_next_step_to_lp,  # noqa: F401 — retained for future field-write re-enable
-)
+from src.fundraising.affinity_writer import post_meeting_note_to_lps
 from src.fundraising.lp_matcher import (
     build_lp_entity_index,
     extract_external_emails,
     resolve_lp_list_entries,
 )
 from src.fundraising.outcome import FundraisingOutcome, FundraisingStatus
-from src.fundraising.user_map import KiboUserMap  # noqa: F401 — used by _resolve_owner
 from src.notion_client_wrapper import NotionClientWrapper
 from src.transcript_pipeline.fetch_transcript import (
     extract_ai_summary,
@@ -178,42 +174,6 @@ def write_to_affinity(
             status=FundraisingStatus.FAILED_API_ERROR,
             detail=f"Unexpected error: {type(e).__name__}: {e}",
         )
-
-
-def _resolve_owner(
-    *,
-    user_map: KiboUserMap,
-    summary_payload: dict[str, Any],
-    tasks: list[dict[str, Any]],
-    creator: dict[str, Any],
-) -> int | None:
-    """Owner precedence: summarizer → any classified internal assignee → creator.
-
-    Returns an Affinity user id, or None if no mapping is available (in which
-    case the writer will skip the OWNER field so we never overwrite with null).
-    """
-    summarizer_pick = summary_payload.get("owner_notion_user_id")
-    if summarizer_pick:
-        if (aid := user_map.affinity_id_for_notion_user(summarizer_pick)) is not None:
-            return aid
-        logger.info(
-            "Summarizer chose Notion user %s but no Affinity mapping exists",
-            summarizer_pick,
-        )
-
-    for task in tasks:
-        for notion_id in task.get("assignee_id") or []:
-            if (aid := user_map.affinity_id_for_notion_user(notion_id)) is not None:
-                return aid
-
-    creator_id = creator.get("id")
-    if creator_id and (aid := user_map.affinity_id_for_notion_user(creator_id)) is not None:
-        return aid
-
-    logger.warning(
-        "No Affinity owner could be resolved — OWNER field will be left unchanged",
-    )
-    return None
 
 
 __all__ = ["FundraisingOutcome", "FundraisingStatus", "write_to_affinity"]
