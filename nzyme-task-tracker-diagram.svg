@@ -1,0 +1,398 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1800 1400">
+
+  <defs>
+    <style type="text/css"><![CDATA[
+      @import url('https://fonts.googleapis.com/css2?family=Geologica:wght@400;500;600;700&display=swap');
+      text { font-family: 'Geologica', -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; }
+    ]]></style>
+    <marker id="arrow-navy" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#0A3A5C"/>
+    </marker>
+    <marker id="arrow-teal" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#2AB3B9"/>
+    </marker>
+    <marker id="arrow-grey" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#5A6470"/>
+    </marker>
+  </defs>
+
+  <rect width="1800" height="1400" fill="#F5F7F9"/>
+
+  <!-- Title -->
+  <text x="60" y="72" font-size="32" font-weight="700" fill="#0A3A5C">Nzyme task-tracker - Notion, AWS, and Supabase</text>
+  <text x="60" y="104" font-size="16" font-weight="400" fill="#5A6470">One Lambda. Two main flows (meeting processor + hierarchy sync) plus three supporting jobs.</text>
+
+  <!-- =============================================== -->
+  <!-- NOTION WORKSPACE container -->
+  <!-- =============================================== -->
+  <g>
+    <rect x="40" y="160" width="560" height="1020" rx="12" fill="#FFFFFF" stroke="#B5BCC3" stroke-width="1.5"/>
+    <text x="70" y="200" font-size="13" font-weight="600" fill="#0A3A5C" letter-spacing="1.5">NOTION WORKSPACE</text>
+    <line x1="70" y1="210" x2="220" y2="210" stroke="#2AB3B9" stroke-width="2"/>
+    <text x="70" y="230" font-size="11" font-weight="400" fill="#5A6470">Source-of-truth DBs the team edits directly</text>
+
+    <!-- Org Chart DB -->
+    <g>
+      <rect x="90" y="260" width="460" height="72" rx="8" fill="#FFFFFF" stroke="#0A3A5C" stroke-width="1.5"/>
+      <text x="320" y="290" font-size="15" font-weight="600" fill="#0A3A5C" text-anchor="middle">Org Chart DB</text>
+      <text x="320" y="312" font-size="11" font-weight="400" fill="#5A6470" text-anchor="middle">member registry: who is active, their DB, auto-extract flag</text>
+    </g>
+
+    <!-- Member Meeting Notes DBs -->
+    <g>
+      <rect x="90" y="372" width="460" height="86" rx="8" fill="#0A3A5C"/>
+      <text x="320" y="404" font-size="16" font-weight="600" fill="#FFFFFF" text-anchor="middle">Member Meeting Notes DBs (xN)</text>
+      <text x="320" y="428" font-size="11" font-weight="400" fill="#D4D8DC" text-anchor="middle">one DB per active team member</text>
+      <text x="320" y="446" font-size="11" font-weight="400" fill="#D4D8DC" text-anchor="middle">transcripts + human notes</text>
+    </g>
+
+    <!-- Meeting Template page -->
+    <g>
+      <rect x="90" y="498" width="460" height="68" rx="8" fill="#FFFFFF" stroke="#0A3A5C" stroke-width="1.5"/>
+      <text x="320" y="528" font-size="15" font-weight="600" fill="#0A3A5C" text-anchor="middle">Meeting Template page</text>
+      <text x="320" y="548" font-size="11" font-weight="400" fill="#5A6470" text-anchor="middle">blocks injected into every new meeting page</text>
+    </g>
+
+    <!-- Hierarchy DB -->
+    <g>
+      <rect x="90" y="606" width="460" height="72" rx="8" fill="#FFFFFF" stroke="#0A3A5C" stroke-width="1.5"/>
+      <text x="320" y="636" font-size="15" font-weight="600" fill="#0A3A5C" text-anchor="middle">Hierarchy DB</text>
+      <text x="320" y="658" font-size="11" font-weight="400" fill="#5A6470" text-anchor="middle">canonical work-block taxonomy (Tier 0 / 1 / 2)</text>
+    </g>
+
+    <!-- Detail Options DB -->
+    <g>
+      <rect x="90" y="718" width="460" height="72" rx="8" fill="#FFFFFF" stroke="#0A3A5C" stroke-width="1.5"/>
+      <text x="320" y="748" font-size="15" font-weight="600" fill="#0A3A5C" text-anchor="middle">Detail Options DB</text>
+      <text x="320" y="770" font-size="11" font-weight="400" fill="#5A6470" text-anchor="middle">canonical Detail dropdown options + colors</text>
+    </g>
+
+    <!-- Team Task Tracker -->
+    <g>
+      <rect x="90" y="850" width="460" height="86" rx="8" fill="#0A3A5C"/>
+      <text x="320" y="882" font-size="16" font-weight="600" fill="#FFFFFF" text-anchor="middle">Team Task Tracker (live)</text>
+      <text x="320" y="906" font-size="11" font-weight="400" fill="#D4D8DC" text-anchor="middle">tasks + [DETAILS INSIDE] hierarchy rows</text>
+      <text x="320" y="924" font-size="11" font-weight="400" fill="#D4D8DC" text-anchor="middle"></text>
+    </g>
+
+    <!-- Team Task Tracker - Archive -->
+    <g>
+      <rect x="90" y="970" width="460" height="68" rx="8" fill="#FFFFFF" stroke="#0A3A5C" stroke-width="1.5"/>
+      <text x="320" y="1000" font-size="15" font-weight="600" fill="#0A3A5C" text-anchor="middle">Team Task Tracker - Archive</text>
+      <text x="320" y="1020" font-size="11" font-weight="400" fill="#5A6470" text-anchor="middle">copies of Done tasks idle &gt; 3 days</text>
+    </g>
+  </g>
+
+  <!-- =============================================== -->
+  <!-- AWS container -->
+  <!-- =============================================== -->
+  <g>
+    <rect x="660" y="160" width="540" height="1020" rx="12" fill="#FFFFFF" stroke="#B5BCC3" stroke-width="1.5"/>
+    <text x="690" y="200" font-size="13" font-weight="600" fill="#0A3A5C" letter-spacing="1.5">AWS</text>
+    <line x1="690" y1="210" x2="745" y2="210" stroke="#2AB3B9" stroke-width="2"/>
+    <text x="690" y="230" font-size="11" font-weight="400" fill="#5A6470">All orchestration runs as one Lambda with five jobs</text>
+
+    <!-- API Gateway -->
+    <g>
+      <rect x="690" y="260" width="220" height="68" rx="8" fill="#FFFFFF" stroke="#0A3A5C" stroke-width="1.5"/>
+      <text x="800" y="288" font-size="14" font-weight="600" fill="#0A3A5C" text-anchor="middle">API Gateway</text>
+      <text x="800" y="308" font-size="11" font-weight="400" fill="#5A6470" text-anchor="middle">POST /webhook/{token}</text>
+    </g>
+
+    <!-- EventBridge -->
+    <g>
+      <rect x="950" y="260" width="220" height="68" rx="8" fill="#FFFFFF" stroke="#0A3A5C" stroke-width="1.5"/>
+      <text x="1060" y="288" font-size="14" font-weight="600" fill="#0A3A5C" text-anchor="middle">EventBridge</text>
+      <text x="1060" y="308" font-size="11" font-weight="400" fill="#5A6470" text-anchor="middle">cron schedules (4)</text>
+    </g>
+
+    <!-- Lambda wrapper -->
+    <g>
+      <rect x="685" y="400" width="500" height="740" rx="10" fill="none" stroke="#5A6470" stroke-width="1" stroke-dasharray="4 4"/>
+      <text x="700" y="420" font-size="11" font-weight="600" fill="#5A6470" letter-spacing="1">LAMBDA - nzyme-task-tracker (single function, 5 jobs)</text>
+
+      <!-- Job 1: Template injection -->
+      <g>
+        <rect x="705" y="436" width="460" height="84" rx="8" fill="#FFFFFF" stroke="#0A3A5C" stroke-width="1.5"/>
+        <text x="935" y="466" font-size="15" font-weight="600" fill="#0A3A5C" text-anchor="middle">Template injection</text>
+        <text x="935" y="486" font-size="11" font-weight="400" fill="#5A6470" text-anchor="middle">trigger: webhook (page created)</text>
+        <text x="935" y="504" font-size="11" font-weight="400" fill="#5A6470" text-anchor="middle">injects standard headings into new meeting pages</text>
+      </g>
+
+      <!-- Job 2: Supabase mirror -->
+      <g>
+        <rect x="705" y="554" width="460" height="84" rx="8" fill="#FFFFFF" stroke="#0A3A5C" stroke-width="1.5"/>
+        <text x="935" y="584" font-size="15" font-weight="600" fill="#0A3A5C" text-anchor="middle">Notion -&gt; Supabase meeting mirror</text>
+        <text x="935" y="604" font-size="11" font-weight="400" fill="#5A6470" text-anchor="middle">cron: every 5 min + Sunday full resync</text>
+        <text x="935" y="622" font-size="11" font-weight="400" fill="#5A6470" text-anchor="middle">incremental mirror of meeting pages</text>
+      </g>
+
+      <!-- Job 3: Meeting processor (SOLID NAVY) -->
+      <g>
+        <rect x="705" y="672" width="460" height="94" rx="8" fill="#0A3A5C"/>
+        <text x="935" y="704" font-size="17" font-weight="600" fill="#FFFFFF" text-anchor="middle">Meeting processor</text>
+        <text x="935" y="724" font-size="11" font-weight="400" fill="#D4D8DC" text-anchor="middle">cron: every 5 min</text>
+        <text x="935" y="744" font-size="11" font-weight="400" fill="#D4D8DC" text-anchor="middle">transcript -&gt; correct -&gt; extract -&gt; classify -&gt; dedup -&gt; write</text>
+      </g>
+
+      <!-- Job 4: Hierarchy sync (SOLID NAVY) -->
+      <g>
+        <rect x="705" y="800" width="460" height="94" rx="8" fill="#0A3A5C"/>
+        <text x="935" y="832" font-size="17" font-weight="600" fill="#FFFFFF" text-anchor="middle">Hierarchy sync</text>
+        <text x="935" y="852" font-size="11" font-weight="400" fill="#D4D8DC" text-anchor="middle">cron: daily 07:00 Madrid</text>
+        <text x="935" y="872" font-size="11" font-weight="400" fill="#D4D8DC" text-anchor="middle">canonical mirror + apply options + reconcile Tracker rows</text>
+      </g>
+
+      <!-- Job 5: Done-task archive -->
+      <g>
+        <rect x="705" y="928" width="460" height="84" rx="8" fill="#FFFFFF" stroke="#0A3A5C" stroke-width="1.5"/>
+        <text x="935" y="958" font-size="15" font-weight="600" fill="#0A3A5C" text-anchor="middle">Done-task archive sweep</text>
+        <text x="935" y="978" font-size="11" font-weight="400" fill="#5A6470" text-anchor="middle">cron: Sunday 06:00 UTC</text>
+        <text x="935" y="996" font-size="11" font-weight="400" fill="#5A6470" text-anchor="middle">copies Done tasks idle &gt; 3d to Archive, soft-deletes original</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- =============================================== -->
+  <!-- SUPABASE container -->
+  <!-- =============================================== -->
+  <g>
+    <rect x="1260" y="160" width="500" height="1020" rx="12" fill="#FFFFFF" stroke="#B5BCC3" stroke-width="1.5"/>
+    <text x="1290" y="200" font-size="13" font-weight="600" fill="#0A3A5C" letter-spacing="1.5">SUPABASE</text>
+    <line x1="1290" y1="210" x2="1370" y2="210" stroke="#2AB3B9" stroke-width="2"/>
+    <text x="1290" y="230" font-size="11" font-weight="400" fill="#5A6470">Canonical store + mirror of Notion meeting content</text>
+
+    <!-- meeting_transcripts -->
+    <g>
+      <rect x="1300" y="554" width="420" height="76" rx="8" fill="#FFFFFF" stroke="#0A3A5C" stroke-width="1.5"/>
+      <text x="1510" y="584" font-size="15" font-weight="600" fill="#0A3A5C" text-anchor="middle">meeting_transcripts</text>
+      <text x="1510" y="606" font-size="11" font-weight="400" fill="#5A6470" text-anchor="middle">mirror of every meeting page (transcript + notes)</text>
+    </g>
+
+    <!-- hierarchy_rows -->
+    <g>
+      <rect x="1300" y="676" width="420" height="76" rx="8" fill="#FFFFFF" stroke="#0A3A5C" stroke-width="1.5"/>
+      <text x="1510" y="706" font-size="15" font-weight="600" fill="#0A3A5C" text-anchor="middle">hierarchy_rows</text>
+      <text x="1510" y="728" font-size="11" font-weight="400" fill="#5A6470" text-anchor="middle">canonical Tier 0 / 1 / 2 + Tracker node mapping</text>
+    </g>
+
+    <!-- detail_rows -->
+    <g>
+      <rect x="1300" y="788" width="420" height="76" rx="8" fill="#FFFFFF" stroke="#0A3A5C" stroke-width="1.5"/>
+      <text x="1510" y="818" font-size="15" font-weight="600" fill="#0A3A5C" text-anchor="middle">detail_rows</text>
+      <text x="1510" y="840" font-size="11" font-weight="400" fill="#5A6470" text-anchor="middle">canonical Detail options + colors</text>
+    </g>
+
+    <!-- ReportingNz_deals -->
+    <g>
+      <rect x="1300" y="900" width="420" height="76" rx="8" fill="#FFFFFF" stroke="#0A3A5C" stroke-width="1.5"/>
+      <text x="1510" y="930" font-size="15" font-weight="600" fill="#0A3A5C" text-anchor="middle">ReportingNz_deals</text>
+      <text x="1510" y="952" font-size="11" font-weight="400" fill="#5A6470" text-anchor="middle">deals canonical (written by another system)</text>
+    </g>
+  </g>
+
+  <!-- =============================================== -->
+  <!-- EXTERNAL SERVICES strip -->
+  <!-- =============================================== -->
+  <g>
+    <text x="60" y="1235" font-size="13" font-weight="600" fill="#0A3A5C" letter-spacing="1.5">EXTERNAL SERVICES</text>
+    <line x1="60" y1="1245" x2="220" y2="1245" stroke="#2AB3B9" stroke-width="2"/>
+
+    <!-- LLM -->
+    <g>
+      <rect x="220" y="1270" width="300" height="80" rx="8" fill="#FFFFFF" stroke="#0A3A5C" stroke-width="1.5"/>
+      <text x="370" y="1302" font-size="15" font-weight="600" fill="#0A3A5C" text-anchor="middle">LLM extractor / classifier</text>
+      <text x="370" y="1324" font-size="11" font-weight="400" fill="#5A6470" text-anchor="middle">transcript cleanup, task extraction, dedup</text>
+    </g>
+
+    <!-- Google Calendar -->
+    <g>
+      <rect x="750" y="1270" width="300" height="80" rx="8" fill="#FFFFFF" stroke="#0A3A5C" stroke-width="1.5"/>
+      <text x="900" y="1302" font-size="15" font-weight="600" fill="#0A3A5C" text-anchor="middle">Google Calendar</text>
+      <text x="900" y="1324" font-size="11" font-weight="400" fill="#5A6470" text-anchor="middle">meeting attendees</text>
+    </g>
+
+    <!-- Affinity -->
+    <g>
+      <rect x="1280" y="1270" width="300" height="80" rx="8" fill="#FFFFFF" stroke="#0A3A5C" stroke-width="1.5"/>
+      <text x="1430" y="1302" font-size="15" font-weight="600" fill="#0A3A5C" text-anchor="middle">Affinity (LP Funnel)</text>
+      <text x="1430" y="1324" font-size="11" font-weight="400" fill="#5A6470" text-anchor="middle">fundraising branch only</text>
+    </g>
+  </g>
+
+  <!-- =============================================== -->
+  <!-- ARROWS -->
+  <!-- =============================================== -->
+
+  <!-- API Gateway -> Template injection -->
+  <path d="M 800 328 L 800 436" stroke="#0A3A5C" stroke-width="1.5" fill="none" marker-end="url(#arrow-navy)"/>
+  <g>
+    <rect x="730" y="370" width="140" height="22" fill="#FFFFFF"/>
+    <text x="800" y="386" font-size="11" font-weight="500" fill="#5A6470" text-anchor="middle">page-created webhook</text>
+  </g>
+
+  <!-- EventBridge -> Lambda wrapper top -->
+  <path d="M 1060 328 C 1060 360, 1070 390, 1075 422" stroke="#0A3A5C" stroke-width="1.5" fill="none" marker-end="url(#arrow-navy)"/>
+  <g>
+    <rect x="985" y="346" width="150" height="22" fill="#FFFFFF"/>
+    <text x="1060" y="362" font-size="11" font-weight="500" fill="#5A6470" text-anchor="middle">4 scheduled triggers</text>
+  </g>
+
+  <!-- =============================================== -->
+  <!-- TEMPLATE INJECTION arrows -->
+  <!-- =============================================== -->
+
+  <!-- Template injection -> Member DBs (inject blocks) -->
+  <path d="M 705 470 L 550 388" stroke="#0A3A5C" stroke-width="1.5" fill="none" marker-end="url(#arrow-navy)"/>
+  <g>
+    <rect x="570" y="402" width="116" height="20" fill="#FFFFFF"/>
+    <text x="628" y="417" font-size="11" font-weight="500" fill="#5A6470" text-anchor="middle">inject template</text>
+  </g>
+
+  <!-- Meeting Template page -> Template injection (fetch template) - dashed -->
+  <path d="M 550 520 L 705 490" stroke="#5A6470" stroke-width="1.2" fill="none" stroke-dasharray="5 4" marker-end="url(#arrow-grey)"/>
+  <g>
+    <rect x="570" y="496" width="116" height="20" fill="#FFFFFF"/>
+    <text x="628" y="511" font-size="11" font-weight="500" fill="#5A6470" text-anchor="middle">fetch template</text>
+  </g>
+
+  <!-- =============================================== -->
+  <!-- SUPABASE MIRROR arrows -->
+  <!-- =============================================== -->
+
+  <!-- Member DBs -> Supabase mirror (read pages) -->
+  <path d="M 550 415 C 620 420, 670 580, 705 590" stroke="#0A3A5C" stroke-width="1.5" fill="none" marker-end="url(#arrow-navy)"/>
+  <g>
+    <rect x="586" y="552" width="108" height="20" fill="#FFFFFF"/>
+    <text x="640" y="567" font-size="11" font-weight="500" fill="#5A6470" text-anchor="middle">read pages</text>
+  </g>
+
+  <!-- Supabase mirror -> meeting_transcripts -->
+  <path d="M 1165 596 L 1300 590" stroke="#0A3A5C" stroke-width="1.5" fill="none" marker-end="url(#arrow-navy)"/>
+  <g>
+    <rect x="1198" y="574" width="76" height="20" fill="#FFFFFF"/>
+    <text x="1236" y="589" font-size="11" font-weight="500" fill="#5A6470" text-anchor="middle">upsert</text>
+  </g>
+
+  <!-- =============================================== -->
+  <!-- MEETING PROCESSOR arrows -->
+  <!-- =============================================== -->
+
+  <!-- Org Chart DB -> Meeting processor (registry) - dashed grey context -->
+  <path d="M 550 296 C 625 296, 670 700, 705 705" stroke="#5A6470" stroke-width="1.2" fill="none" stroke-dasharray="5 4" marker-end="url(#arrow-grey)"/>
+  <g>
+    <rect x="618" y="342" width="78" height="20" fill="#FFFFFF"/>
+    <text x="657" y="357" font-size="11" font-weight="500" fill="#5A6470" text-anchor="middle">registry</text>
+  </g>
+
+  <!-- Member DBs -> Meeting processor (transcripts + notes) -->
+  <path d="M 550 440 C 620 442, 670 710, 705 718" stroke="#0A3A5C" stroke-width="1.5" fill="none" marker-end="url(#arrow-navy)"/>
+  <g>
+    <rect x="588" y="652" width="124" height="20" fill="#FFFFFF"/>
+    <text x="650" y="667" font-size="11" font-weight="500" fill="#5A6470" text-anchor="middle">transcripts + notes</text>
+  </g>
+
+  <!-- Meeting processor -> Team Task Tracker (write tasks) - TEAL critical path -->
+  <path d="M 705 730 C 640 740, 615 870, 550 882" stroke="#2AB3B9" stroke-width="2.5" fill="none" marker-end="url(#arrow-teal)"/>
+  <g>
+    <rect x="585" y="800" width="120" height="22" fill="#FFFFFF"/>
+    <text x="645" y="816" font-size="12" font-weight="600" fill="#2AB3B9" text-anchor="middle">write tasks</text>
+  </g>
+
+  <!-- Meeting processor -> LLM (curve down-left out of AWS, below Notion container, into LLM) -->
+  <path d="M 705 690 C 620 900, 500 1230, 370 1270" stroke="#0A3A5C" stroke-width="1.5" fill="none" marker-end="url(#arrow-navy)"/>
+  <g>
+    <rect x="460" y="1182" width="190" height="22" fill="#F5F7F9"/>
+    <text x="555" y="1198" font-size="11" font-weight="500" fill="#5A6470" text-anchor="middle">correct / extract / classify</text>
+  </g>
+
+  <!-- Meeting processor -> Google Calendar (curve right out of AWS, down through gap, back to center) -->
+  <path d="M 1165 695 C 1240 900, 1235 1200, 900 1270" stroke="#5A6470" stroke-width="1.2" fill="none" stroke-dasharray="5 4" marker-end="url(#arrow-grey)"/>
+  <g>
+    <rect x="850" y="1198" width="100" height="22" fill="#F5F7F9"/>
+    <text x="900" y="1214" font-size="11" font-weight="500" fill="#5A6470" text-anchor="middle">attendees</text>
+  </g>
+
+  <!-- Meeting processor -> Affinity (curve right out of AWS, down-right to Affinity) -->
+  <path d="M 1165 720 C 1245 940, 1265 1220, 1430 1270" stroke="#5A6470" stroke-width="1.2" fill="none" stroke-dasharray="5 4" marker-end="url(#arrow-grey)"/>
+  <g>
+    <rect x="1305" y="1188" width="240" height="22" fill="#F5F7F9"/>
+    <text x="1425" y="1204" font-size="11" font-weight="500" fill="#5A6470" text-anchor="middle">post LP note (fundraising branch)</text>
+  </g>
+
+  <!-- =============================================== -->
+  <!-- HIERARCHY SYNC arrows -->
+  <!-- =============================================== -->
+
+  <!-- Hierarchy DB -> Hierarchy sync (read canonical) -->
+  <path d="M 550 642 C 625 645, 670 825, 705 832" stroke="#0A3A5C" stroke-width="1.5" fill="none" marker-end="url(#arrow-navy)"/>
+  <g>
+    <rect x="585" y="657" width="120" height="20" fill="#FFFFFF"/>
+    <text x="645" y="672" font-size="11" font-weight="500" fill="#5A6470" text-anchor="middle">Tier 0 / 1 / 2</text>
+  </g>
+
+  <!-- Detail Options DB -> Hierarchy sync (read canonical detail) -->
+  <path d="M 550 754 C 625 756, 670 850, 705 855" stroke="#0A3A5C" stroke-width="1.5" fill="none" marker-end="url(#arrow-navy)"/>
+  <g>
+    <rect x="585" y="763" width="120" height="20" fill="#FFFFFF"/>
+    <text x="645" y="778" font-size="11" font-weight="500" fill="#5A6470" text-anchor="middle">detail options</text>
+  </g>
+
+  <!-- Hierarchy sync -> hierarchy_rows (mirror) -->
+  <path d="M 1165 820 C 1230 815, 1265 720, 1300 712" stroke="#0A3A5C" stroke-width="1.5" fill="none" marker-end="url(#arrow-navy)"/>
+  <g>
+    <rect x="1210" y="752" width="76" height="20" fill="#FFFFFF"/>
+    <text x="1248" y="767" font-size="11" font-weight="500" fill="#5A6470" text-anchor="middle">mirror</text>
+  </g>
+
+  <!-- Hierarchy sync -> detail_rows (mirror) -->
+  <path d="M 1165 840 C 1230 845, 1265 820, 1300 822" stroke="#0A3A5C" stroke-width="1.5" fill="none" marker-end="url(#arrow-navy)"/>
+  <g>
+    <rect x="1210" y="848" width="76" height="20" fill="#FFFFFF"/>
+    <text x="1248" y="863" font-size="11" font-weight="500" fill="#5A6470" text-anchor="middle">mirror</text>
+  </g>
+
+  <!-- ReportingNz_deals -> Hierarchy sync (read deal stages) - dashed grey -->
+  <path d="M 1300 936 C 1230 928, 1200 870, 1165 860" stroke="#5A6470" stroke-width="1.2" fill="none" stroke-dasharray="5 4" marker-end="url(#arrow-grey)"/>
+  <g>
+    <rect x="1205" y="920" width="98" height="20" fill="#FFFFFF"/>
+    <text x="1254" y="935" font-size="11" font-weight="500" fill="#5A6470" text-anchor="middle">deal stages</text>
+  </g>
+
+  <!-- Hierarchy sync -> Member DBs (apply options) -->
+  <path d="M 705 815 C 635 810, 605 450, 550 458" stroke="#0A3A5C" stroke-width="1.5" fill="none" marker-end="url(#arrow-navy)"/>
+  <g>
+    <rect x="568" y="568" width="166" height="38" fill="#FFFFFF"/>
+    <text x="651" y="584" font-size="11" font-weight="500" fill="#5A6470" text-anchor="middle">apply Work area / Detail /</text>
+    <text x="651" y="600" font-size="11" font-weight="500" fill="#5A6470" text-anchor="middle">External Org options</text>
+  </g>
+
+  <!-- Hierarchy sync -> Team Task Tracker ([DETAILS INSIDE] rows) - TEAL critical path -->
+  <path d="M 705 850 C 640 858, 615 895, 550 906" stroke="#2AB3B9" stroke-width="2.5" fill="none" marker-end="url(#arrow-teal)"/>
+  <g>
+    <rect x="572" y="858" width="146" height="22" fill="#FFFFFF"/>
+    <text x="645" y="874" font-size="12" font-weight="600" fill="#2AB3B9" text-anchor="middle">[DETAILS INSIDE] rows</text>
+  </g>
+
+  <!-- =============================================== -->
+  <!-- DONE-TASK ARCHIVE arrows -->
+  <!-- =============================================== -->
+
+  <!-- Team Task Tracker -> Done-task archive (read Done > 3d) -->
+  <path d="M 550 925 C 620 928, 670 960, 705 962" stroke="#0A3A5C" stroke-width="1.5" fill="none" marker-end="url(#arrow-navy)"/>
+  <g>
+    <rect x="588" y="940" width="108" height="20" fill="#FFFFFF"/>
+    <text x="642" y="955" font-size="11" font-weight="500" fill="#5A6470" text-anchor="middle">Done &gt; 3d</text>
+  </g>
+
+  <!-- Done-task archive -> Team Task Tracker - Archive (write copy) -->
+  <path d="M 705 990 C 640 995, 615 1000, 550 1002" stroke="#0A3A5C" stroke-width="1.5" fill="none" marker-end="url(#arrow-navy)"/>
+  <g>
+    <rect x="582" y="1010" width="130" height="20" fill="#FFFFFF"/>
+    <text x="647" y="1025" font-size="11" font-weight="500" fill="#5A6470" text-anchor="middle">copy + soft-delete</text>
+  </g>
+
+  <!-- Footer -->
+  <text x="1740" y="1393" font-size="10" font-weight="400" fill="#5A6470" text-anchor="end">May 2026</text>
+</svg>
