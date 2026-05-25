@@ -40,8 +40,6 @@ add_param() {
 add_param "NotionApiToken"    "${NOTION_API_TOKEN}"
 add_param "OpenAIApiKey"      "${OPENAI_API_KEY}"
 add_param "TeamTrackerDbId"   "${TEAM_TRACKER_DB_ID}"
-add_param "SystemPromptPageId" "${SYSTEM_PROMPT_PAGE_ID}"
-add_param "UserPromptPageId"  "${USER_PROMPT_PAGE_ID}"
 add_param "WebhookPathToken"  "${WEBHOOK_PATH_TOKEN}"
 
 # Optional parameters (template.yaml supplies the Default when omitted)

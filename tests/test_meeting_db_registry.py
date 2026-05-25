@@ -16,8 +16,6 @@ def _make_config(**overrides) -> SyncConfig:
         "notion_api_token": "secret_abc",
         "openai_api_key": "sk-abc",
         "team_tracker_db_id": "db-tracker",
-        "system_prompt_page_id": "page-system-prompt",
-        "user_prompt_page_id": "page-user-prompt",
     }
     defaults.update(overrides)
     return SyncConfig(**defaults)

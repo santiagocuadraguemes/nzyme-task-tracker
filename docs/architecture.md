@@ -26,13 +26,10 @@ main.py → pipeline.run_sync():
               (resolves internal_assignees against the Team Members list).
          ELIF transcript_block_id present:
            a. Resolve attendees (GCal → Notion → governance fallback)
-           b. Correct transcript (LLM call 1)
-           c. Extract tasks (LLM call 2)
-           d. Classify tasks (LLM call 3)
-         ELIF meeting_notes block present (transcription paused/disabled):
-           a. Notes-only AIExtractor on the meeting_notes notes container
-         ELSE:
-           a. Notes-only AIExtractor on the page's plain-text content
+           b. Merged correction + extraction (1 LLM call)
+           c. Classify tasks (1 LLM call)
+         ELSE (no transcript):
+           a. Mark processed and skip — no extraction path is run.
       3. Semantic dedup → filter duplicates (workspace-wide, cross-DB)
       4. Assignee fallback → default to meeting creator on every path
       5. team_writer → create task pages in Team Task Tracker
@@ -97,8 +94,7 @@ Instantiates all components with a shared `NotionClientWrapper`, then:
 Helper functions:
 - `_should_auto_extract(config, owner)` — combines the CLI override with the per-member registry flag; returns the boolean used to gate the routing decision
 - `_process_via_literal_notes()` — light LLM extraction with the Notion-hosted prompt at `LITERAL_NOTES_EXTRACTION_PROMPT_PAGE_ID`, then the standard classifier. Title preservation is enforced by the prompt, not by code
-- `_process_via_transcript()` — transcript extraction path (correct → extract → classify)
-- `_process_via_notes()` — notes extraction path (AIExtractor, AI-driven fallback)
+- `_process_via_transcript()` — transcript extraction path (merged correction + extraction → classify)
 - `_resolve_attendees()` — GCal → Notion → governance attendee chain
 - `_meeting_fingerprint(db_id, title, date)` — strips Notion's `(1)`, `(2)` suffixes, lowercases, combines with db_id + date
 - `_load_categories()` — reads Category select options from DB schema
@@ -173,12 +169,6 @@ If two Kibo members independently capture the same LP meeting in their respectiv
 | `mark_template_injected(page_id)` | Set `Template Injected=true` checkbox |
 | `mark_page_processed(page_id)` | Set `Processed=true` + clear `Processing` lock |
 
-### AIExtractor (`src/ai_extractor.py`)
-
-- **Input:** Meeting metadata + content + playbook + hierarchy + categories
-- **Output:** List of task dicts: `[{title, assignee_id, due_date, priority, category, parent_task_id, status}]`
-- Uses OpenAI chat completions with function calling (`tool_choice="auto"`)
-- Parses `create_task` tool calls from response
 - Handles: no tool calls (returns `[]`), invalid JSON (logs warning, skips that call)
 
 #### Prompt Construction
@@ -250,15 +240,6 @@ Meeting Notes DB page
   → TaskExtractor.extract_from_raw() → raw tasks (1 merged LLM call — domain
     correction + speaker resolution + extraction inline)
   → TaskClassifier.classify() → classified tasks (LLM call 2)
-  → SemanticDedup + assignee fallback
-  → TeamTaskTrackerWriter.write_batch() → Notion pages
-```
-
-### Notes fallback path
-```
-Meeting Notes DB page (no meeting_notes block)
-  → SingleSource.get_page_content() → plain text
-  → AIExtractor.extract() → tasks with category/parent (1 LLM call)
   → SemanticDedup + assignee fallback
   → TeamTaskTrackerWriter.write_batch() → Notion pages
 ```

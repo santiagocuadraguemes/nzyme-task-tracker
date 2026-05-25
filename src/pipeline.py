@@ -17,7 +17,6 @@ from src.notion_client_wrapper import NotionClientWrapper
 from src.deal_context import DealContextLoader, DealInfo
 from src.semantic_dedup import SemanticDedup
 from src.hierarchy_loader import HierarchyLoader
-from src.ai_extractor import AIExtractor
 from src import literal_notes_extractor
 from src.meeting_db_registry import (
     MeetingDB, find_owner_for_page, load_registry,
@@ -618,65 +617,6 @@ def _process_via_literal_notes(
     return classified
 
 
-def _process_via_notes(
-    config: SyncConfig,
-    ctx: dict,
-    page_id: str,
-    metadata: dict,
-    content: str,
-) -> list[dict]:
-    """Extract tasks from written meeting notes (original AIExtractor path).
-
-    Returns list of task dicts with assignee_id, category, parent_task_id, etc.
-    already set by the single-shot AI extractor.
-    """
-    categories_text = " | ".join(f'"{c}"' for c in ctx["categories"])
-    hierarchy_text = json.dumps(ctx["hierarchy"], indent=2)
-    existing_tasks_text = _format_existing_tasks(ctx["existing_tasks"])
-    team_members_text = _format_team_members(ctx["all_users"])
-    deal_context_text = _format_deal_context(ctx["deals"])
-
-    attendees_text = "\n".join(
-        f"- {a['name']} (ID: {a['id']})" for a in metadata["attendees"]
-    ) or "No attendees listed"
-    creator = metadata.get("created_by", {})
-    meeting_creator_text = (
-        f"{creator['name']} (ID: {creator['id']})"
-        if creator.get("id") else "Unknown"
-    )
-
-    system_prompt = _substitute_placeholders(
-        ctx["system_prompt_template"],
-        CATEGORIES=categories_text,
-        HIERARCHY=hierarchy_text,
-        EXISTING_TASKS=existing_tasks_text,
-        TEAM_MEMBERS=team_members_text,
-        ATTENDEES=attendees_text,
-        MEETING_CREATOR=meeting_creator_text,
-        DEAL_CONTEXT=deal_context_text,
-    )
-    user_prompt = _substitute_placeholders(
-        ctx["user_prompt_template"],
-        MEETING_TITLE=metadata["title"],
-        MEETING_DATE=metadata["date"],
-        MEETING_TYPE=metadata["meeting_type"] or "Not specified",
-        MEETING_CONTENT=content,
-    )
-
-    # Deal detection hint from meeting title
-    if ctx["deals"]:
-        detected = _detect_deals_from_title(metadata["title"], ctx["deals"])
-        if detected:
-            deal_names = ", ".join(d.name for d in detected)
-            user_prompt += f"\n\nNote: This meeting likely relates to deal(s): {deal_names}"
-
-    return ctx["extractor"].extract(
-        system_prompt=system_prompt,
-        user_prompt=user_prompt,
-        categories=ctx["categories"],
-    )
-
-
 def _meeting_fingerprint(db_id: str, title: str, date: str) -> str:
     """Normalize (db_id, title, date) into a per-DB dedup key.
 
@@ -970,8 +910,6 @@ def _load_sync_context(
     users, and recent tasks. Raises if prompts fail to load (required).
     """
     # Prompt templates from Notion — required
-    system_prompt_template = _fetch_page_text(client, config.system_prompt_page_id)
-    user_prompt_template = _fetch_page_text(client, config.user_prompt_page_id)
 
     hierarchy_loader = HierarchyLoader(client, config.team_tracker_db_id)
 
@@ -1126,15 +1064,11 @@ def _load_sync_context(
             )
 
     return {
-        "system_prompt_template": system_prompt_template,
-        "user_prompt_template": user_prompt_template,
         "hierarchy": hierarchy,
         "categories": categories,
         "all_users": all_users,
         "existing_tasks": existing_tasks,
         "deals": deals,
-        # Notes-path extractor is a LIGHT call → OpenAI (forced base_url to override any env var)
-        "extractor": AIExtractor(config.openai_api_key, config.openai_model, OPENAI_DEFAULT_BASE_URL),
         "writer": writer,
         "semantic_dedup": semantic_dedup,
         "terminology": terminology,
@@ -1280,67 +1214,19 @@ def run_sync(config: SyncConfig, client: NotionClientWrapper) -> None:
                                         "Assignee fallback → meeting creator for: %s",
                                         task.get("title", "?")[:60],
                                     )
-                        elif mn_block is not None:
-                            # meeting_notes block exists but transcription is
-                            # paused/disabled. Fall back to extracting from the
-                            # notes the user wrote inside the AI Meeting block.
+                        else:
+                            # auto_extract_tasks=True but no transcript_block_id.
+                            # The notes-path fallback has been removed; mark
+                            # processed and skip so the page isn't re-tried
+                            # forever.
                             logger.info(
-                                "[%s] Page '%s': transcript unavailable — meeting_notes notes path",
+                                "[%s] Page '%s' skipped: auto_extract_tasks=True but no "
+                                "transcript available",
                                 label, title,
                             )
-                            attendees = _resolve_attendees(
-                                client, config, mn_block, page, metadata,
-                                org_chart_rows=ctx.get("org_chart_rows"),
-                            )
-                            notes_content = fetch_notes_text(mn_block, client)
-                            if not notes_content.strip():
-                                logger.info(
-                                    "[%s] Page '%s' has no transcript and no notes — marking processed",
-                                    label, title,
-                                )
-                                if not config.dry_run:
-                                    source.mark_page_processed(page_id)
-                                continue
-
-                            metadata["attendees"] = attendees
-                            tasks = _process_via_notes(
-                                config, ctx, page_id, metadata, notes_content,
-                            )
-
-                            # Assignee fallback: default to meeting creator
-                            creator = metadata.get("created_by", {})
-                            creator_id = creator.get("id")
-                            for task in tasks:
-                                if not task.get("assignee_id") and creator_id:
-                                    task["assignee_id"] = creator_id
-                                    logger.debug(
-                                        "Assignee fallback → meeting creator for: %s",
-                                        task.get("title", "?")[:60],
-                                    )
-                        else:
-                            # --- Notes fallback (no meeting_notes block at all) ---
-                            logger.info("[%s] Page '%s': no transcript — notes path", label, title)
-                            content = source.get_page_content(
-                                page_id, include_ai_notes=config.include_ai_notes,
-                            )
-                            if not content.strip():
-                                logger.info("[%s] Page '%s' has no content — marking processed", label, title)
-                                if not config.dry_run:
-                                    source.mark_page_processed(page_id)
-                                continue
-
-                            tasks = _process_via_notes(config, ctx, page_id, metadata, content)
-
-                            # Assignee fallback: default to meeting creator
-                            creator = metadata.get("created_by", {})
-                            creator_id = creator.get("id")
-                            for task in tasks:
-                                if not task.get("assignee_id") and creator_id:
-                                    task["assignee_id"] = creator_id
-                                    logger.debug(
-                                        "Assignee fallback → meeting creator for: %s",
-                                        task.get("title", "?")[:60],
-                                    )
+                            if not config.dry_run:
+                                source.mark_page_processed(page_id)
+                            continue
 
                         # Semantic dedup: filter out tasks similar to existing ones
                         tasks = _run_semantic_dedup(tasks, ctx.get("semantic_dedup"))
@@ -1602,71 +1488,17 @@ def run_sync_for_page(
                             "Assignee fallback → meeting creator for: %s",
                             task.get("title", "?")[:60],
                         )
-            elif mn_block is not None:
-                # meeting_notes block exists but transcription is paused/disabled.
-                # Run the notes-extraction path against the notes the user wrote
-                # inside the AI Meeting block.
-                path = "meeting_notes_only"
+            else:
+                # auto_extract_tasks=True but no transcript_block_id. The
+                # notes-path fallback has been removed; mark processed and
+                # return so the page isn't re-tried.
                 logger.info(
-                    "page=%s '%s' starting (path=meeting_notes_only)",
+                    "page=%s '%s' skipped: auto_extract_tasks=True but no transcript available",
                     short_id, title[:60],
                 )
-
-                attendees = _resolve_attendees(
-                    client, config, mn_block, page, metadata,
-                    org_chart_rows=ctx.get("org_chart_rows"),
-                )
-                notes_content = fetch_notes_text(mn_block, client)
-                if not notes_content.strip():
-                    logger.info(
-                        "page=%s '%s' skipped (no transcript and no notes)",
-                        short_id, title[:60],
-                    )
-                    if not config.dry_run:
-                        source.mark_page_processed(page_id)
-                    return
-
-                metadata["attendees"] = attendees
-                tasks = _process_via_notes(
-                    config, ctx, page_id, metadata, notes_content,
-                )
-
-                # Assignee fallback: default to meeting creator
-                creator = metadata.get("created_by", {})
-                creator_id = creator.get("id")
-                for task in tasks:
-                    if not task.get("assignee_id") and creator_id:
-                        task["assignee_id"] = creator_id
-                        logger.debug(
-                            "Assignee fallback → meeting creator for: %s",
-                            task.get("title", "?")[:60],
-                        )
-            else:
-                # --- Notes fallback (no meeting_notes block at all) ---
-                path = "notes"
-                logger.info("page=%s '%s' starting (path=notes)", short_id, title[:60])
-
-                content = source.get_page_content(
-                    page_id, include_ai_notes=config.include_ai_notes,
-                )
-                if not content.strip():
-                    logger.info("page=%s '%s' skipped (no content)", short_id, title[:60])
-                    if not config.dry_run:
-                        source.mark_page_processed(page_id)
-                    return
-
-                tasks = _process_via_notes(config, ctx, page_id, metadata, content)
-
-                # Assignee fallback: default to meeting creator
-                creator = metadata.get("created_by", {})
-                creator_id = creator.get("id")
-                for task in tasks:
-                    if not task.get("assignee_id") and creator_id:
-                        task["assignee_id"] = creator_id
-                        logger.debug(
-                            "Assignee fallback → meeting creator for: %s",
-                            task.get("title", "?")[:60],
-                        )
+                if not config.dry_run:
+                    source.mark_page_processed(page_id)
+                return
 
             # Semantic dedup: filter out tasks similar to existing ones
             tasks = _run_semantic_dedup(tasks, ctx.get("semantic_dedup"))

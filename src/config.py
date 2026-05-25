@@ -69,8 +69,6 @@ class SyncConfig(BaseModel):
             "job is a no-op."
         ),
     )
-    system_prompt_page_id: str = Field(..., description="Notion page ID for AI system prompt")
-    user_prompt_page_id: str = Field(..., description="Notion page ID for AI user prompt")
     buffer_hours: int = Field(2, description="Hours to wait after meeting date")
     logfire_token: str | None = Field(None, description="Logfire write token for LLM observability")
     log_level: str = Field("INFO", description="Logging level")
@@ -213,8 +211,6 @@ def load_config() -> SyncConfig:
         meeting_notes_db_id=os.getenv("MEETING_NOTES_DB_ID") or None,
         team_tracker_db_id=os.environ["TEAM_TRACKER_DB_ID"],
         task_archive_db_id=os.getenv("TASK_ARCHIVE_DB_ID") or None,
-        system_prompt_page_id=os.environ["SYSTEM_PROMPT_PAGE_ID"],
-        user_prompt_page_id=os.environ["USER_PROMPT_PAGE_ID"],
         logfire_token=os.getenv("LOGFIRE_TOKEN"),
         buffer_hours=int(os.getenv("BUFFER_HOURS", "2")),
         log_level=os.getenv("LOG_LEVEL", "INFO"),

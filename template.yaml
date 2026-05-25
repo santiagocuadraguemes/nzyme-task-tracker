@@ -14,8 +14,6 @@ Globals:
         OPENAI_API_KEY: !Ref OpenAIApiKey
         TEAM_TRACKER_DB_ID: !Ref TeamTrackerDbId
         TASK_ARCHIVE_DB_ID: !Ref TaskArchiveDbId
-        SYSTEM_PROMPT_PAGE_ID: !Ref SystemPromptPageId
-        USER_PROMPT_PAGE_ID: !Ref UserPromptPageId
         MEETING_TEMPLATE_PAGE_ID: !Ref MeetingTemplatePageId
         INJECT_TEMPLATE: !Ref InjectTemplate
         WEBHOOK_PATH_TOKEN: !Ref WebhookPathToken
@@ -65,10 +63,6 @@ Parameters:
     Type: String
     Default: ''
     Description: Notion DB ID for the Team Task Tracker — Archive (destination for the weekly Done-task sweep). Leave empty to disable the weekly archive job.
-  SystemPromptPageId:
-    Type: String
-  UserPromptPageId:
-    Type: String
   MeetingTemplatePageId:
     Type: String
     Default: ''

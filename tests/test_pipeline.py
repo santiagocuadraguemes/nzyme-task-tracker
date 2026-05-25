@@ -1,4 +1,4 @@
-from unittest.mock import MagicMock, patch
+﻿from unittest.mock import MagicMock, patch
 
 from src.config import SyncConfig
 from src.deal_context import DealInfo, DealWorkstream
@@ -18,8 +18,6 @@ def _make_config(**overrides) -> SyncConfig:
         "openai_api_key": "sk-abc",
         "meeting_notes_db_id": "db-meetings",
         "team_tracker_db_id": "db-tracker",
-        "system_prompt_page_id": "page-system-prompt",
-        "user_prompt_page_id": "page-user-prompt",
         "buffer_hours": 2,
         "dry_run": False,
     }
@@ -39,141 +37,6 @@ def _make_page(page_id: str, title: str) -> dict:
             "Processed": {"type": "checkbox", "checkbox": False},
         },
     }
-
-
-class TestRunSync:
-    @patch("src.pipeline.SemanticDedup")
-    @patch("src.pipeline.OpenAI")
-    @patch("src.pipeline.TeamTaskTrackerWriter")
-    @patch("src.pipeline.AIExtractor")
-    @patch("src.pipeline.HierarchyLoader")
-    @patch("src.pipeline._fetch_page_text")
-    @patch("src.pipeline.SingleSource")
-    @patch("src.pipeline._load_categories")
-    def test_full_cycle(
-        self, mock_load_cats, mock_source_cls, mock_fetch_text,
-        mock_hierarchy_cls, mock_extractor_cls, mock_writer_cls,
-        mock_openai_cls, mock_dedup_cls,
-    ):
-        config = _make_config()
-        client = MagicMock()
-        client.list_users.return_value = [
-            {"id": "u1", "name": "Santiago", "type": "person", "person": {"email": "santiago@kiboventures.com"}},
-            {"id": "u2", "name": "Reyes", "type": "person", "person": {"email": "reyes@kiboventures.com"}},
-            {"id": "bot-1", "name": "Integration", "type": "bot"},
-        ]
-
-        mock_load_cats.return_value = ["Operations", "Other"]
-        mock_source = mock_source_cls.return_value
-        mock_source.get_unprocessed_pages.return_value = [_make_page("p1", "Standup")]
-        mock_source.get_page_content.return_value = "Action: @Santiago review doc"
-        mock_source.get_page_metadata.return_value = {
-            "title": "Standup",
-            "date": "2026-03-28",
-            "meeting_type": "Team sync",
-            "attendees": [{"id": "u1", "name": "Santiago"}],
-            "created_by": {"id": "u1", "name": "Santiago"},
-        }
-
-        mock_fetch_text.return_value = "prompt template with {{CATEGORIES}} {{HIERARCHY}} {{EXISTING_TASKS}} {{TEAM_MEMBERS}} {{ATTENDEES}} {{MEETING_CREATOR}}"
-        mock_hierarchy_cls.return_value.load.return_value = [{"id": "cat1", "title": "Ops"}]
-        mock_extractor_cls.return_value.extract.return_value = [
-            {"title": "Review doc", "assignee_id": "u1", "priority": "High", "category": "Operations"}
-        ]
-        mock_writer_cls.return_value.write_batch.return_value = [{"id": "new-task-1"}]
-        mock_writer_cls.return_value._existing_titles = set()
-        mock_dedup_cls.return_value.is_duplicate.return_value = (False, None, 0.0)
-        # No recently-created tasks for dedup
-        client.query_database.return_value = {"results": []}
-
-        run_sync(config, client)
-
-        # _make_config defaults set meeting_notes_db_id, so the buffer is
-        # auto-disabled (treated as a manual single-DB run).
-        mock_source.get_unprocessed_pages.assert_called_once_with(None)
-        extract_kwargs = mock_extractor_cls.return_value.extract.call_args.kwargs
-        assert "system_prompt" in extract_kwargs
-        assert "user_prompt" in extract_kwargs
-        assert "categories" in extract_kwargs
-        # Verify placeholders were substituted
-        assert "{{CATEGORIES}}" not in extract_kwargs["system_prompt"]
-        assert "Santiago" in extract_kwargs["system_prompt"]  # team member
-        mock_writer_cls.return_value.write_batch.assert_called_once()
-        # Reverse linkage: the meeting page's `Task - Relation` is patched
-        # with the new task IDs after they're written.
-        mock_writer_cls.return_value.link_tasks_to_meeting.assert_called_once_with(
-            "p1", ["new-task-1"],
-        )
-        mock_source.mark_page_processed.assert_called_once_with("p1")
-
-    @patch("src.pipeline.SemanticDedup")
-    @patch("src.pipeline.OpenAI")
-    @patch("src.pipeline.TeamTaskTrackerWriter")
-    @patch("src.pipeline.AIExtractor")
-    @patch("src.pipeline.HierarchyLoader")
-    @patch("src.pipeline._fetch_page_text")
-    @patch("src.pipeline.SingleSource")
-    @patch("src.pipeline._load_categories")
-    def test_no_pages_does_nothing(
-        self, mock_load_cats, mock_source_cls, mock_fetch_text,
-        mock_hierarchy_cls, mock_extractor_cls, mock_writer_cls,
-        mock_openai_cls, mock_dedup_cls,
-    ):
-        config = _make_config()
-        client = MagicMock()
-        client.list_users.return_value = []
-
-        mock_load_cats.return_value = ["Other"]
-        mock_source_cls.return_value.get_unprocessed_pages.return_value = []
-        mock_fetch_text.return_value = "template"
-        mock_hierarchy_cls.return_value.load.return_value = []
-        mock_writer_cls.return_value._existing_titles = set()
-        client.query_database.return_value = {"results": []}
-
-        run_sync(config, client)
-
-        mock_extractor_cls.return_value.extract.assert_not_called()
-
-    @patch("src.pipeline.SemanticDedup")
-    @patch("src.pipeline.OpenAI")
-    @patch("src.pipeline.TeamTaskTrackerWriter")
-    @patch("src.pipeline.AIExtractor")
-    @patch("src.pipeline.HierarchyLoader")
-    @patch("src.pipeline._fetch_page_text")
-    @patch("src.pipeline.SingleSource")
-    @patch("src.pipeline._load_categories")
-    def test_page_failure_continues_to_next(
-        self, mock_load_cats, mock_source_cls, mock_fetch_text,
-        mock_hierarchy_cls, mock_extractor_cls, mock_writer_cls,
-        mock_openai_cls, mock_dedup_cls,
-    ):
-        config = _make_config()
-        client = MagicMock()
-        client.list_users.return_value = []
-
-        mock_load_cats.return_value = ["Other"]
-        mock_source = mock_source_cls.return_value
-        mock_source.get_unprocessed_pages.return_value = [
-            _make_page("p1", "Meeting 1"),
-            _make_page("p2", "Meeting 2"),
-        ]
-        mock_source.get_page_content.side_effect = [Exception("API error"), "Content"]
-        mock_source.get_page_metadata.return_value = {
-            "title": "Meeting", "date": "2026-03-28",
-            "meeting_type": "Other", "attendees": [],
-            "created_by": {"id": "u1", "name": "Santiago"},
-        }
-
-        mock_fetch_text.return_value = "template"
-        mock_hierarchy_cls.return_value.load.return_value = []
-        mock_extractor_cls.return_value.extract.return_value = []
-        mock_writer_cls.return_value._existing_titles = set()
-        client.query_database.return_value = {"results": []}
-
-        run_sync(config, client)
-
-        assert mock_source.mark_page_processed.call_count == 1
-        mock_source.mark_page_processed.assert_called_with("p2")
 
 
 def _done_task_page(page_id: str, title: str, **extra_props) -> dict:
@@ -715,118 +578,6 @@ class TestRunSemanticDedup:
         assert result == []
 
 
-class TestAssigneeFallback:
-    @patch("src.pipeline.SemanticDedup")
-    @patch("src.pipeline.OpenAI")
-    @patch("src.pipeline.TeamTaskTrackerWriter")
-    @patch("src.pipeline.AIExtractor")
-    @patch("src.pipeline.HierarchyLoader")
-    @patch("src.pipeline._fetch_page_text")
-    @patch("src.pipeline.SingleSource")
-    @patch("src.pipeline._load_categories")
-    def test_fallback_to_meeting_creator(
-        self, mock_load_cats, mock_source_cls, mock_fetch_text,
-        mock_hierarchy_cls, mock_extractor_cls, mock_writer_cls,
-        mock_openai_cls, mock_dedup_cls,
-    ):
-        """Tasks without assignee_id get the meeting creator as fallback."""
-        config = _make_config()
-        client = MagicMock()
-        client.list_users.return_value = [
-            {"id": "u1", "name": "Santiago", "type": "person", "person": {"email": "santiago@kibo.com"}},
-        ]
-
-        mock_load_cats.return_value = ["Operations", "Other"]
-        mock_source = mock_source_cls.return_value
-        mock_source.get_unprocessed_pages.return_value = [_make_page("p1", "Standup")]
-        mock_source.get_page_content.return_value = "Vicente - contacto con Clikalia"
-        mock_source.get_page_metadata.return_value = {
-            "title": "Standup",
-            "date": "2026-03-28",
-            "meeting_type": "Team sync",
-            "attendees": [],
-            "created_by": {"id": "creator-1", "name": "Reyes"},
-        }
-
-        mock_fetch_text.return_value = "template {{CATEGORIES}} {{HIERARCHY}} {{EXISTING_TASKS}} {{TEAM_MEMBERS}} {{ATTENDEES}} {{MEETING_CREATOR}}"
-        mock_hierarchy_cls.return_value.load.return_value = []
-        # AI returns a task WITHOUT assignee_id
-        mock_extractor_cls.return_value.extract.return_value = [
-            {"title": "Vicente - contacto con Clikalia", "priority": "Medium", "category": "Other"}
-        ]
-        mock_writer_cls.return_value.write_batch.return_value = [{"id": "new-task-1"}]
-        mock_writer_cls.return_value._existing_titles = set()
-        mock_dedup_cls.return_value.is_duplicate.return_value = (False, None, 0.0)
-        client.query_database.return_value = {"results": []}
-
-        run_sync(config, client)
-
-        tasks_written = mock_writer_cls.return_value.write_batch.call_args.args[0]
-        assert tasks_written[0]["assignee_id"] == "creator-1"
-
-
-class TestCrossMeetingDedupContext:
-    @patch("src.pipeline.SemanticDedup")
-    @patch("src.pipeline.OpenAI")
-    @patch("src.pipeline.TeamTaskTrackerWriter")
-    @patch("src.pipeline.AIExtractor")
-    @patch("src.pipeline.HierarchyLoader")
-    @patch("src.pipeline._fetch_page_text")
-    @patch("src.pipeline.SingleSource")
-    @patch("src.pipeline._load_categories")
-    def test_second_meeting_prompt_includes_first_meeting_tasks(
-        self, mock_load_cats, mock_source_cls, mock_fetch_text,
-        mock_hierarchy_cls, mock_extractor_cls, mock_writer_cls,
-        mock_openai_cls, mock_dedup_cls,
-    ):
-        """After processing meeting 1, meeting 2's prompt should include
-        meeting 1's tasks in {{EXISTING_TASKS}}."""
-        config = _make_config()
-        client = MagicMock()
-        client.list_users.return_value = []
-
-        mock_load_cats.return_value = ["Operations"]
-        mock_source = mock_source_cls.return_value
-        mock_source.get_unprocessed_pages.return_value = [
-            _make_page("p1", "Meeting A"),
-            _make_page("p2", "Meeting B"),
-        ]
-        mock_source.get_page_content.return_value = "some content"
-
-        # Each meeting returns different metadata (different titles for fingerprinting)
-        mock_source.get_page_metadata.side_effect = [
-            {"title": "Meeting A", "date": "2026-03-28", "meeting_type": "Other",
-             "attendees": [], "created_by": {"id": "u1", "name": "Santiago"}},
-            {"title": "Meeting B", "date": "2026-03-28", "meeting_type": "Other",
-             "attendees": [], "created_by": {"id": "u1", "name": "Santiago"}},
-        ]
-
-        mock_fetch_text.return_value = "template {{CATEGORIES}} {{HIERARCHY}} {{EXISTING_TASKS}} {{TEAM_MEMBERS}} {{ATTENDEES}} {{MEETING_CREATOR}}"
-        mock_hierarchy_cls.return_value.load.return_value = [
-            {"id": "cat1", "title": "Ops", "children": []}
-        ]
-        # Meeting A extracts 1 task; Meeting B extracts 1 task
-        mock_extractor = mock_extractor_cls.return_value
-        mock_extractor.extract.side_effect = [
-            [{"title": "Task from Meeting A", "priority": "High", "category": "Operations",
-              "parent_task_id": "cat1"}],
-            [{"title": "Task from Meeting B", "priority": "Medium", "category": "Operations"}],
-        ]
-        mock_writer_cls.return_value.write_batch.return_value = [{"id": "new-1"}]
-        mock_writer_cls.return_value._existing_titles = set()
-        mock_dedup_cls.return_value.is_duplicate.return_value = (False, None, 0.0)
-        client.query_database.return_value = {"results": []}
-
-        run_sync(config, client)
-
-        # The second call to extract should have the first meeting's task in prompt
-        assert mock_extractor.extract.call_count == 2
-        second_call_kwargs = mock_extractor.extract.call_args_list[1].kwargs
-        system_prompt_2 = second_call_kwargs["system_prompt"]
-        assert "Task from Meeting A" in system_prompt_2
-        assert "(under: Ops)" in system_prompt_2
-
-
 class TestMeetingFingerprint:
     """The (db_id, title, date) fingerprint is what makes the multi-DB model safe."""
 
@@ -864,7 +615,7 @@ class TestMeetingFingerprint:
 
 
 class TestResolveStageCreds:
-    """`gemini-` prefix routes through Gemini creds; everything else → OpenAI."""
+    """`gemini-` prefix routes through Gemini creds; everything else â†’ OpenAI."""
 
     def test_gemini_prefix_returns_gemini_creds(self):
         config = _make_config(
@@ -895,7 +646,7 @@ def _meeting_notes_block(
     transcript_block_id: str | None = None,
     notes_block_id: str | None = "notes-block-1",
 ) -> dict:
-    """Build a fake meeting_notes block. Transcription paused → no transcript_block_id."""
+    """Build a fake meeting_notes block. Transcription paused â†’ no transcript_block_id."""
     children: dict = {}
     if notes_block_id:
         children["notes_block_id"] = notes_block_id
@@ -913,129 +664,19 @@ def _meeting_notes_block(
     }
 
 
-class TestMeetingNotesNoTranscriptRouting:
-    """When mn_block exists but transcript_block_id is missing, fall back to
-    the notes-extraction path against the meeting_notes block's notes."""
-
-    @patch("src.pipeline.SemanticDedup")
-    @patch("src.pipeline.OpenAI")
-    @patch("src.pipeline.TeamTaskTrackerWriter")
-    @patch("src.pipeline.AIExtractor")
-    @patch("src.pipeline.HierarchyLoader")
-    @patch("src.pipeline._fetch_page_text")
-    @patch("src.pipeline.SingleSource")
-    @patch("src.pipeline._load_categories")
-    def test_notes_only_fallback_runs_when_transcript_missing(
-        self, mock_load_cats, mock_source_cls, mock_fetch_text,
-        mock_hierarchy_cls, mock_extractor_cls, mock_writer_cls,
-        mock_openai_cls, mock_dedup_cls,
-    ):
-        config = _make_config()
-        client = MagicMock()
-        client.list_users.return_value = []
-
-        mn_block = _meeting_notes_block(transcript_block_id=None)
-        # First call: page-level blocks → contains mn_block.
-        # Second call: notes_block_id children → notes paragraph.
-        client.get_block_children.side_effect = [
-            [mn_block],
-            [{"type": "paragraph", "paragraph": {"rich_text": [
-                {"plain_text": "Reyes - send portfolio mgmt agreement"},
-            ]}}],
-        ]
-
-        mock_load_cats.return_value = ["Operations", "Other"]
-        mock_source = mock_source_cls.return_value
-        mock_source.get_unprocessed_pages.return_value = [_make_page("p1", "Cuatrecasas")]
-        mock_source.get_page_metadata.return_value = {
-            "title": "Cuatrecasas",
-            "date": "2026-04-28",
-            "meeting_type": "Other",
-            "attendees": [],
-            "created_by": {"id": "u1", "name": "Santiago"},
-        }
-        mock_fetch_text.return_value = (
-            "tpl {{CATEGORIES}} {{HIERARCHY}} {{EXISTING_TASKS}} {{TEAM_MEMBERS}} "
-            "{{ATTENDEES}} {{MEETING_CREATOR}} content={{MEETING_CONTENT}}"
-        )
-        mock_hierarchy_cls.return_value.load.return_value = []
-        mock_extractor_cls.return_value.extract.return_value = [
-            {"title": "Send portfolio mgmt agreement", "priority": "High"},
-        ]
-        mock_writer_cls.return_value.write_batch.return_value = [{"id": "new-1"}]
-        mock_writer_cls.return_value._existing_titles = set()
-        mock_dedup_cls.return_value.is_duplicate.return_value = (False, None, 0.0)
-        client.query_database.return_value = {"results": []}
-
-        run_sync(config, client)
-
-        # Notes-extraction path ran (AIExtractor.extract was called).
-        mock_extractor_cls.return_value.extract.assert_called_once()
-        user_prompt = mock_extractor_cls.return_value.extract.call_args.kwargs["user_prompt"]
-        # The notes content from inside the meeting_notes block flows into the prompt.
-        assert "send portfolio mgmt agreement" in user_prompt.lower()
-        mock_writer_cls.return_value.write_batch.assert_called_once()
-        mock_source.mark_page_processed.assert_called_once_with("p1")
-
-    @patch("src.pipeline.SemanticDedup")
-    @patch("src.pipeline.OpenAI")
-    @patch("src.pipeline.TeamTaskTrackerWriter")
-    @patch("src.pipeline.AIExtractor")
-    @patch("src.pipeline.HierarchyLoader")
-    @patch("src.pipeline._fetch_page_text")
-    @patch("src.pipeline.SingleSource")
-    @patch("src.pipeline._load_categories")
-    def test_no_transcript_no_notes_marks_processed_and_skips(
-        self, mock_load_cats, mock_source_cls, mock_fetch_text,
-        mock_hierarchy_cls, mock_extractor_cls, mock_writer_cls,
-        mock_openai_cls, mock_dedup_cls,
-    ):
-        config = _make_config()
-        client = MagicMock()
-        client.list_users.return_value = []
-
-        mn_block = _meeting_notes_block(transcript_block_id=None)
-        # Page blocks → mn_block; notes children → empty list (no notes content).
-        client.get_block_children.side_effect = [[mn_block], []]
-
-        mock_load_cats.return_value = ["Other"]
-        mock_source = mock_source_cls.return_value
-        mock_source.get_unprocessed_pages.return_value = [_make_page("p1", "Empty meeting")]
-        mock_source.get_page_metadata.return_value = {
-            "title": "Empty meeting",
-            "date": "2026-04-28",
-            "meeting_type": "Other",
-            "attendees": [],
-            "created_by": {"id": "u1", "name": "Santiago"},
-        }
-        mock_fetch_text.return_value = "tpl"
-        mock_hierarchy_cls.return_value.load.return_value = []
-        mock_writer_cls.return_value._existing_titles = set()
-        client.query_database.return_value = {"results": []}
-
-        run_sync(config, client)
-
-        # No extraction, no writes — but page is still marked processed so
-        # the cycle doesn't churn on it forever.
-        mock_extractor_cls.return_value.extract.assert_not_called()
-        mock_writer_cls.return_value.write_batch.assert_not_called()
-        mock_source.mark_page_processed.assert_called_once_with("p1")
-
-
 class TestBufferAutoDisable:
-    """`--db-id` (i.e. `meeting_notes_db_id` set) → buffer auto-disabled."""
+    """`--db-id` (i.e. `meeting_notes_db_id` set) â†’ buffer auto-disabled."""
 
     @patch("src.pipeline.SemanticDedup")
     @patch("src.pipeline.OpenAI")
     @patch("src.pipeline.TeamTaskTrackerWriter")
-    @patch("src.pipeline.AIExtractor")
     @patch("src.pipeline.HierarchyLoader")
     @patch("src.pipeline._fetch_page_text")
     @patch("src.pipeline.SingleSource")
     @patch("src.pipeline._load_categories")
     def test_db_id_set_passes_none_buffer(
         self, mock_load_cats, mock_source_cls, mock_fetch_text,
-        mock_hierarchy_cls, mock_extractor_cls, mock_writer_cls,
+        mock_hierarchy_cls, mock_writer_cls,
         mock_openai_cls, mock_dedup_cls,
     ):
         config = _make_config(meeting_notes_db_id="db-meetings", buffer_hours=2)
@@ -1057,14 +698,13 @@ class TestBufferAutoDisable:
     @patch("src.pipeline.SemanticDedup")
     @patch("src.pipeline.OpenAI")
     @patch("src.pipeline.TeamTaskTrackerWriter")
-    @patch("src.pipeline.AIExtractor")
     @patch("src.pipeline.HierarchyLoader")
     @patch("src.pipeline._fetch_page_text")
     @patch("src.pipeline.SingleSource")
     @patch("src.pipeline._load_categories")
     def test_no_db_id_keeps_buffer(
         self, mock_load_cats, mock_source_cls, mock_fetch_text,
-        mock_hierarchy_cls, mock_extractor_cls, mock_writer_cls,
+        mock_hierarchy_cls, mock_writer_cls,
         mock_openai_cls, mock_dedup_cls, mock_load_registry,
     ):
         from src.meeting_db_registry import MeetingDB

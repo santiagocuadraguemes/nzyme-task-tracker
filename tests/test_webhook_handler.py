@@ -11,8 +11,6 @@ def _make_config(**overrides) -> SyncConfig:
         "openai_api_key": "sk-abc",
         "meeting_notes_db_id": "db-meetings-1234",
         "team_tracker_db_id": "db-tracker",
-        "system_prompt_page_id": "page-system-prompt",
-        "user_prompt_page_id": "page-user-prompt",
     }
     defaults.update(overrides)
     return SyncConfig(**defaults)
