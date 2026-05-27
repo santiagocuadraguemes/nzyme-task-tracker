@@ -2,7 +2,7 @@ notion-client
 python-dotenv
 pydantic
 openai
-logfire
+logfire[google-genai]
 python-dateutil
 httpx
 google-auth

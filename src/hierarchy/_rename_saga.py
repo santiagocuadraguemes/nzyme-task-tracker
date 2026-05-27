@@ -122,7 +122,7 @@ def execute_rename_saga(
     Args:
         client: Notion wrapper (rate-limited).
         member_db_id: Meeting Notes DB whose option list we're modifying.
-        property_name: Notion property (e.g. ``Work area`` / ``Detail`` /
+        property_name: Notion property (e.g. ``Macro Work Block`` / ``Detail`` /
             ``External Org``).
         property_type: ``"select"`` or ``"multi_select"``.
         intent: The rename to execute.

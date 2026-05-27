@@ -37,7 +37,7 @@ def _print(label: str, opts: list[dict]) -> None:
 def _retrieve_options(notion: NotionClientWrapper) -> list[dict]:
     ds = notion.retrieve_data_source(JACOB)
     return (
-        ds.get("properties", {}).get("Work area", {}).get("select", {}).get("options", [])
+        ds.get("properties", {}).get("Macro Work Block", {}).get("select", {}).get("options", [])
     ) or []
 
 
@@ -59,7 +59,7 @@ def _run(notion: NotionClientWrapper, raw_client: Client, variant: str) -> bool:
 
     with_color = "no_color" not in variant
     options = _build_options(before, TEST_NAME, with_color)
-    properties = {"Work area": {"select": {"options": options}}}
+    properties = {"Macro Work Block": {"select": {"options": options}}}
 
     if variant.startswith("data_sources"):
         ds_id = notion._resolve_data_source_id(JACOB)
@@ -71,7 +71,7 @@ def _run(notion: NotionClientWrapper, raw_client: Client, variant: str) -> bool:
         raise ValueError(f"unknown variant: {variant}")
 
     after_resp = (
-        (resp.get("properties") or {}).get("Work area", {})
+        (resp.get("properties") or {}).get("Macro Work Block", {})
         .get("select", {}).get("options", [])
     )
     _print(f"RESPONSE ({variant})", after_resp)
@@ -86,7 +86,7 @@ def _run(notion: NotionClientWrapper, raw_client: Client, variant: str) -> bool:
         # Revert
         original = next(o["name"] for o in before if o["id"] == TARGET_ID)
         revert_opts = _build_options(after_fetch, original, with_color)
-        revert_props = {"Work area": {"select": {"options": revert_opts}}}
+        revert_props = {"Macro Work Block": {"select": {"options": revert_opts}}}
         if variant.startswith("data_sources"):
             ds_id = notion._resolve_data_source_id(JACOB)
             raw_client.data_sources.update(data_source_id=ds_id, properties=revert_props)

@@ -73,7 +73,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("backfill")
 
-_WORK_AREA = "Work area"
+_MACRO_WORK_BLOCK = "Macro Work Block"
 
 # (member_db_id, owner_label, [stray option_ids to drop])
 #
@@ -144,9 +144,9 @@ def _process_member(
 
     ds = client.retrieve_data_source(member_db_id)
     props = ds.get("properties") or {}
-    work_area = props.get(_WORK_AREA)
+    work_area = props.get(_MACRO_WORK_BLOCK)
     if not work_area or work_area.get("type") != "select":
-        logger.error("  no '%s' select property — skipping", _WORK_AREA)
+        logger.error("  no '%s' select property — skipping", _MACRO_WORK_BLOCK)
         return
 
     current = work_area.get("select", {}).get("options", []) or []
@@ -192,7 +192,7 @@ def _process_member(
         else:
             client.update_data_source(
                 member_db_id,
-                {_WORK_AREA: {"select": {"options": patch_options}}},
+                {_MACRO_WORK_BLOCK: {"select": {"options": patch_options}}},
             )
             logger.info("  PATCHed: %d options remaining", len(patch_options))
     else:

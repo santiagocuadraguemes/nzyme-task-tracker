@@ -5,14 +5,13 @@ import argparse
 import sys
 import time
 
-import logfire
 from notion_client import Client as NotionClient
 
 from src.config import SyncConfig, load_config
 from src.utils.logger import setup_logging, get_logger
 from src.notion_client_wrapper import NotionClientWrapper
 from src.pipeline import run_inject_templates, run_sync, _archive_done_tasks
-from src.utils.llm_logging import print_usage_summary, start_tracking
+from src.utils.llm_logging import configure_logfire, print_usage_summary, start_tracking
 
 logger = get_logger(__name__)
 
@@ -165,8 +164,7 @@ def main() -> None:
     setup_logging(config.log_level)
     start_tracking()
 
-    logfire.configure(token=config.logfire_token, service_name="nzyme")
-    logfire.instrument_openai()
+    configure_logfire(config.logfire_token, service_name="nzyme")
 
     notion = NotionClient(auth=config.notion_api_token, notion_version="2026-03-11")
     client = NotionClientWrapper(notion)

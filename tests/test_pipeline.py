@@ -674,9 +674,8 @@ class TestBufferAutoDisable:
     @patch("src.pipeline.HierarchyLoader")
     @patch("src.pipeline._fetch_page_text")
     @patch("src.pipeline.SingleSource")
-    @patch("src.pipeline._load_categories")
     def test_db_id_set_passes_none_buffer(
-        self, mock_load_cats, mock_source_cls, mock_fetch_text,
+        self, mock_source_cls, mock_fetch_text,
         mock_hierarchy_cls, mock_writer_cls,
         mock_openai_cls, mock_dedup_cls,
     ):
@@ -684,7 +683,6 @@ class TestBufferAutoDisable:
         client = MagicMock()
         client.list_users.return_value = []
 
-        mock_load_cats.return_value = ["Other"]
         mock_source_cls.return_value.get_unprocessed_pages.return_value = []
         mock_fetch_text.return_value = "tpl"
         mock_hierarchy_cls.return_value.load.return_value = []
@@ -702,9 +700,8 @@ class TestBufferAutoDisable:
     @patch("src.pipeline.HierarchyLoader")
     @patch("src.pipeline._fetch_page_text")
     @patch("src.pipeline.SingleSource")
-    @patch("src.pipeline._load_categories")
     def test_no_db_id_keeps_buffer(
-        self, mock_load_cats, mock_source_cls, mock_fetch_text,
+        self, mock_source_cls, mock_fetch_text,
         mock_hierarchy_cls, mock_writer_cls,
         mock_openai_cls, mock_dedup_cls, mock_load_registry,
     ):
@@ -719,7 +716,6 @@ class TestBufferAutoDisable:
         mock_load_registry.return_value = [
             MeetingDB(db_id="db-discovered", owner_name="Reyes", owner_email="r@x.com"),
         ]
-        mock_load_cats.return_value = ["Other"]
         mock_source_cls.return_value.get_unprocessed_pages.return_value = []
         mock_fetch_text.return_value = "tpl"
         mock_hierarchy_cls.return_value.load.return_value = []

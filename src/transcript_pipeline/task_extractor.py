@@ -22,6 +22,7 @@ from typing import Any
 from openai import OpenAI
 
 from src.transcript_pipeline.schemas import MergedExtractionOutput
+from src.utils.llm_dump import dump_call
 from src.utils.llm_logging import log_usage, log_usage_genai
 
 logger = logging.getLogger(__name__)
@@ -313,7 +314,17 @@ class TaskExtractor:
         raw = getattr(response, "text", None) or "{}"
         data = json.loads(raw)
         self._last_raw_data = data
-        log_usage_genai(response, self._model, stage="MergedExtraction", logger=logger)
+        usage_info = log_usage_genai(
+            response, self._model, stage="MergedExtraction", logger=logger
+        )
+        dump_call(
+            stage="MergedExtraction",
+            model=self._model,
+            system=system_message,
+            user=user_prompt,
+            raw_response=raw,
+            usage=usage_info,
+        )
         return self._unpack_merged_response(data)
 
     def _extract_from_raw_openai(
@@ -331,7 +342,17 @@ class TaskExtractor:
         raw = response.choices[0].message.content or "{}"
         data = json.loads(raw)
         self._last_raw_data = data
-        log_usage(response, self._model, stage="MergedExtraction", logger=logger)
+        usage_info = log_usage(
+            response, self._model, stage="MergedExtraction", logger=logger
+        )
+        dump_call(
+            stage="MergedExtraction",
+            model=self._model,
+            system=system_message,
+            user=user_prompt,
+            raw_response=raw,
+            usage=usage_info,
+        )
         return self._unpack_merged_response(data)
 
     @staticmethod

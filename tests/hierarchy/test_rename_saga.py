@@ -65,19 +65,19 @@ class TestExecuteRenameSagaSelect:
         # PATCH 1: Notion adds the new option, assigns id `opt-new`.
         # PATCH 2: Notion drops `opt-old`.
         client.update_data_source.side_effect = [
-            _patch_response("Work area", "select", [
+            _patch_response("Macro Work Block", "select", [
                 {"id": "opt-old", "name": "Sourcing"},
                 {"id": "opt-other", "name": "Standup"},
                 {"id": "opt-new", "name": "WWW Sourcing"},
             ]),
-            _patch_response("Work area", "select", [
+            _patch_response("Macro Work Block", "select", [
                 {"id": "opt-other", "name": "Standup"},
                 {"id": "opt-new", "name": "WWW Sourcing"},
             ]),
         ]
         client.query_database.return_value = _query_response([
-            _select_page("p-1", "Work area", "opt-old", "Sourcing"),
-            _select_page("p-2", "Work area", "opt-old", "Sourcing"),
+            _select_page("p-1", "Macro Work Block", "opt-old", "Sourcing"),
+            _select_page("p-2", "Macro Work Block", "opt-old", "Sourcing"),
         ])
 
         intent = RenameIntent(
@@ -89,7 +89,7 @@ class TestExecuteRenameSagaSelect:
         new_id, post_state, details = execute_rename_saga(
             client=client,
             member_db_id="mdb-1",
-            property_name="Work area",
+            property_name="Macro Work Block",
             property_type="select",
             intent=intent,
             current_state=current,
@@ -102,14 +102,14 @@ class TestExecuteRenameSagaSelect:
         client.query_database.assert_called_once()
         _, kwargs = client.query_database.call_args
         assert kwargs["filter"] == {
-            "property": "Work area",
+            "property": "Macro Work Block",
             "select": {"equals": "Sourcing"},
         }
         # Both pages were migrated.
         assert client.update_page.call_count == 2
         calls = [c.kwargs for c in client.update_page.call_args_list]
         assert all(
-            c["properties"] == {"Work area": {"select": {"id": "opt-new"}}}
+            c["properties"] == {"Macro Work Block": {"select": {"id": "opt-new"}}}
             for c in calls
         )
         # post_state: old gone, new with desired name present.
@@ -129,11 +129,11 @@ class TestExecuteRenameSagaSelect:
         ]
         # Only PATCH 2 should be called.
         client.update_data_source.return_value = _patch_response(
-            "Work area", "select",
+            "Macro Work Block", "select",
             [{"id": "opt-new", "name": "WWW Sourcing"}],
         )
         client.query_database.return_value = _query_response([
-            _select_page("p-1", "Work area", "opt-old", "Sourcing"),
+            _select_page("p-1", "Macro Work Block", "opt-old", "Sourcing"),
         ])
 
         intent = RenameIntent(
@@ -145,7 +145,7 @@ class TestExecuteRenameSagaSelect:
         new_id, post_state, details = execute_rename_saga(
             client=client,
             member_db_id="mdb-1",
-            property_name="Work area",
+            property_name="Macro Work Block",
             property_type="select",
             intent=intent,
             current_state=current,
@@ -172,7 +172,7 @@ class TestExecuteRenameSagaSelect:
             execute_rename_saga(
                 client=client,
                 member_db_id="mdb-1",
-                property_name="Work area",
+                property_name="Macro Work Block",
                 property_type="select",
                 intent=intent,
                 current_state=[{"id": "opt-old", "name": "X"}],
@@ -184,13 +184,13 @@ class TestExecuteRenameSagaSelect:
     def test_page_migration_failure_raises_and_skips_patch2(self):
         client = MagicMock()
         client.update_data_source.return_value = _patch_response(
-            "Work area", "select", [
+            "Macro Work Block", "select", [
                 {"id": "opt-old", "name": "X"},
                 {"id": "opt-new", "name": "Y"},
             ],
         )
         client.query_database.return_value = _query_response([
-            _select_page("p-1", "Work area", "opt-old", "X"),
+            _select_page("p-1", "Macro Work Block", "opt-old", "X"),
         ])
         client.update_page.side_effect = RuntimeError("page migration boom")
 
@@ -204,7 +204,7 @@ class TestExecuteRenameSagaSelect:
             execute_rename_saga(
                 client=client,
                 member_db_id="mdb-1",
-                property_name="Work area",
+                property_name="Macro Work Block",
                 property_type="select",
                 intent=intent,
                 current_state=[{"id": "opt-old", "name": "X"}],
@@ -215,7 +215,7 @@ class TestExecuteRenameSagaSelect:
     def test_patch2_failure_raises(self):
         client = MagicMock()
         client.update_data_source.side_effect = [
-            _patch_response("Work area", "select", [
+            _patch_response("Macro Work Block", "select", [
                 {"id": "opt-old", "name": "X"},
                 {"id": "opt-new", "name": "Y"},
             ]),
@@ -233,7 +233,7 @@ class TestExecuteRenameSagaSelect:
             execute_rename_saga(
                 client=client,
                 member_db_id="mdb-1",
-                property_name="Work area",
+                property_name="Macro Work Block",
                 property_type="select",
                 intent=intent,
                 current_state=[{"id": "opt-old", "name": "X"}],
@@ -242,11 +242,11 @@ class TestExecuteRenameSagaSelect:
     def test_no_tagged_pages_still_proceeds_to_drop(self):
         client = MagicMock()
         client.update_data_source.side_effect = [
-            _patch_response("Work area", "select", [
+            _patch_response("Macro Work Block", "select", [
                 {"id": "opt-old", "name": "X"},
                 {"id": "opt-new", "name": "Y"},
             ]),
-            _patch_response("Work area", "select",
+            _patch_response("Macro Work Block", "select",
                             [{"id": "opt-new", "name": "Y"}]),
         ]
         client.query_database.return_value = _query_response([])
@@ -260,7 +260,7 @@ class TestExecuteRenameSagaSelect:
         new_id, post_state, details = execute_rename_saga(
             client=client,
             member_db_id="mdb-1",
-            property_name="Work area",
+            property_name="Macro Work Block",
             property_type="select",
             intent=intent,
             current_state=[{"id": "opt-old", "name": "X"}],
@@ -465,11 +465,11 @@ class TestExecuteDropSaga:
     def test_select_drop_clears_tagged_pages_then_drops(self):
         client = MagicMock()
         client.query_database.return_value = _query_response([
-            _select_page("p-1", "Work area", "opt-gone", "Old"),
-            _select_page("p-2", "Work area", "opt-gone", "Old"),
+            _select_page("p-1", "Macro Work Block", "opt-gone", "Old"),
+            _select_page("p-2", "Macro Work Block", "opt-gone", "Old"),
         ])
         client.update_data_source.return_value = _patch_response(
-            "Work area", "select",
+            "Macro Work Block", "select",
             [{"id": "opt-other", "name": "Standup"}],
         )
 
@@ -481,7 +481,7 @@ class TestExecuteDropSaga:
         post_state, details = execute_drop_saga(
             client=client,
             member_db_id="mdb-1",
-            property_name="Work area",
+            property_name="Macro Work Block",
             property_type="select",
             intent=intent,
             current_state=[
@@ -493,11 +493,11 @@ class TestExecuteDropSaga:
         # Both pages cleared (select → None).
         assert client.update_page.call_count == 2
         for c in client.update_page.call_args_list:
-            assert c.kwargs["properties"] == {"Work area": {"select": None}}
+            assert c.kwargs["properties"] == {"Macro Work Block": {"select": None}}
         # PATCH sent the array MINUS opt-gone.
         client.update_data_source.assert_called_once()
         patch_args = client.update_data_source.call_args.args
-        patch_opts = patch_args[1]["Work area"]["select"]["options"]
+        patch_opts = patch_args[1]["Macro Work Block"]["select"]["options"]
         assert "opt-gone" not in [o.get("id") for o in patch_opts]
         # post_state matches.
         assert {o["id"] for o in post_state} == {"opt-other"}
@@ -546,7 +546,7 @@ class TestExecuteDropSaga:
         client = MagicMock()
         client.query_database.return_value = _query_response([])
         client.update_data_source.return_value = _patch_response(
-            "Work area", "select", [],
+            "Macro Work Block", "select", [],
         )
 
         intent = DropIntent(
@@ -557,7 +557,7 @@ class TestExecuteDropSaga:
         execute_drop_saga(
             client=client,
             member_db_id="mdb-1",
-            property_name="Work area",
+            property_name="Macro Work Block",
             property_type="select",
             intent=intent,
             current_state=[{"id": "opt-gone", "name": "Old"}],
@@ -569,7 +569,7 @@ class TestExecuteDropSaga:
     def test_drop_page_migration_failure_raises_and_skips_patch(self):
         client = MagicMock()
         client.query_database.return_value = _query_response([
-            _select_page("p-1", "Work area", "opt-gone", "Old"),
+            _select_page("p-1", "Macro Work Block", "opt-gone", "Old"),
         ])
         client.update_page.side_effect = RuntimeError("page clear boom")
 
@@ -582,7 +582,7 @@ class TestExecuteDropSaga:
             execute_drop_saga(
                 client=client,
                 member_db_id="mdb-1",
-                property_name="Work area",
+                property_name="Macro Work Block",
                 property_type="select",
                 intent=intent,
                 current_state=[{"id": "opt-gone", "name": "Old"}],

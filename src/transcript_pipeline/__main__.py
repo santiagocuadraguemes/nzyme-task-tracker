@@ -5,11 +5,10 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 import time
 from datetime import datetime, timezone
-
-import logfire
 
 from dotenv import load_dotenv
 from notion_client import Client as NotionClient
@@ -17,7 +16,8 @@ from pathlib import Path
 
 from src.notion_client_wrapper import NotionClientWrapper
 from src.transcript_pipeline.fetch_transcript import fetch_transcript
-from src.utils.llm_logging import get_tracker, print_usage_summary, start_tracking
+from src.utils.llm_dump import dump_path, enable_llm_debug
+from src.utils.llm_logging import configure_logfire, get_tracker, print_usage_summary, start_tracking
 
 
 def _usage_since(tracker, marker: int) -> dict:
@@ -77,7 +77,6 @@ def _count_entries(path: Path) -> int:
 def _create_client() -> NotionClientWrapper:
     """Create a NotionClientWrapper with API v2026-03-11."""
     load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
-    import os
     notion = NotionClient(auth=os.environ["NOTION_API_TOKEN"], notion_version="2026-03-11")
     return NotionClientWrapper(notion)
 
@@ -253,7 +252,20 @@ def main() -> None:
             "history file later."
         ),
     )
+    parser.add_argument(
+        "--dump-llm",
+        action="store_true",
+        help=(
+            "Write each LLM call's exact system prompt, user prompt, raw "
+            "response, and token usage to .llm_logs/<timestamp>.jsonl (one "
+            "file per run). Also disables Logfire scrubbing locally so "
+            "Gemini system input is readable. Sets NZYME_DEBUG_LLM=1."
+        ),
+    )
     args = parser.parse_args()
+
+    if args.dump_llm:
+        enable_llm_debug()
 
     start_tracking()
 
@@ -361,8 +373,7 @@ def main() -> None:
         if not cfg:
             from src.config import load_config
             cfg = load_config()
-        logfire.configure(token=cfg.logfire_token, service_name="nzyme-transcript")
-        logfire.instrument_openai()
+        configure_logfire(cfg.logfire_token, service_name="nzyme-transcript")
 
         if not transcript_text:
             print("\nERROR: No transcript to extract from.", file=sys.stderr)
@@ -533,8 +544,7 @@ def _run_write_mode(args: argparse.Namespace) -> None:
     if overrides:
         cfg = cfg.model_copy(update=overrides)
 
-    logfire.configure(token=cfg.logfire_token, service_name="nzyme-transcript")
-    logfire.instrument_openai()
+    configure_logfire(cfg.logfire_token, service_name="nzyme-transcript")
 
     from src.utils.logger import setup_logging
     setup_logging("DEBUG" if args.verbose else "INFO")
@@ -562,3 +572,6 @@ if __name__ == "__main__":
         sys.exit(1)
     finally:
         print_usage_summary()
+        _dump = dump_path()
+        if _dump is not None:
+            print(f"\nLLM calls captured → {_dump}", file=sys.stderr)

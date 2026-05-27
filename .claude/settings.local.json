@@ -67,7 +67,9 @@
       "mcp__claude_ai_Custom_Supabase__list_tables",
       "PowerShell(aws lambda get-function *)",
       "PowerShell(../venv/Scripts/python -m pytest tests/ -q --tb=short 2>&1 | Select-Object -Last 50)",
-      "PowerShell(aws lambda invoke *)"
+      "PowerShell(aws lambda invoke *)",
+      "PowerShell([Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $start = [DateTimeOffset]::Parse\\(\"2026-05-26T00:00:00Z\"\\).ToUnixTimeMilliseconds\\(\\); $end = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds\\(\\); foreach \\($pat in @\\('\"[ERROR]\"','\"Task timed out\"','\"Traceback\"','\"Exception\"','\"timeout\"','\"RateLimit\"','\"429\"','\"500\"','\"503\"'\\)\\) { $count = 0; $token = $null; do { if \\($token\\) { $resp = aws logs filter-log-events --log-group-name \"/aws/lambda/kibo-talent-engine\" --profile company --region eu-west-1 --start-time $start --end-time $end --filter-pattern $pat --next-token $token --output json | ConvertFrom-Json } else { $resp = aws logs filter-log-events --log-group-name \"/aws/lambda/kibo-talent-engine\" --profile company --region eu-west-1 --start-time $start --end-time $end --filter-pattern $pat --output json | ConvertFrom-Json } $count += $resp.events.Count; $token = $resp.nextToken } while \\($token\\); Write-Output \\(\"{0,-25} {1}\" -f $pat, $count\\) })",
+      "PowerShell(Out-Null *)"
     ]
   }
 }

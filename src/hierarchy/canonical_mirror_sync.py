@@ -21,10 +21,10 @@ Per tick:
      last week" is one SQL query.
 
 Non-goals (handled in later PRs):
-- Propagating changes to member-DB ``Work area`` options or Tracker
-  ``[DETAILS INSIDE]`` rows. ``macro_block_sync`` still owns the Work-area
-  propagation by its own snapshot-vs-current diffing; that's untouched in
-  this PR.
+- Propagating changes to member-DB ``Macro Work Block`` options or Tracker
+  ``[DETAILS INSIDE]`` rows. ``macro_block_sync`` still owns the Macro Work
+  Block propagation by its own snapshot-vs-current diffing; that's
+  untouched in this PR.
 """
 from __future__ import annotations
 

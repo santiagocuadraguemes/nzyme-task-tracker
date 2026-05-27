@@ -16,7 +16,7 @@ from src.hierarchy import (
     canonical_mirror_sync,
     detail_applier_sync,
     detail_canonical_mirror_sync,
-    external_org_applier_sync,
+    external_org_db_sync,
     macro_block_sync,
     tracker_applier_sync,
 )
@@ -28,15 +28,16 @@ logger = logging.getLogger(__name__)
 
 # Order matters: every canonical mirror runs before the applier(s) reading
 # it (PR2: hierarchy_rows / PR4: detail_rows). Among appliers, order is
-# independent (different Notion targets per member DB; different mapping
-# tables). external_org_applier_sync has no canonical mirror — it reads
-# ReportingNz_deals live each tick.
+# independent (different Notion targets; different mapping tables).
+# external_org_db_sync has no canonical mirror — it reads ReportingNz_deals
+# live each tick and mirrors it into the single External Orgs Settings DB
+# (no member-DB fan-out).
 _SUB_SYNCS: list[SubSync] = [
     canonical_mirror_sync.sync,          # Hierarchy DB → hierarchy_rows
     detail_canonical_mirror_sync.sync,   # Detail Options Settings DB → detail_rows
-    macro_block_sync.sync,               # Tier 0 → member-DB Work area
+    macro_block_sync.sync,               # Tier 0 → member-DB Macro Work Block
     detail_applier_sync.sync,            # detail_rows → member-DB Detail
-    external_org_applier_sync.sync,      # ReportingNz_deals → member-DB External Org
+    external_org_db_sync.sync,           # ReportingNz_deals → External Orgs Settings DB
     tracker_applier_sync.sync,           # hierarchy_rows → Team Task Tracker
 ]
 

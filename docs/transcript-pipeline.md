@@ -118,7 +118,7 @@ The merged call uses commitment-aware prompting (hard/conditional/soft/group com
 | `src/transcript_pipeline/task_extractor.py` | LLM-based action item extraction (`extract_from_raw`): does correction + speaker resolution + extraction in one merged call — native `google-genai` SDK with `caches.create` + `response_schema` for Gemini models, OpenAI-compat shim otherwise |
 | `src/transcript_pipeline/schemas.py` | Pydantic `MergedExtractionOutput` schema shared by the Gemini-native (`response_schema`) and OpenAI-compat call sites |
 | `src/transcript_pipeline/transcript_cleaner.py` | Deterministic regex cleanup (Layers A + B): drops timestamps and bare speaker labels, collapses same-speaker runs, dedupes adjacent identical sentences |
-| `src/transcript_pipeline/task_classifier.py` | LLM-based task classification (category, parent, assignee, deal) |
+| `src/transcript_pipeline/task_classifier.py` | LLM-based task classification — emits int tokens for parent + assignees; derives `category` from the parent's Tier-0 ancestor. Reads operator-set `Macro Work Block` / `Detail` / `External Org` from the meeting page as strongest placement signal. Output tokens ~30% leaner than the old UUID-shaped contract. |
 | `src/transcript_pipeline/gcal_attendees.py` | Google Calendar lookup via service account (DWD) — per-meeting impersonation, emails-only; names resolved downstream via Org Chart |
 
 ## Notion databases (env vars in `.env`)
@@ -126,6 +126,33 @@ The merged call uses commitment-aware prompting (hard/conditional/soft/group com
 - **Terminology DB** (`TERMINOLOGY_DB_ID`): Term, Phonetic Variants, Category, Context, Active
 - **Org Chart DB** (`ORG_CHART_DB_ID`): Name, **Email** (required for GCal attendee matching), Role, Department, Seniority, Typical Topics, Active
 
-## Logfire
+## Observability — token tracking & local capture
 
-All LLM calls (extraction, classification) are tracked via logfire. Token usage is automatic via `logfire.instrument_openai()`.
+Logfire is configured in one place — `configure_logfire(token, service_name=...)` in `src/utils/llm_logging.py` — used by `src.main`, the transcript CLI, and the Lambda. It instruments both `instrument_openai()` and `instrument_google_genai()` and enables GenAI message-content capture.
+
+### Why "output tokens" look too big
+
+The classifier (`gpt-5-mini`) and the extractor (`gemini-3-flash-preview`) are **reasoning/thinking models**. Their billed output includes a hidden chain-of-thought that is *not* part of the visible JSON:
+
+- **OpenAI**: `usage.completion_tokens` already contains the reasoning portion (`usage.completion_tokens_details.reasoning_tokens`). A 17-task classification can emit ~500 visible tokens but bill ~2,400 — the gap is reasoning.
+- **Gemini**: reports `thoughts_token_count` *separately* from `candidates_token_count`; both bill at the output rate. `log_usage_genai` records `completion = candidates + thoughts` (the old code counted only `candidates` and under-reported cost).
+
+`log_usage` / `log_usage_genai` now surface this as a `(N reasoning)` suffix on each token line, and the end-of-run `=== LLM USAGE SUMMARY ===` has a **Reason** column (a subset of Output, never added to cost on top).
+
+The classifier defaults to `reasoning_effort="minimal"` (token→UUID mapping needs little deliberation; without it gpt-5-mini burns ~1,500-2,000 reasoning tokens/call). Override per run for quality comparisons:
+
+```bash
+# minimal|low|medium|high, or "default" to let the API decide
+$env:NZYME_CLASSIFY_REASONING_EFFORT="medium"
+```
+
+### Local LLM capture (`--dump-llm`) — the CLI debugging tool
+
+Logfire's scrubber redacts any prompt containing `auth`/`token`/etc. (Gemini system input shows as `[Scrubbed due to 'auth']`), and its google-genai instrumentation only half-captures native calls — so it's the wrong tool for interactive CLI debugging. Instead:
+
+```bash
+# OPENAI_API_KEY (gpt-5-mini, classification) + GEMINI_API_KEY (gemini-3-flash-preview, extraction)
+python -m src.transcript_pipeline <page_id> --extract --dump-llm
+```
+
+`--dump-llm` (env: `NZYME_DEBUG_LLM=1`) writes the **exact, unscrubbed** system prompt, user prompt, raw response, and token usage of every LLM call to a single append-only file — one run = one file: `.llm_logs/<UTC-timestamp>.jsonl`, one JSON line per call. The path is printed at the end of the run. The same flag also turns off Logfire scrubbing on local (non-Lambda) runs so Gemini system input is readable in the Logfire UI. `.llm_logs/` is gitignored. Lambda always keeps scrubbing on. Implementation: `src/utils/llm_dump.py`.

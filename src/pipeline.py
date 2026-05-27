@@ -16,7 +16,11 @@ from src.config import SyncConfig
 from src.notion_client_wrapper import NotionClientWrapper
 from src.deal_context import DealContextLoader, DealInfo
 from src.semantic_dedup import SemanticDedup
-from src.hierarchy_loader import HierarchyLoader
+from src.hierarchy_loader import (
+    HierarchyLoader,
+    attach_notes_to_hierarchy,
+    load_hierarchy_notes,
+)
 from src import literal_notes_extractor
 from src.meeting_db_registry import (
     MeetingDB, find_owner_for_page, load_registry,
@@ -26,8 +30,8 @@ from src.template_injector import fetch_template, inject_notes_section
 from src.tracker.team_writer import TeamTaskTrackerWriter
 from src.transcript_pipeline.context_loader import (
     load_terminology,
-    load_org_chart,
     load_org_chart_rows,
+    format_org_chart,
     build_enriched_attendee_str,
 )
 from src.transcript_pipeline.fetch_transcript import (
@@ -84,14 +88,6 @@ def _resolve_stage_creds(
             )
         return config.gemini_api_key, config.gemini_base_url
     return config.openai_api_key, OPENAI_DEFAULT_BASE_URL
-
-
-def _load_categories(client: NotionClientWrapper, database_id: str) -> list[str]:
-    """Read category select options from the Team Task Tracker data source schema."""
-    ds = client.retrieve_data_source(database_id)
-    cat_prop = ds.get("properties", {}).get("Category", {})
-    options = cat_prop.get("select", {}).get("options", [])
-    return [opt["name"] for opt in options]
 
 
 def _flatten_hierarchy(nodes: list[dict]) -> dict[str, str]:
@@ -328,8 +324,10 @@ def _resolve_attendees(
     2. Notion meeting_notes.calendar_event.attendees.
     3. Page's "Governance: Edit & View Access" people property.
 
-    Returns list of {"id", "name", optional "email"} dicts. GCal-sourced
-    attendees carry `email`; other sources set it to None.
+    Returns list of {"id", "name", optional "email"} dicts. Notion-source
+    attendees now also carry `email` (pulled from the workspace user
+    record) so the org-chart enrichment step works regardless of whether
+    GCal returned an event.
     """
     attendees: list[dict[str, str]] = []
 
@@ -337,11 +335,19 @@ def _resolve_attendees(
     if mn_block is not None:
         attendee_ids = extract_attendee_ids(mn_block)
         if attendee_ids:
-            user_lookup = build_user_lookup(client)
-            attendees = [
-                {"id": uid, "name": user_lookup.get(uid, uid), "email": None}
-                for uid in attendee_ids
-            ]
+            workspace_users = {u.get("id"): u for u in client.list_users()}
+            for uid in attendee_ids:
+                u = workspace_users.get(uid, {})
+                person = u.get("person") or {}
+                email = (person.get("email") or "").strip().lower() or None
+                name = u.get("name") or email or uid
+                attendees.append({"id": uid, "name": name, "email": email})
+            # Email-based canonical-name lookup against the Org Chart — same
+            # step the GCal branch already runs. Without this, Notion display
+            # names like "reyes" (lowercase email prefix) never resolve to
+            # the org chart's "Reyes Rubio" entry.
+            if org_chart_rows:
+                attendees = _enrich_attendee_names(attendees, org_chart_rows)
 
     # Source 1: Google Calendar (overrides Notion when an event matches)
     gcal_ready = config.gcal_enabled and metadata.get("title") and metadata.get("date")
@@ -497,18 +503,22 @@ def _process_via_transcript(
         model=classification_model,
         base_url=classification_base,
     )
+    meeting_taxonomy = {
+        "macro_work_block": metadata.get("macro_work_block", ""),
+        "detail": metadata.get("detail", []),
+        "external_org": metadata.get("external_org", ""),
+    }
     t0 = time.perf_counter()
     tasks = classifier.classify(
         tasks,
         ctx["classifier_prompt"],
-        ctx["categories"],
         ctx["hierarchy"],
         ctx["all_users"],
-        _format_deal_context(ctx["deals"]),
         meeting_title=metadata.get("title", ""),
         meeting_date=metadata.get("date", ""),
         enriched_attendees=enriched_attendee_str,
         notes_text=notes_text,
+        meeting_taxonomy=meeting_taxonomy,
     )
     logger.info(
         "Classified %d tasks (%s, %.1fs)",
@@ -599,16 +609,20 @@ def _process_via_literal_notes(
         model=classification_model,
         base_url=classification_base,
     )
+    meeting_taxonomy = {
+        "macro_work_block": metadata.get("macro_work_block", ""),
+        "detail": metadata.get("detail", []),
+        "external_org": metadata.get("external_org", ""),
+    }
     t0 = time.perf_counter()
     classified = classifier.classify(
         tasks,
         ctx["classifier_prompt"],
-        ctx["categories"],
         ctx["hierarchy"],
         ctx["all_users"],
-        _format_deal_context(ctx["deals"]),
         meeting_title=metadata.get("title", ""),
         meeting_date=metadata.get("date", ""),
+        meeting_taxonomy=meeting_taxonomy,
     )
     logger.info(
         "literal-notes: classified %d tasks (%s, %.1fs)",
@@ -921,31 +935,85 @@ def _load_sync_context(
         logger.exception("Failed to load hierarchy — proceeding without it")
         hierarchy = []
 
-    # Categories from DB schema
-    try:
-        categories = _load_categories(client, config.team_tracker_db_id)
-        if not categories:
-            logger.warning("No categories found in DB schema — using fallback")
-            categories = ["Other"]
-        logger.debug("Category options: %s", categories)
-    except Exception:
-        logger.exception("Failed to load categories — using fallback")
-        categories = ["Other"]
+    # Enrich the tracker hierarchy with one-sentence `Notes` from the
+    # canonical Hierarchy DB (joined via the `Tracker Node` relation).
+    # The classifier feeds these inline so the LLM can disambiguate
+    # similarly-named nodes (e.g. two "Marketing" nodes under different
+    # macro blocks). Best-effort — pipeline keeps running without notes.
+    if hierarchy and config.hierarchy_db_id:
+        try:
+            notes_map = load_hierarchy_notes(client, config.hierarchy_db_id)
+            if notes_map:
+                attach_notes_to_hierarchy(hierarchy, notes_map)
+        except Exception:
+            logger.exception(
+                "Failed to attach hierarchy notes — classifier will run "
+                "without disambiguation hints",
+            )
 
-    # Workspace users (optional)
+    # Org chart — loaded once and reused for:
+    #   1. team-members list for the classifier (joined with workspace users
+    #      by email so each entry carries a Notion user ID for assignee
+    #      resolution),
+    #   2. attendee enrichment in the extractor / classifier prompts,
+    #   3. the `org_chart_text` block in the extractor system prompt.
+    # The Org Chart is the canonical staff roster; raw workspace users
+    # include stale invites and bot/integration accounts.
+    #
+    # We DO NOT filter by `Active=true` here — `Active` only gates whether
+    # a member's own meetings are polled (handled in `discover_meeting_dbs`).
+    # An inactive member can still appear as an attendee in someone else's
+    # meeting, and they should still get their role annotation and be
+    # resolvable as an assignee.
+    org_chart_rows: list[dict] = []
+    org_chart_text = ""
+    if config.org_chart_db_id:
+        try:
+            org_chart_rows = load_org_chart_rows(client, config.org_chart_db_id)
+            org_chart_text = format_org_chart(org_chart_rows)
+            logger.debug("Loaded %d org chart members", len(org_chart_rows))
+        except Exception:
+            logger.exception("Failed to load org chart — proceeding without")
+
+    # Workspace users — needed to look up Notion user IDs by email for org
+    # chart members (the org chart row itself doesn't store a Notion ID).
+    all_users: list[dict[str, str]] = []
     try:
-        all_users = [
-            {
-                "id": u["id"],
-                "name": u.get("name", ""),
-                "email": u.get("person", {}).get("email", ""),
-            }
-            for u in client.list_users()
-            if u.get("type") == "person"
-        ]
-        logger.debug("Loaded %d workspace users", len(all_users))
+        workspace_by_email: dict[str, dict] = {}
+        for u in client.list_users():
+            if u.get("type") != "person":
+                continue
+            email = (u.get("person") or {}).get("email", "").strip().lower()
+            if email:
+                workspace_by_email[email] = u
+        if org_chart_rows:
+            for row in org_chart_rows:
+                wu = workspace_by_email.get(row["email"]) if row.get("email") else None
+                if not wu:
+                    continue
+                all_users.append({
+                    "id": wu["id"],
+                    "name": row["name"],
+                    "email": row["email"],
+                })
+            logger.debug(
+                "Resolved %d org-chart members to workspace user IDs",
+                len(all_users),
+            )
+        else:
+            logger.warning(
+                "No org chart rows — falling back to all workspace users",
+            )
+            all_users = [
+                {
+                    "id": u["id"],
+                    "name": u.get("name", ""),
+                    "email": (u.get("person") or {}).get("email", ""),
+                }
+                for u in workspace_by_email.values()
+            ]
     except Exception:
-        logger.exception("Failed to load workspace users — will use attendees only")
+        logger.exception("Failed to load team members — will use attendees only")
         all_users = []
 
     # Recent tasks for AI dedup context
@@ -991,17 +1059,6 @@ def _load_sync_context(
             logger.debug("Loaded terminology dictionary (%d chars)", len(terminology))
         except Exception:
             logger.exception("Failed to load terminology — transcript correction will be less accurate")
-
-    # Org chart for attendee enrichment and speaker identification
-    org_chart_rows: list[dict] = []
-    org_chart_text = ""
-    if config.org_chart_db_id:
-        try:
-            org_chart_rows = load_org_chart_rows(client, config.org_chart_db_id)
-            org_chart_text = load_org_chart(client, config.org_chart_db_id)
-            logger.debug("Loaded %d org chart members", len(org_chart_rows))
-        except Exception:
-            logger.exception("Failed to load org chart — proceeding without")
 
     # Classifier prompt (required for transcript path, loaded once per cycle)
     classifier_prompt = ""
@@ -1057,7 +1114,6 @@ def _load_sync_context(
 
     return {
         "hierarchy": hierarchy,
-        "categories": categories,
         "all_users": all_users,
         "existing_tasks": existing_tasks,
         "deals": deals,
@@ -1118,134 +1174,29 @@ def run_sync(config: SyncConfig, client: NotionClientWrapper) -> None:
                 logger.debug("[%s] no unprocessed meetings", label)
                 continue
 
+            # Per-DB fingerprint set — shared across all pages in this DB so
+            # subsequent pages see duplicates added during this run.
             seen_meetings = _build_seen_fingerprints(source, member_db.db_id)
 
             for page in pages:
                 page_id = page["id"]
-                metadata = source.get_page_metadata(page)
-                title = metadata["title"]
-
-                fingerprint = _meeting_fingerprint(
-                    member_db.db_id, title, metadata["date"],
-                )
-                if fingerprint in seen_meetings:
-                    logger.info(
-                        "[%s] DEDUP — skipping duplicate within this DB: '%s'",
+                title = source.get_page_metadata(page).get("title", page_id[:16])
+                try:
+                    count = run_sync_for_page(
+                        config,
+                        client,
+                        page_id,
+                        ctx=ctx,
+                        seen_meetings=seen_meetings,
+                        page=page,
+                        owner=member_db,
+                    )
+                    total_tasks += count
+                except Exception:
+                    logger.exception(
+                        "[%s] Failed to process '%s' — will retry next cycle",
                         label, title,
                     )
-                    if not config.dry_run:
-                        source.mark_page_processed(page_id)
-                    continue
-                seen_meetings.add(fingerprint)
-
-                try:
-                    with logfire.span(
-                        "process_meeting",
-                        meeting_title=title, page_id=page_id, db_owner=label,
-                    ):
-                        # Decision point: does this page have a transcript?
-                        blocks = client.get_block_children(page_id)
-                        mn_block = find_meeting_notes_block(blocks)
-                        transcript_block_id = (
-                            extract_transcript_block_id(mn_block) if mn_block else None
-                        )
-
-                        if not _should_auto_extract(config, member_db):
-                            # --- Literal-notes path (LLM extraction, verbatim) ---
-                            logger.info(
-                                "[%s] Page '%s': literal-notes path (auto_extract_tasks=False)",
-                                label, title,
-                            )
-                            attendees = _resolve_attendees(
-                                client, config, mn_block, page, metadata,
-                                org_chart_rows=ctx.get("org_chart_rows"),
-                            )
-                            tasks = _process_via_literal_notes(
-                                client, config, ctx, page_id, blocks, metadata,
-                                attendees=attendees,
-                            )
-                            if not tasks:
-                                logger.warning(
-                                    "[%s] Page '%s': no action items found in notes — "
-                                    "skipping (auto_extract_tasks=False)",
-                                    label, title,
-                                )
-                                if not config.dry_run:
-                                    source.mark_page_processed(page_id)
-                                continue
-
-                            # Assignee fallback: default to meeting creator
-                            creator = metadata.get("created_by", {})
-                            creator_id = creator.get("id")
-                            for task in tasks:
-                                if not task.get("assignee_id") and creator_id:
-                                    task["assignee_id"] = [creator_id]
-                                    logger.debug(
-                                        "Assignee fallback → meeting creator for: %s",
-                                        task.get("title", "?")[:60],
-                                    )
-                        elif transcript_block_id:
-                            # --- Transcript path ---
-                            logger.info("[%s] Page '%s': transcript found", label, title)
-                            attendees = _resolve_attendees(
-                                client, config, mn_block, page, metadata,
-                                org_chart_rows=ctx.get("org_chart_rows"),
-                            )
-                            tasks = _process_via_transcript(
-                                client, config, ctx, page_id, page, blocks,
-                                mn_block, metadata, attendees,
-                            )
-
-                            # Assignee fallback: default to meeting creator
-                            creator = metadata.get("created_by", {})
-                            creator_id = creator.get("id")
-                            for task in tasks:
-                                if not task.get("assignee_id") and creator_id:
-                                    task["assignee_id"] = [creator_id]
-                                    logger.debug(
-                                        "Assignee fallback → meeting creator for: %s",
-                                        task.get("title", "?")[:60],
-                                    )
-                        else:
-                            # auto_extract_tasks=True but no transcript_block_id.
-                            # The notes-path fallback has been removed; mark
-                            # processed and skip so the page isn't re-tried
-                            # forever.
-                            logger.info(
-                                "[%s] Page '%s' skipped: auto_extract_tasks=True but no "
-                                "transcript available",
-                                label, title,
-                            )
-                            if not config.dry_run:
-                                source.mark_page_processed(page_id)
-                            continue
-
-                        # Semantic dedup: filter out tasks similar to existing ones
-                        tasks = _run_semantic_dedup(tasks, ctx.get("semantic_dedup"))
-
-                        if tasks:
-                            created = ctx["writer"].write_batch(tasks)
-                            created_ids = [c["id"] for c in created if c.get("id")]
-                            if created_ids:
-                                ctx["writer"].link_tasks_to_meeting(page_id, created_ids)
-                            total_tasks += len(created) if not config.dry_run else len(tasks)
-                            logger.info("[%s] Page '%s': %d tasks created", label, title, len(tasks))
-
-                            # Accumulate for cross-meeting AI dedup context
-                            for task in tasks:
-                                pid = task.get("parent_task_id")
-                                ctx["existing_tasks"].append({
-                                    "title": task["title"],
-                                    "parent_title": parent_titles_map.get(pid, "") if pid else "",
-                                })
-                        else:
-                            logger.info("[%s] Page '%s': no tasks found", label, title)
-
-                        if not config.dry_run:
-                            source.mark_page_processed(page_id)
-
-                except Exception:
-                    logger.exception("[%s] Failed to process '%s' — will retry next cycle", label, title)
                     continue
 
         logger.info(
@@ -1334,7 +1285,11 @@ def run_sync_for_page(
     page_id: str,
     *,
     force: bool = False,
-) -> None:
+    ctx: dict | None = None,
+    seen_meetings: set[str] | None = None,
+    page: dict | None = None,
+    owner: MeetingDB | None = None,
+) -> int:
     """Run extraction on a single page — transcript-first, notes fallback.
 
     The page's owning DB is derived from the page itself, so this works for
@@ -1345,11 +1300,30 @@ def run_sync_for_page(
     are configured). Works identically in CLI and Lambda.
 
     Args:
-        force: If True, skip the "already processed" / "processing" guards.
-            Used by CLI to re-process pages.
+        force: If True, skip the "already processed" / "processing"
+            checkbox guards *and* the per-DB title+date fingerprint dedup,
+            so an operator can deliberately re-process a page that has
+            already been seen. Used by the CLI ``--write`` path. The batch
+            loop and Lambda/webhook callers leave this False, so their
+            duplicate-suppression is unaffected.
+        ctx: Pre-loaded sync context (hierarchy, terminology, org chart,
+            classifier prompt, etc.). When omitted, the context is loaded
+            here — Lambda + webhook single-page invocations use this. The
+            batch CLI loop passes a single pre-loaded ctx for the whole
+            cycle to avoid N round-trips to Notion.
+        seen_meetings: Pre-loaded per-DB fingerprint set used for dedup.
+            When the batch loop passes one, this call also adds the
+            current page's fingerprint so subsequent pages in the same DB
+            see the duplicate.
+        page: Pre-fetched page dict. When omitted, fetched here. The batch
+            loop already has every page in memory from its DB query.
+
+    Returns:
+        Number of tasks created for this page (0 when none, including
+        the early-return / skip paths).
     """
-    # Fetch page first so we can derive the owning DB.
-    page = client.get_page(page_id)
+    if page is None:
+        page = client.get_page(page_id)
     props = page.get("properties", {})
     page_db_id = (page.get("parent") or {}).get("database_id", "")
     if not page_db_id:
@@ -1362,28 +1336,30 @@ def run_sync_for_page(
     # Reyes' 2026-04-27 Unicaja runs (both UUIDs share the first 8 chars).
     short_id = page_id[:16]
 
-    # Resolve the owning member's name for log line stamping. Best-effort:
-    # if the registry can't be loaded, we still process the page.
+    # Resolve the owning member's name for log line stamping. When the
+    # batch caller has already loaded the registry, ``owner`` is passed in
+    # and the lookup is skipped. Best-effort: if the registry can't be
+    # loaded, we still process the page.
     db_owner = "?"
-    owner: MeetingDB | None = None
-    try:
-        registry = load_registry(config, client)
-        owner = find_owner_for_page(registry, page_db_id)
-        if owner is not None and owner.owner_name:
-            db_owner = owner.owner_name
-    except Exception:
-        logger.debug("Could not resolve db_owner for page %s", short_id, exc_info=True)
+    if owner is None:
+        try:
+            registry = load_registry(config, client)
+            owner = find_owner_for_page(registry, page_db_id)
+        except Exception:
+            logger.debug("Could not resolve db_owner for page %s", short_id, exc_info=True)
+    if owner is not None and owner.owner_name:
+        db_owner = owner.owner_name
 
     if not force:
         processed = props.get("Processed", {}).get("checkbox", False)
         if processed:
             logger.debug("page=%s already processed — skipping", short_id)
-            return
+            return 0
 
         processing = props.get("Processing", {}).get("checkbox", False)
         if processing:
             logger.debug("page=%s already being processed by another invocation — skipping", short_id)
-            return
+            return 0
 
     # Claim the page (concurrency lock)
     if not config.dry_run and not force:
@@ -1393,18 +1369,22 @@ def run_sync_for_page(
     tasks: list[dict] = []
     path = "?"
     try:
-        ctx = _load_sync_context(config, client)
+        if ctx is None:
+            ctx = _load_sync_context(config, client)
         metadata = source.get_page_metadata(page)
         title = metadata["title"]
 
         # Dedup check (per-DB; same title+date in another member's DB is allowed).
-        seen_meetings = _build_seen_fingerprints(source, page_db_id)
+        if seen_meetings is None:
+            seen_meetings = _build_seen_fingerprints(source, page_db_id)
         fingerprint = _meeting_fingerprint(page_db_id, title, metadata["date"])
-        if fingerprint in seen_meetings:
+        if not force and fingerprint in seen_meetings:
             logger.info("page=%s '%s' skipped (duplicate meeting)", short_id, title[:60])
             if not config.dry_run:
                 source.mark_page_processed(page_id)
-            return
+            return 0
+        # Add now so subsequent pages in the same DB batch see this one.
+        seen_meetings.add(fingerprint)
 
         with logfire.span("process_meeting", meeting_title=title, page_id=page_id):
             # Decision point: does this page have a transcript?
@@ -1442,7 +1422,7 @@ def run_sync_for_page(
                     )
                     if not config.dry_run and not force:
                         source.mark_page_processed(page_id)
-                    return
+                    return 0
 
                 # Assignee fallback: default to meeting creator
                 creator = metadata.get("created_by", {})
@@ -1490,7 +1470,7 @@ def run_sync_for_page(
                 )
                 if not config.dry_run:
                     source.mark_page_processed(page_id)
-                return
+                return 0
 
             # Semantic dedup: filter out tasks similar to existing ones
             tasks = _run_semantic_dedup(tasks, ctx.get("semantic_dedup"))
@@ -1640,6 +1620,15 @@ def run_sync_for_page(
                         short_id, db_owner,
                         mirror_outcome.status.value, mirror_outcome.detail,
                     )
+                else:
+                    # NO_MATCH / DISABLED — silent at INFO to avoid CloudWatch
+                    # noise on untagged pages, but surfaced under --verbose
+                    # so local diagnostic runs can confirm the branch ran.
+                    logger.debug(
+                        "topic mirror outcome: page=%s owner=%s status=%s detail=%s",
+                        short_id, db_owner,
+                        mirror_outcome.status.value, mirror_outcome.detail,
+                    )
 
             if not config.dry_run and not force:
                 source.mark_page_processed(page_id)
@@ -1649,6 +1638,7 @@ def run_sync_for_page(
                 "page=%s db_owner=%s done in %.1fs (path=%s, tasks=%d)",
                 short_id, db_owner, elapsed, path, len(tasks),
             )
+            return len(tasks)
     except Exception:
         # Release the lock so the page retries next cycle
         if not config.dry_run and not force:
@@ -1657,3 +1647,8 @@ def run_sync_for_page(
             except Exception:
                 logger.exception("Failed to clear processing lock on %s", page_id)
         raise
+
+    # Defensive: every code path inside the try returned a value; this is
+    # only reached if the meeting_notes block was missing in a way that
+    # bypassed every branch. Treat as zero tasks.
+    return 0

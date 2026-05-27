@@ -142,7 +142,7 @@ class SyncConfig(BaseModel):
         168609, description="Affinity list ID for the Nzyme - LP Funnel list",
     )
     # Meeting Mirrors feature (opt-in via TOPIC_MIRROR_ENABLED).
-    # Clones tagged meetings (Work area / Detail / External Org) into
+    # Clones tagged meetings (Macro Work Block / Detail / External Org) into
     # topic-specific Notion DBs. Routing rules live in the Meeting Rules
     # DB so joiners/leavers/new topics don't require a redeploy.
     topic_mirror_enabled: bool = Field(
@@ -160,14 +160,15 @@ class SyncConfig(BaseModel):
             "fundraising_branch_enabled is True."
         ),
     )
-    # Hierarchy DB (source of truth for work-area structure). Drives the
-    # daily Hierarchy sync (Tier 0 → member DB `Work area` options).
+    # Hierarchy DB (source of truth for the Macro Work Block taxonomy).
+    # Drives the daily Hierarchy sync (Tier 0 → member DB `Macro Work Block`
+    # options).
     hierarchy_db_id: str | None = Field(
         None,
         description=(
             "Notion DB ID for the 'Meeting Notes & Task Tracker Hierarchy' "
             "database. Source of truth for Tier 0 Macro Work Blocks (sync'd "
-            "into every member Meeting Notes DB's `Work area` select)."
+            "into every member Meeting Notes DB's `Macro Work Block` select)."
         ),
     )
     detail_options_db_id: str | None = Field(
@@ -176,6 +177,14 @@ class SyncConfig(BaseModel):
             "Notion DB ID for the 'Detail Options' Settings DB. Source of "
             "truth for member-DB `Detail` multi-select options (sync'd by "
             "detail_canonical_mirror_sync → detail_rows → detail_applier_sync)."
+        ),
+    )
+    external_orgs_db_id: str | None = Field(
+        None,
+        description=(
+            "Notion DB ID for the '🏢 External Orgs' Settings DB. Mirror target "
+            "for Supabase ReportingNz_deals (one row per deal, sync'd by "
+            "external_org_db_sync)."
         ),
     )
 
@@ -246,4 +255,5 @@ def load_config() -> SyncConfig:
         ),
         hierarchy_db_id=os.getenv("HIERARCHY_DB_ID") or None,
         detail_options_db_id=os.getenv("DETAIL_OPTIONS_DB_ID") or None,
+        external_orgs_db_id=os.getenv("EXTERNAL_ORGS_DB_ID") or None,
     )

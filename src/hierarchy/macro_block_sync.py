@@ -1,11 +1,11 @@
-"""Apply Supabase canonical (``public.hierarchy_rows`` Tier 0) → ``Work area``
-select options on every member Meeting Notes DB.
+"""Apply Supabase canonical (``public.hierarchy_rows`` Tier 0) → ``Macro Work
+Block`` select options on every member Meeting Notes DB.
 
 Runs daily 07:00 Madrid as the second sub-sync in the ``hierarchy_sync``
 orchestrator, **after** ``canonical_mirror_sync`` (which writes today's
 Notion Hierarchy DB state into Supabase). This applier reads the
-freshly-updated canonical and reconciles each member DB's ``Work area``
-select.
+freshly-updated canonical and reconciles each member DB's ``Macro Work
+Block`` select.
 
 Contract:
 
@@ -14,11 +14,11 @@ Contract:
   * Live + inactive row → option soft-archived as
     ``(archived) <sanitized name>``.
   * Tombstoned (``deleted_at`` set) row → option **removed** from the
-    member DB; any pages tagged on it have the ``Work area`` property
-    cleared first; the mapping row is DELETEd from Supabase.
+    member DB; any pages tagged on it have the ``Macro Work Block``
+    property cleared first; the mapping row is DELETEd from Supabase.
   * Options on a member DB that don't correspond to any Tier 0 canonical
-    row are left alone (e.g. legacy ``Standup`` / ``1:1`` from before
-    Work area existed). Pass-through verbatim.
+    row are left alone (e.g. legacy ``Standup`` / ``1:1`` from before the
+    Macro Work Block property existed). Pass-through verbatim.
   * Idempotent: when state already matches, no PATCH is issued.
 
 Sanitization
@@ -67,7 +67,7 @@ HTTP/auth code in one place.
 
 Non-goals:
   * Touch Tier 1 / Tier 2 (those aren't propagated to member-DB
-    ``Work area`` today — only Tier 0 is).
+    ``Macro Work Block`` today — only Tier 0 is).
   * Garbage-collect orphan ``(archived) X`` options or mappings for
     departed members.
 """
@@ -97,7 +97,7 @@ logger = logging.getLogger(__name__)
 SUB_SYNC_NAME = "macro_block_sync"
 
 _TIER_0_VALUE = "0. Macro Work Block"
-_WORK_AREA_PROPERTY = "Work area"
+_MACRO_WORK_BLOCK_PROPERTY = "Macro Work Block"
 _ARCHIVED_PREFIX = "(archived) "
 _DETAIL_CAP = 50
 
@@ -270,8 +270,8 @@ def _plan_member_db_update(
             sorted deterministically.
         mappings_for_member: ``{hierarchy_page_id: _Mapping}`` filtered to
             this member DB.
-        current_options: the member DB's current ``Work area`` options
-            (the full Notion options array).
+        current_options: the member DB's current ``Macro Work Block``
+            options (the full Notion options array).
         member_db_id: ID of the member DB being planned for — embedded in
             ``mapping_writes``.
         skip_page_ids: canonical page_ids excluded by collision detection.
@@ -378,10 +378,10 @@ def _plan_member_db_update(
                 old_option_id=mapping.option_id,
                 old_name=current_name,
                 desired_name=desired_sanitized,
-                # Preserve the existing option's color — Work area is NOT
-                # canonical-color-driven (unlike Detail / External Org), so
-                # the saga must carry the OLD option's color through to the
-                # new one or the tag visually "resets" to default.
+                # Preserve the existing option's color — Macro Work Block is
+                # NOT canonical-color-driven (unlike Detail / External Org),
+                # so the saga must carry the OLD option's color through to
+                # the new one or the tag visually "resets" to default.
                 desired_color=current_opt.get("color"),
                 canonical_id=row.notion_page_id,
                 annotation=(
@@ -635,7 +635,7 @@ def _delete_mappings(
 
 
 def sync(client: NotionClientWrapper, config: SyncConfig) -> SyncReport:
-    """Apply Supabase canonical Tier 0 → member-DB ``Work area`` options."""
+    """Apply Supabase canonical Tier 0 → member-DB ``Macro Work Block`` options."""
     report = SyncReport(name=SUB_SYNC_NAME)
 
     if not config.org_chart_db_id:
@@ -734,18 +734,18 @@ def sync(client: NotionClientWrapper, config: SyncConfig) -> SyncReport:
             continue
 
         props = (ds.get("properties") or {})
-        work_area_prop = props.get(_WORK_AREA_PROPERTY)
-        if not work_area_prop or work_area_prop.get("type") != "select":
+        macro_block_prop = props.get(_MACRO_WORK_BLOCK_PROPERTY)
+        if not macro_block_prop or macro_block_prop.get("type") != "select":
             report.errors += 1
             msg = (
-                f"{owner_label}: no '{_WORK_AREA_PROPERTY}' select property — "
-                "rename `Meeting type` → `Work area` first"
+                f"{owner_label}: no '{_MACRO_WORK_BLOCK_PROPERTY}' select property — "
+                "rename `Meeting type` → `Macro Work Block` first"
             )
             report.details.append(msg)
             logger.warning("macro_block_sync: %s", msg)
             continue
 
-        current_options = work_area_prop.get("select", {}).get("options", []) or []
+        current_options = macro_block_prop.get("select", {}).get("options", []) or []
         mappings_for_member = {
             page_id: m
             for (page_id, mdb_id), m in mappings_by_pair.items()
@@ -798,7 +798,7 @@ def sync(client: NotionClientWrapper, config: SyncConfig) -> SyncReport:
                 new_id, current_state, saga_details = execute_rename_saga(
                     client=client,
                     member_db_id=member_db.db_id,
-                    property_name=_WORK_AREA_PROPERTY,
+                    property_name=_MACRO_WORK_BLOCK_PROPERTY,
                     property_type="select",
                     intent=intent,
                     current_state=current_state,
@@ -829,7 +829,7 @@ def sync(client: NotionClientWrapper, config: SyncConfig) -> SyncReport:
                 current_state, drop_details = execute_drop_saga(
                     client=client,
                     member_db_id=member_db.db_id,
-                    property_name=_WORK_AREA_PROPERTY,
+                    property_name=_MACRO_WORK_BLOCK_PROPERTY,
                     property_type="select",
                     intent=drop_intent,
                     current_state=current_state,
@@ -864,7 +864,7 @@ def sync(client: NotionClientWrapper, config: SyncConfig) -> SyncReport:
                 patch_response = client.update_data_source(
                     member_db.db_id,
                     {
-                        _WORK_AREA_PROPERTY: {
+                        _MACRO_WORK_BLOCK_PROPERTY: {
                             "select": {"options": final_desired},
                         },
                     },
@@ -882,7 +882,7 @@ def sync(client: NotionClientWrapper, config: SyncConfig) -> SyncReport:
             else:
                 patched_options = (
                     ((patch_response or {}).get("properties", {})
-                     .get(_WORK_AREA_PROPERTY, {})
+                     .get(_MACRO_WORK_BLOCK_PROPERTY, {})
                      .get("select", {})
                      .get("options")) or []
                 )
@@ -891,7 +891,7 @@ def sync(client: NotionClientWrapper, config: SyncConfig) -> SyncReport:
                         ds_after = client.retrieve_data_source(member_db.db_id)
                         patched_options = (
                             ((ds_after.get("properties") or {})
-                             .get(_WORK_AREA_PROPERTY, {})
+                             .get(_MACRO_WORK_BLOCK_PROPERTY, {})
                              .get("select", {})
                              .get("options")) or []
                         )

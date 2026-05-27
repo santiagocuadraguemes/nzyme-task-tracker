@@ -95,6 +95,18 @@ class SingleSource:
         mt_prop = props.get("Meeting type", {}).get("select")
         meeting_type = mt_prop.get("name", "") if mt_prop else ""
 
+        mwb_prop = props.get("Macro Work Block", {}).get("select")
+        macro_work_block = mwb_prop.get("name", "") if mwb_prop else ""
+
+        detail = [
+            o.get("name", "")
+            for o in props.get("Detail", {}).get("multi_select", [])
+            if o.get("name")
+        ]
+
+        ext_org_prop = props.get("External Org", {}).get("select")
+        external_org = ext_org_prop.get("name", "") if ext_org_prop else ""
+
         attendees = [
             {"id": p.get("id", ""), "name": p.get("name", "")}
             for p in props.get("Attendees", {}).get("people", [])
@@ -120,6 +132,9 @@ class SingleSource:
             "title": title,
             "date": date_str,
             "meeting_type": meeting_type,
+            "macro_work_block": macro_work_block,
+            "detail": detail,
+            "external_org": external_org,
             "attendees": attendees,
             "lp_emails": lp_emails,
             "created_by": created_by,

@@ -41,7 +41,7 @@ def _crow(
 def _ds(options: list[dict]) -> dict:
     return {
         "properties": {
-            "Work area": {"type": "select", "select": {"options": options}},
+            "Macro Work Block": {"type": "select", "select": {"options": options}},
         },
     }
 
@@ -745,13 +745,13 @@ class TestSync:
         # PATCH 1 payload appends the comma-free name (no id) to the existing
         # options.
         patch1_args = client.update_data_source.call_args_list[0].args
-        patch1_opts = patch1_args[1]["Work area"]["select"]["options"]
+        patch1_opts = patch1_args[1]["Macro Work Block"]["select"]["options"]
         assert patch1_opts[-1] == {
             "name": "Sourcing Investing & Divesting (Dealflow)",
         }
         # PATCH 2 payload omits the old id.
         patch2_args = client.update_data_source.call_args_list[1].args
-        patch2_opts = patch2_args[1]["Work area"]["select"]["options"]
+        patch2_opts = patch2_args[1]["Macro Work Block"]["select"]["options"]
         assert "opt-1" not in [o.get("id") for o in patch2_opts]
         # Mapping upsert carries the saga's new id (back-filled from PATCH 1
         # response).
@@ -806,10 +806,10 @@ class TestSync:
         client.query_database.return_value = {
             "results": [
                 {"id": "page-A", "properties": {
-                    "Work area": {"select": {"id": "opt-old", "name": "Sourcing"}},
+                    "Macro Work Block": {"select": {"id": "opt-old", "name": "Sourcing"}},
                 }},
                 {"id": "page-B", "properties": {
-                    "Work area": {"select": {"id": "opt-old", "name": "Sourcing"}},
+                    "Macro Work Block": {"select": {"id": "opt-old", "name": "Sourcing"}},
                 }},
             ],
             "has_more": False, "next_cursor": None,
@@ -827,7 +827,7 @@ class TestSync:
         assert client.update_page.call_count == 2
         call_args = [c.kwargs for c in client.update_page.call_args_list]
         assert all(
-            ca["properties"]["Work area"]["select"]["id"] == "opt-new"
+            ca["properties"]["Macro Work Block"]["select"]["id"] == "opt-new"
             for ca in call_args
         )
         # Mapping upsert carries the new id (NOT the old one).
@@ -929,7 +929,7 @@ class TestSync:
             "results": [{
                 "id": "page-1",
                 "properties": {
-                    "Work area": {"select": {"id": "opt-gone", "name": "Sourcing"}},
+                    "Macro Work Block": {"select": {"id": "opt-gone", "name": "Sourcing"}},
                 },
             }],
             "has_more": False, "next_cursor": None,
@@ -948,12 +948,12 @@ class TestSync:
         client.update_page.assert_called_once()
         kwargs = client.update_page.call_args.kwargs
         assert kwargs["page_id"] == "page-1"
-        assert kwargs["properties"] == {"Work area": {"select": None}}
+        assert kwargs["properties"] == {"Macro Work Block": {"select": None}}
         # PATCH dropped opt-gone.
         client.update_data_source.assert_called_once()
         patch_opts = (
             client.update_data_source.call_args.args[1]
-            ["Work area"]["select"]["options"]
+            ["Macro Work Block"]["select"]["options"]
         )
         assert "opt-gone" not in [o.get("id") for o in patch_opts]
         # Supabase: DELETE on work_area_option_mappings was issued.

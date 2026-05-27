@@ -140,3 +140,48 @@ CANDIDATE_SCHEMAS = {
     "no-scratch": MergedExtractionOutputNoScratch,
     "combined":   MergedExtractionOutputCombined,
 }
+
+
+# ---------------------------------------------------------------------------
+# Classifier output schema (symmetric with MergedExtractionOutput above).
+#
+# Consumed by ``TaskClassifier`` via OpenAI Structured Outputs
+# (``client.beta.chat.completions.parse(response_format=ClassificationOutput)``).
+# Strict mode means every field listed here is required on the wire — there
+# is no "omit when not applicable" path. We model that intent with
+# ``p: int | None`` (emit ``null`` for no-fit) and ``a: list[int]`` defaulting
+# to ``[]`` (emit empty list when only externals or "Team"). The unpacker
+# treats both shapes as equivalent to "drop the field" downstream.
+# ---------------------------------------------------------------------------
+
+
+class ClassifiedTask(BaseModel):
+    """One classified task — int tokens for parent + assignees.
+
+    Fields are intentionally single-letter to keep output tokens minimal.
+    The classifier never emits ``category`` or ``deal_page_id`` — both are
+    derived downstream from ``p`` (Tier-0 ancestor walk) and the deal
+    branch is retired.
+    """
+
+    i: int = Field(description="Task index — same value as the input task's index")
+    p: Optional[int] = Field(
+        default=None,
+        description="Parent hierarchy node `n`. Emit null when no node fits.",
+    )
+    a: list[int] = Field(
+        default_factory=list,
+        description=(
+            "Internal assignee `n` tokens. Emit [] when there are no "
+            "internal assignees (e.g. only externals or 'Team' / 'Equipo')."
+        ),
+    )
+
+
+class ClassificationOutput(BaseModel):
+    """Top-level shape returned by the classifier."""
+
+    tasks: list[ClassifiedTask] = Field(
+        default_factory=list,
+        description="One entry per input task, in any order.",
+    )

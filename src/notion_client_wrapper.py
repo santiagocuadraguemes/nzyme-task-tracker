@@ -19,6 +19,7 @@ Design notes:
 """
 from __future__ import annotations
 
+import random
 import time
 import logging
 from typing import Any
@@ -48,7 +49,7 @@ class NotionClientWrapper:
         self,
         client: NotionClient,
         rate_limiter: RateLimiter | None = None,
-        max_retries: int = 3,
+        max_retries: int = 4,
     ) -> None:
         self._client = client
         self._rate_limiter = rate_limiter or RateLimiter()
@@ -60,16 +61,20 @@ class NotionClientWrapper:
     # ------------------------------------------------------------------
 
     def _call_with_retry(self, fn, **kwargs) -> Any:
-        """Execute a Notion SDK call with rate limiting and retry logic."""
+        """Execute a Notion SDK call with rate limiting and retry logic.
+
+        Sleeps grow as 2**attempt capped at 16s, plus 0-1s jitter so multiple
+        per-DB queries in the same cron tick don't retry in lockstep.
+        """
         for attempt in range(1, self._max_retries + 1):
             self._rate_limiter.acquire()
             try:
                 return fn(**kwargs)
             except APIResponseError as e:
                 if e.status in (429, 500, 502, 503, 504) and attempt < self._max_retries:
-                    wait = 2 ** attempt
+                    wait = min(2 ** attempt, 16) + random.uniform(0, 1)
                     logger.warning(
-                        "Notion API error %s (attempt %d/%d), retrying in %ds",
+                        "Notion API error %s (attempt %d/%d), retrying in %.1fs",
                         e.status, attempt, self._max_retries, wait,
                     )
                     time.sleep(wait)

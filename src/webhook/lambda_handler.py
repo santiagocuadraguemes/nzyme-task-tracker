@@ -5,8 +5,7 @@ import json
 import logging
 import os
 
-import logfire
-from notion_client import Client as NotionClient
+from notion_client import APIResponseError, Client as NotionClient
 
 from src.config import load_config
 from src.meeting_db_registry import load_registry
@@ -15,6 +14,7 @@ from src.pipeline import run_sync_for_page, _archive_done_tasks
 from src.sources.single_source import SingleSource
 from src.supabase_sync import run_full as supabase_run_full
 from src.supabase_sync import run_incremental as supabase_run_incremental
+from src.utils.llm_logging import configure_logfire
 from src.utils.logger import setup_logging
 from src.webhook.handler import handle_automation_webhook
 
@@ -23,14 +23,13 @@ from src.webhook.handler import handle_automation_webhook
 # Lambda; setup_logging only adjusts levels there.
 setup_logging(os.environ.get("LOG_LEVEL", "INFO"))
 
-# Wire logfire so OpenAI token usage / spans show up there (was previously
-# only configured in CLI, leaving Lambda emitting LogfireNotConfiguredWarning).
-logfire.configure(
-    token=os.environ.get("LOGFIRE_TOKEN"),
-    service_name="nzyme-lambda",
-    send_to_logfire="if-token-present",
-)
-logfire.instrument_openai()
+# Wire logfire so OpenAI + native Gemini token usage / spans show up there
+# (was previously only configured in CLI, leaving Lambda emitting
+# LogfireNotConfiguredWarning). configure_logfire also instruments the
+# native google-genai SDK (used for gemini-* models, which bypasses the
+# OpenAI client) and enables GenAI message-content capture. In Lambda,
+# scrubbing always stays on regardless of NZYME_DEBUG_LLM.
+configure_logfire(os.environ.get("LOGFIRE_TOKEN"), service_name="nzyme-lambda")
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +127,20 @@ def _handle_extraction(event, context):
             source = SingleSource(client, member_db.db_id)
             for page in source.get_ready_pages(idle_minutes=config.idle_minutes):
                 ready.append((page, member_db.owner_name or "?"))
+        except APIResponseError as e:
+            # Notion transient outage (429 / 5xx) after retries exhausted —
+            # next 5-min cron tick will pick up this DB, so log as WARNING
+            # without a stack trace rather than alarming as ERROR.
+            if e.status in (429, 500, 502, 503, 504):
+                logger.warning(
+                    "Notion transient %s for db=%s (%s) — will retry next cycle",
+                    e.status, member_db.db_id, member_db.owner_name or "?",
+                )
+            else:
+                logger.exception(
+                    "Failed to query ready pages for db=%s (%s) — skipping this DB",
+                    member_db.db_id, member_db.owner_name or "?",
+                )
         except Exception:
             logger.exception(
                 "Failed to query ready pages for db=%s (%s) — skipping this DB",
@@ -215,8 +228,9 @@ def _handle_weekly_archive(event, context):
 def _handle_hierarchy_sync(event, context):
     """Daily 07:00 Madrid sync: Hierarchy DB → downstream Notion state.
 
-    Runs every registered sub-sync (currently: Tier 0 → member DB `Work area`
-    options). Each sub-sync logs its own structured ``hierarchy_sync: ...``
+    Runs every registered sub-sync (currently: Tier 0 → member DB `Macro
+    Work Block` options). Each sub-sync logs its own structured
+    ``hierarchy_sync: ...``
     line. Returns a per-sub-sync summary.
     """
     from src import hierarchy

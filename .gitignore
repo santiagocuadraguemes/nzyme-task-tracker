@@ -60,6 +60,9 @@ venv/
 .worktrees/
 .claude/worktrees/
 
+# Local LLM call capture (NZYME_DEBUG_LLM / --dump-llm) — one JSONL per run
+.llm_logs/
+
 # Per-meeting --save-run history dumps (transcript_pipeline CLI)
 runs/
 # Corpus-level shadow-diff / candidate / baseline dumps

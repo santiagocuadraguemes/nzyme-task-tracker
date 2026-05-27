@@ -28,9 +28,15 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 import time
 from pathlib import Path
+
+# Enable prompt+completion content capture on the Google Gen AI OTel
+# instrumentation (off by default for PII reasons). Must be set before
+# `logfire.instrument_google_genai()` is called below.
+os.environ.setdefault("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", "true")
 
 import logfire
 from dotenv import load_dotenv
@@ -212,8 +218,14 @@ def main() -> None:
         sys.exit("ERROR: no page IDs provided")
 
     cfg = load_config()
-    logfire.configure(token=cfg.logfire_token, service_name="nzyme-candidate-cmp")
+    from src.utils.llm_logging import allow_gen_ai_content
+    logfire.configure(
+        token=cfg.logfire_token,
+        service_name="nzyme-candidate-cmp",
+        scrubbing=logfire.ScrubbingOptions(callback=allow_gen_ai_content),
+    )
     logfire.instrument_openai()
+    logfire.instrument_google_genai()
     start_tracking()
 
     # Wire the candidate schema. Production paths are untouched — this

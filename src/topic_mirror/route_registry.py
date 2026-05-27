@@ -8,8 +8,9 @@ Reads the Meeting Rules Notion DB once per pipeline tick and exposes:
     subset of routes whose Match Property/Match Value the page satisfies.
 
 A single page can match several routes (e.g. ``Detail=["AI & Tech",
-"Legal DD"]`` plus ``Work area="LPs & Fundraising"``). Each consumer
-filters the matched list by ``action`` and runs its own operation:
+"Legal DD"]`` plus ``Macro Work Block="LPs & Fundraising"``). Each
+consumer filters the matched list by ``action`` and runs its own
+operation:
 
   - ``Mirror to DB`` (default) → consumed by ``src.topic_mirror``.
   - ``Fire Affinity LP Funnel`` → consumed by the Fundraising branch in
@@ -27,11 +28,11 @@ from src.notion_client_wrapper import NotionClientWrapper
 logger = logging.getLogger(__name__)
 
 # Match Property values defined in the Meeting Rules DB schema.
-MATCH_WORK_AREA = "Work area"
+MATCH_MACRO_WORK_BLOCK = "Macro Work Block"
 MATCH_DETAIL = "Detail"
 MATCH_EXTERNAL_ORG = "External Org"
 
-_VALID_MATCH_PROPERTIES = frozenset({MATCH_WORK_AREA, MATCH_DETAIL, MATCH_EXTERNAL_ORG})
+_VALID_MATCH_PROPERTIES = frozenset({MATCH_MACRO_WORK_BLOCK, MATCH_DETAIL, MATCH_EXTERNAL_ORG})
 
 # Action values defined in the Meeting Rules DB schema. Rows with an unset
 # Action cell default to ACTION_MIRROR_TO_DB (back-compat for rows that
@@ -48,7 +49,7 @@ _NOTION_ID_PATTERN = re.compile(r"([0-9a-fA-F]{32})")
 
 @dataclass(frozen=True)
 class Route:
-    match_property: str   # "Work area" | "Detail" | "External Org"
+    match_property: str   # "Macro Work Block" | "Detail" | "External Org"
     match_value: str      # e.g. "AI & Tech"
     target_db_id: str     # 32-char hex DB id; "" when action != Mirror to DB
     label: str            # human-readable label for logs (e.g. "Detail:AI & Tech")
@@ -196,7 +197,7 @@ __all__ = [
     "ACTION_MIRROR_TO_DB",
     "MATCH_DETAIL",
     "MATCH_EXTERNAL_ORG",
-    "MATCH_WORK_AREA",
+    "MATCH_MACRO_WORK_BLOCK",
     "Route",
     "load_routes",
     "match_routes",

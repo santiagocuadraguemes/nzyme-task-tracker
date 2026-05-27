@@ -47,6 +47,7 @@ Globals:
         TOPIC_MIRROR_ROUTES_DB_ID: !Ref MeetingRulesDbId
         HIERARCHY_DB_ID: !Ref HierarchyDbId
         DETAIL_OPTIONS_DB_ID: !Ref DetailOptionsDbId
+        EXTERNAL_ORGS_DB_ID: !Ref ExternalOrgsDbId
         SUPABASE_URL: !Ref SupabaseUrl
         SUPABASE_KEY: !Ref SupabaseKey
 
@@ -194,6 +195,13 @@ Parameters:
       member-DB `Detail` multi-select options. Empty disables the
       detail_canonical_mirror_sync + detail_applier_sync sub-syncs (they skip
       with a benign warning).
+  ExternalOrgsDbId:
+    Type: String
+    Default: ''
+    Description: |
+      Notion DB ID for the '🏢 External Orgs' Settings DB. Mirror target for
+      Supabase ReportingNz_deals. Empty disables the external_org_db_sync
+      sub-sync (it skips with a benign warning).
   SupabaseUrl:
     Type: String
     Default: ''
@@ -273,7 +281,7 @@ Resources:
             Schedule: cron(0 5 * * ? *)
             Description: >-
               Sync Hierarchy DB → downstream Notion state (Tier 0 → member DB
-              Work area options, etc.). Daily 05:00 UTC (= 07:00 Madrid CEST,
+              Macro Work Block options, etc.). Daily 05:00 UTC (= 07:00 Madrid CEST,
               06:00 Madrid CET — DST drift accepted; bump to cron(0 6 ...) in
               winter if 06:00 local is too early).
             Enabled: true

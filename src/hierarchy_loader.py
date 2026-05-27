@@ -114,3 +114,60 @@ class HierarchyLoader:
     def _get_category(page: dict[str, Any]) -> str:
         cat = page.get("properties", {}).get("Category", {}).get("select")
         return cat.get("name", "") if cat else ""
+
+
+def load_hierarchy_notes(
+    client: NotionClientWrapper, hierarchy_db_id: str,
+) -> dict[str, str]:
+    """Build ``{tracker_node_page_id: notes_text}`` from the Hierarchy DB.
+
+    Queries active rows in the Meeting Notes & Task Tracker Hierarchy DB,
+    pulls each row's ``Notes`` rich_text and the ``Tracker Node`` relation,
+    and indexes the notes under each relation target id. Inactive rows are
+    skipped — their tracker counterparts are soft-archived and shouldn't
+    carry live disambiguation notes.
+
+    The returned map is consumed by ``attach_notes_to_hierarchy`` to enrich
+    the slim hierarchy tree the classifier sees, so the LLM can
+    disambiguate similarly-named nodes (e.g. ``Marketing`` under Ops vs
+    ``Marketing & Data Room Materials`` under IR&F).
+    """
+    try:
+        response = client.query_database(
+            database_id=hierarchy_db_id,
+            filter={"property": "Active", "checkbox": {"equals": True}},
+        )
+    except Exception:
+        logger.exception("Failed to load hierarchy notes from %s", hierarchy_db_id)
+        return {}
+
+    notes_map: dict[str, str] = {}
+    for row in response.get("results", []):
+        props = row.get("properties", {})
+        notes_rt = props.get("Notes", {}).get("rich_text", [])
+        notes = "".join(p.get("plain_text", "") for p in notes_rt).strip()
+        if not notes:
+            continue
+        tracker_rel = props.get("Tracker Node", {}).get("relation", [])
+        for ref in tracker_rel:
+            tid = ref.get("id")
+            if tid:
+                notes_map[tid] = notes
+    logger.debug("Loaded %d hierarchy notes", len(notes_map))
+    return notes_map
+
+
+def attach_notes_to_hierarchy(
+    nodes: list[dict[str, Any]], notes_map: dict[str, str],
+) -> None:
+    """Walk the tree and set ``notes`` on nodes whose id is in ``notes_map``.
+
+    Mutates ``nodes`` in place. Nodes without a matching entry are left
+    untouched (no empty ``notes`` key) so downstream renderers can rely on
+    ``"notes" in node`` to check presence.
+    """
+    for node in nodes:
+        nid = node.get("id")
+        if nid and nid in notes_map:
+            node["notes"] = notes_map[nid]
+        attach_notes_to_hierarchy(node.get("children", []), notes_map)

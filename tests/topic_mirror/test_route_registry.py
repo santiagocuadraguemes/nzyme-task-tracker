@@ -7,7 +7,7 @@ from src.topic_mirror.route_registry import (
     ACTION_AFFINITY_LP_FUNNEL,
     ACTION_MIRROR_TO_DB,
     MATCH_DETAIL,
-    MATCH_WORK_AREA,
+    MATCH_MACRO_WORK_BLOCK,
     load_routes,
     match_routes,
 )
@@ -89,7 +89,7 @@ class TestLoadRoutes:
         client.query_database.return_value = {
             "results": [
                 _make_row(
-                    match_property=MATCH_WORK_AREA,
+                    match_property=MATCH_MACRO_WORK_BLOCK,
                     match_value="LPs & Fundraising",
                     target_db_url="",
                     action=ACTION_AFFINITY_LP_FUNNEL,
@@ -101,7 +101,7 @@ class TestLoadRoutes:
         assert len(routes) == 1
         assert routes[0].action == ACTION_AFFINITY_LP_FUNNEL
         assert routes[0].target_db_id == ""
-        assert routes[0].match_property == MATCH_WORK_AREA
+        assert routes[0].match_property == MATCH_MACRO_WORK_BLOCK
         assert routes[0].match_value == "LPs & Fundraising"
         assert routes[0].label == "Affinity LP Funnel"
 
@@ -135,7 +135,7 @@ class TestLoadRoutes:
         assert routes == []
 
     def test_legacy_meeting_type_match_property_is_rejected(self):
-        """Match Property must be 'Work area' (or Detail / External Org)."""
+        """Match Property must be 'Macro Work Block' (or Detail / External Org)."""
         client = MagicMock()
         client.query_database.return_value = {
             "results": [
@@ -156,7 +156,7 @@ class TestMatchRoutesByWorkArea:
         client.query_database.return_value = {
             "results": [
                 _make_row(
-                    match_property=MATCH_WORK_AREA,
+                    match_property=MATCH_MACRO_WORK_BLOCK,
                     match_value="LPs & Fundraising",
                     target_db_url="",
                     action=ACTION_AFFINITY_LP_FUNNEL,
@@ -165,7 +165,7 @@ class TestMatchRoutesByWorkArea:
         }
         routes = load_routes(client, "db-rules")
         page_props = {
-            "Work area": {
+            "Macro Work Block": {
                 "type": "select",
                 "select": {"name": "LPs & Fundraising"},
             },
@@ -179,7 +179,7 @@ class TestMatchRoutesByWorkArea:
         client.query_database.return_value = {
             "results": [
                 _make_row(
-                    match_property=MATCH_WORK_AREA,
+                    match_property=MATCH_MACRO_WORK_BLOCK,
                     match_value="LPs & Fundraising",
                     target_db_url="",
                     action=ACTION_AFFINITY_LP_FUNNEL,
@@ -188,7 +188,7 @@ class TestMatchRoutesByWorkArea:
         }
         routes = load_routes(client, "db-rules")
         page_props = {
-            "Work area": {
+            "Macro Work Block": {
                 "type": "select",
                 "select": {"name": "Sourcing & Investing"},
             },

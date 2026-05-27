@@ -81,14 +81,18 @@ def load_terminology(client: NotionClientWrapper, db_id: str) -> str:
 
 
 def load_org_chart(client: NotionClientWrapper, db_id: str) -> str:
-    """Load active members from the Org Chart and format for LLM context.
+    """Load active members from the Org Chart and format for LLM context."""
+    return format_org_chart(load_org_chart_rows(client, db_id))
+
+
+def format_org_chart(rows: list[dict[str, Any]]) -> str:
+    """Format already-loaded org chart rows for LLM context.
 
     Returns a structured string like:
         Person: Reyes Rubio — Co-founding Partner, Investment
           Role: Managing Partner & CIO
           Typical topics: deal execution, fundraising, portfolio
     """
-    rows = load_org_chart_rows(client, db_id)
     if not rows:
         return ""
 
@@ -113,16 +117,20 @@ def load_org_chart(client: NotionClientWrapper, db_id: str) -> str:
 def load_org_chart_rows(
     client: NotionClientWrapper, db_id: str
 ) -> list[dict[str, Any]]:
-    """Load active members from the Org Chart as structured dicts.
+    """Load every member of the Org Chart as structured dicts.
 
-    Returns list of {"name", "email", "seniority", "department", "role", "topics"}.
-    `email` is lowercase (empty string if not set). Used for email-first matching
-    of GCal attendees against the org chart.
+    Returns list of {"name", "email", "seniority", "department", "role",
+    "topics", "active"}. ``active`` reflects the Notion ``Active`` checkbox;
+    callers that need the Active subset (e.g. ``discover_meeting_dbs`` for
+    deciding whose meeting DB to poll) filter on it. Attendee enrichment
+    and role annotations DON'T filter — Active is a gate for syncing
+    a member's own meetings, not for whether their role is shown when
+    they appear as an attendee in someone else's meeting.
+
+    `email` is lowercase (empty string if not set). Used for email-first
+    matching of GCal attendees against the org chart.
     """
-    resp = client.query_database(
-        database_id=db_id,
-        filter={"property": "Active", "checkbox": {"equals": True}},
-    )
+    resp = client.query_database(database_id=db_id)
     results = resp.get("results", [])
     rows: list[dict[str, Any]] = []
     for r in results:
@@ -130,6 +138,7 @@ def load_org_chart_rows(
         name = _get_title(props.get("Name", {}))
         if not name:
             continue
+        active = props.get("Active", {}).get("checkbox", False)
         rows.append({
             "name": name,
             "email": _get_email(props.get("Email", {})),
@@ -137,6 +146,7 @@ def load_org_chart_rows(
             "department": _get_select(props.get("Department", {})),
             "role": _get_text(props.get("Role", {})),
             "topics": _get_multi_select(props.get("Typical Topics", {})),
+            "active": bool(active),
         })
     return rows
 
