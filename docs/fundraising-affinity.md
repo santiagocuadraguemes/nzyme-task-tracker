@@ -8,6 +8,10 @@ The branch runs for every meeting whose `Macro Work Block` matches the rule — 
 
 Mechanically, the branch is its own step (`_mirror_meeting_to_affinity` in `pipeline.py`) that runs **before** the extraction `if/elif/else`, so the literal-notes "no action items" and "auto-extract but no transcript" early returns cannot skip it. The only remaining downstream gate is whether an attendee maps to an LP opportunity (`Skipped: no LP match` otherwise). Previously the branch sat after the task write and was silently skipped whenever an extraction path returned early — fixed 2026-05-27.
 
+### Spans ALL members, not just active ones (2026-05-27)
+
+The extraction sweep discovers Meeting Notes DBs via the Org Chart. Normally it polls only `Active = true` members, but fundraising meetings are held by partners who aren't on the task tracker, so the sweep loads the registry with `include_inactive=True` (`load_registry`/`discover_meeting_dbs`). **Inactive** members are polled *only* for the fundraising branch: after `_mirror_meeting_to_affinity` runs, `process_meeting` checks `owner.active` and — when false — marks the page processed and returns, skipping task extraction, the tracker write, and the topic-mirror. Active members (currently Vicente, Santiago) keep the full pipeline. `MeetingDB.active` carries the flag; only the extraction sweep (`run_sync` and the Lambda `_handle_extraction`) passes `include_inactive=True` — Supabase sync, hierarchy/detail appliers, and the topic-mirror keep the active-only default. Members with no Meeting Notes DB URL in the Org Chart have nothing to poll.
+
 ## What it does (current, note-only mode)
 
 1. Matches the meeting to **all** LPs via attendee emails → Affinity persons → opportunity → list entry. Multi-LP meetings (e.g. cross-LP intros) get the same note posted to every match.

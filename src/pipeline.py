@@ -1222,9 +1222,14 @@ def _load_sync_context(
 
 
 def run_sync(config: SyncConfig, client: NotionClientWrapper) -> None:
-    """Execute one full sync cycle across every discovered Meeting Notes DB."""
+    """Execute one full sync cycle across every discovered Meeting Notes DB.
+
+    Includes inactive members so the fundraising → Affinity branch can run on
+    their meetings too; inactive members' pages skip task extraction (handled
+    in ``process_meeting``).
+    """
     try:
-        registry = load_registry(config, client)
+        registry = load_registry(config, client, include_inactive=True)
     except Exception:
         logger.exception("Failed to load Meeting Notes DB registry — aborting sync")
         raise
@@ -1262,7 +1267,16 @@ def run_sync(config: SyncConfig, client: NotionClientWrapper) -> None:
             source = SingleSource(client, member_db.db_id)
             label = member_db.owner_name or member_db.db_id[:8]
 
-            pages = source.get_unprocessed_pages(buffer_hours)
+            # Defensive: inactive member DBs are now polled too and may have a
+            # divergent schema (e.g. no `Processed` column). A bad DB must not
+            # abort the whole sweep — log and move on.
+            try:
+                pages = source.get_unprocessed_pages(buffer_hours)
+            except Exception:
+                logger.exception(
+                    "[%s] failed to list unprocessed pages — skipping this DB", label,
+                )
+                continue
             if not pages:
                 logger.debug("[%s] no unprocessed meetings", label)
                 continue
@@ -1436,7 +1450,9 @@ def run_sync_for_page(
     db_owner = "?"
     if owner is None:
         try:
-            registry = load_registry(config, client)
+            # include_inactive so inactive members resolve with the correct
+            # active flag — the fundraising-only gate below depends on it.
+            registry = load_registry(config, client, include_inactive=True)
             owner = find_owner_for_page(registry, page_db_id)
         except Exception:
             logger.debug("Could not resolve db_owner for page %s", short_id, exc_info=True)
@@ -1508,6 +1524,20 @@ def run_sync_for_page(
                 attendees=attendees, page_id=page_id, short_id=short_id,
                 db_owner=db_owner,
             )
+
+            # Inactive members are polled ONLY for the fundraising branch
+            # (which just ran). They're not on the Team Task Tracker, so skip
+            # extraction, the tracker write, and the topic-mirror entirely —
+            # mark processed and stop here. (owner=None → treat as active.)
+            if owner is not None and not owner.active:
+                logger.info(
+                    "page=%s db_owner=%s inactive member — fundraising-only, "
+                    "skipping extraction",
+                    short_id, db_owner,
+                )
+                if not config.dry_run and not force:
+                    source.mark_page_processed(page_id)
+                return 0
 
             if not _should_auto_extract(config, owner):
                 # --- Literal-notes path (LLM extraction, verbatim) ---

@@ -28,12 +28,13 @@ def _make_org_row(
     email: str | None,
     mn_db_url: str | None,
     auto_extract_tasks: bool | None = None,
+    active: bool = True,
 ) -> dict:
     props = {
         "Name": {"type": "title", "title": [{"plain_text": name}]},
         "Email": {"type": "email", "email": email},
         "Meeting Notes DB": {"type": "url", "url": mn_db_url},
-        "Active": {"type": "checkbox", "checkbox": True},
+        "Active": {"type": "checkbox", "checkbox": active},
     }
     if auto_extract_tasks is not None:
         props["Auto-extract Tasks"] = {
@@ -151,6 +152,47 @@ class TestDiscoverMeetingDbs:
         assert call_kwargs["filter"] == {
             "property": "Active", "checkbox": {"equals": True},
         }
+
+    def test_default_results_are_active(self):
+        """Active-only discovery marks every result active=True."""
+        client = MagicMock()
+        client.query_database.return_value = {
+            "results": [
+                _make_org_row(
+                    name="Owner A", email="a@x.com",
+                    mn_db_url="https://www.notion.so/34583e67e2e78081b515f5e33926f153",
+                ),
+            ],
+        }
+        result = discover_meeting_dbs(client, "org-chart-db")
+        assert result[0].active is True
+
+    def test_include_inactive_drops_filter_and_records_active_flag(self):
+        """With include_inactive, the Active filter is dropped and each row's
+        actual Active flag is recorded on the MeetingDB."""
+        client = MagicMock()
+        client.query_database.return_value = {
+            "results": [
+                _make_org_row(
+                    name="Active Owner", email="act@x.com",
+                    mn_db_url="https://www.notion.so/34583e67e2e78081b515f5e33926f153",
+                    active=True,
+                ),
+                _make_org_row(
+                    name="Inactive Owner", email="inact@x.com",
+                    mn_db_url="https://www.notion.so/b07976472620499fa4b89be7b03c07d0",
+                    active=False,
+                ),
+            ],
+        }
+
+        result = discover_meeting_dbs(client, "org-chart-db", include_inactive=True)
+
+        # No Active filter passed.
+        assert client.query_database.call_args.kwargs.get("filter") is None
+        by_name = {db.owner_name: db for db in result}
+        assert by_name["Active Owner"].active is True
+        assert by_name["Inactive Owner"].active is False
 
     def test_auto_extract_tasks_defaults_false_when_column_missing(self):
         """Rows without the Auto-extract Tasks column get the False default."""

@@ -40,6 +40,11 @@ class MeetingDB:
     # when the column is missing or unset on the Org Chart row — the MVP
     # deploy expects every member on the literal-notes path.
     auto_extract_tasks: bool = False
+    # Org Chart `Active` flag. Active members get the full pipeline; inactive
+    # members are polled only so the fundraising → Affinity branch can run on
+    # their meetings (task extraction is skipped). Always True unless the
+    # registry was loaded with `include_inactive=True`.
+    active: bool = True
 
 
 def _extract_db_id(url: str) -> str | None:
@@ -60,15 +65,28 @@ def _normalize_db_id(db_id: str) -> str:
 
 def discover_meeting_dbs(
     client: NotionClientWrapper, org_chart_db_id: str,
+    *, include_inactive: bool = False,
 ) -> list[MeetingDB]:
-    """Return one MeetingDB per active Org Chart row with a parseable URL.
+    """Return one MeetingDB per Org Chart row with a parseable URL.
+
+    By default only ``Active = true`` rows are returned (every result has
+    ``active=True``). With ``include_inactive=True`` the Active filter is
+    dropped and each row's Active flag is recorded on ``MeetingDB.active`` —
+    used by the extraction sweep so the fundraising → Affinity branch can run
+    on inactive members' meetings too (their task extraction is skipped
+    downstream). Other consumers (Supabase sync, hierarchy/detail appliers)
+    keep the default active-only behavior.
 
     Rows missing the URL or with a URL we can't parse are skipped (logged).
     Duplicate DB URLs across rows are skipped after the first match.
     """
+    query_filter = (
+        None if include_inactive
+        else {"property": "Active", "checkbox": {"equals": True}}
+    )
     response = client.query_database(
         database_id=org_chart_db_id,
-        filter={"property": "Active", "checkbox": {"equals": True}},
+        filter=query_filter,
     )
 
     dbs: list[MeetingDB] = []
@@ -116,11 +134,19 @@ def discover_meeting_dbs(
         if isinstance(ae_prop, dict) and ae_prop.get("type") == "checkbox":
             auto_extract = bool(ae_prop.get("checkbox"))
 
+        # Active flag. When the query was filtered to Active rows this is
+        # always True; with include_inactive it reflects the actual checkbox.
+        active = True
+        active_prop = props.get("Active")
+        if isinstance(active_prop, dict) and active_prop.get("type") == "checkbox":
+            active = bool(active_prop.get("checkbox"))
+
         dbs.append(MeetingDB(
             db_id=db_id,
             owner_name=name,
             owner_email=email,
             auto_extract_tasks=auto_extract,
+            active=active,
         ))
 
     if dbs:
@@ -167,8 +193,9 @@ def _resolve_owner_name_from_db_title(
 
 def load_registry(
     config: SyncConfig, client: NotionClientWrapper,
+    *, include_inactive: bool = False,
 ) -> list[MeetingDB]:
-    """Return the active registry, honoring the single-DB override.
+    """Return the registry, honoring the single-DB override.
 
     When `MEETING_NOTES_DB_ID` is set in config, returns a one-entry registry
     using that DB; ``owner_name`` is derived from the DB title (stripping
@@ -176,6 +203,10 @@ def load_registry(
     Meeting Mirrors branch have a real contributor label to use. Otherwise
     discovers from the Org Chart at `ORG_CHART_DB_ID`. Raises if neither is
     configured.
+
+    ``include_inactive`` is forwarded to ``discover_meeting_dbs`` — the
+    extraction sweep passes True so inactive members' meetings are polled for
+    the fundraising branch; all other consumers keep the active-only default.
     """
     if config.meeting_notes_db_id:
         # Manual single-DB runs (dev / test) keep auto_extract_tasks=True so
@@ -195,7 +226,9 @@ def load_registry(
             "Neither MEETING_NOTES_DB_ID nor ORG_CHART_DB_ID is set — "
             "cannot resolve which Meeting Notes DB(s) to poll.",
         )
-    return discover_meeting_dbs(client, config.org_chart_db_id)
+    return discover_meeting_dbs(
+        client, config.org_chart_db_id, include_inactive=include_inactive,
+    )
 
 
 def find_owner_for_page(
