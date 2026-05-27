@@ -26,6 +26,26 @@ logger = logging.getLogger(__name__)
 
 INTERNAL_DOMAINS = frozenset({"kiboventures.com"})
 
+# Kibo partners are also LPs in our own funnel. When they sit in a fundraising
+# meeting they're hosting/co-investing, not prospecting — matching them would
+# log the meeting against their own LP entry. Never match these to an LP.
+# Hardcoded for now: Org Chart partners (Seniority = Partner / Co-founding
+# Partner) plus the non-Kibo addresses some of them attend under. The
+# @kiboventures.com ones are already covered by INTERNAL_DOMAINS, but are
+# listed for completeness — refresh from the Org Chart if the roster changes.
+PARTNER_LP_EMAILS = frozenset({
+    "vicente@kiboventures.com",
+    "pablo@kiboventures.com",
+    "juan@kiboventures.com",
+    "jmg@kiboventures.com",
+    "fernando@kiboventures.com",
+    "ignacio@kiboventures.com",
+    # Alternate (Oliver Wyman) addresses some partners attend under.
+    "pablo.campos@oliverwyman.com",
+    "joachim.rotering@oliverwyman.com",
+    "rodrigo.pintoribeiro@oliverwyman.com",
+})
+
 
 def extract_external_emails(attendees: list[dict[str, Any]]) -> list[str]:
     """Return external attendee emails (lowercased, kiboventures stripped).
@@ -47,8 +67,15 @@ def _extract_emails(attendees: list[dict[str, Any]]) -> list[str]:
 
 
 def _drop_internal(emails: list[str]) -> list[str]:
+    """Drop Kibo-internal-domain emails and known partner addresses.
+
+    Both are non-prospects: partners host fundraising meetings, so matching
+    them to an LP would log the meeting against their own funnel entry.
+    """
     out: list[str] = []
     for email in emails:
+        if email in PARTNER_LP_EMAILS:
+            continue
         domain = email.rsplit("@", 1)[-1]
         if domain not in INTERNAL_DOMAINS:
             out.append(email)
@@ -62,6 +89,42 @@ def _unique_domains(emails: list[str]) -> list[str]:
         if domain and domain not in seen:
             seen.append(domain)
     return seen
+
+
+def resolve_attendee_person_ids(
+    client: AffinityClient, attendees: list[dict[str, Any]],
+) -> list[int]:
+    """Best-effort map of attendee emails → Affinity person ids.
+
+    Used to attach the meeting note to its **people** (the Kibo owner/host plus
+    the external attendees), so it lands on each person's Affinity timeline —
+    not just the LP opportunity. Unlike LP matching this keeps internal Kibo
+    attendees too (the owner is one of them). Searches each attendee email and
+    keeps the id of every person whose record actually carries that address;
+    anyone not in Affinity is silently skipped. Order-preserving, deduped.
+    """
+    ids: list[int] = []
+    seen: set[int] = set()
+    for email in _extract_emails(attendees):
+        try:
+            persons = client.search_persons(email)
+        except AffinityError:
+            logger.warning("person lookup failed for %s", email, exc_info=True)
+            continue
+        for person in persons:
+            pid = person.get("id")
+            if pid is None or pid in seen:
+                continue
+            person_emails = {e.lower() for e in (person.get("emails") or []) if e}
+            primary = (person.get("primary_email") or "").lower()
+            if primary:
+                person_emails.add(primary)
+            if email in person_emails:
+                seen.add(pid)
+                ids.append(pid)
+    if ids:
+        logger.info("Resolved %d attendee(s) to Affinity persons %s", len(ids), ids)
+    return ids
 
 
 def build_lp_entity_index(
@@ -175,5 +238,6 @@ def resolve_lp_list_entries(
 __all__ = [
     "build_lp_entity_index",
     "extract_external_emails",
+    "resolve_attendee_person_ids",
     "resolve_lp_list_entries",
 ]

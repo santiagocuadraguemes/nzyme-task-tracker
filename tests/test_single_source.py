@@ -6,7 +6,6 @@ from src.sources.single_source import SingleSource
 def _make_meeting_page(
     page_id: str, title: str, date: str, meeting_type: str,
     attendees: list[dict], created_by: dict | None = None,
-    lp_emails_text: str | None = None,
 ) -> dict:
     page = {
         "id": page_id,
@@ -30,11 +29,6 @@ def _make_meeting_page(
             "Processed": {"type": "checkbox", "checkbox": False},
         },
     }
-    if lp_emails_text is not None:
-        page["properties"]["LP Emails"] = {
-            "type": "rich_text",
-            "rich_text": [{"plain_text": lp_emails_text}],
-        }
     if created_by:
         page["created_by"] = created_by
     return page
@@ -146,71 +140,6 @@ class TestSingleSource:
         content = source.get_page_content("page-123", include_ai_notes=True)
 
         assert "Call Natalia" in content
-
-    def test_get_page_metadata_lp_emails_missing_property(self):
-        page = _make_meeting_page(
-            "page-1", "LP chat", "2026-04-17", "Fundraising", [],
-        )
-        source = SingleSource(MagicMock(), "db-meetings")
-
-        meta = source.get_page_metadata(page)
-
-        assert meta["lp_emails"] == []
-
-    def test_get_page_metadata_lp_emails_single(self):
-        page = _make_meeting_page(
-            "page-1", "LP chat", "2026-04-17", "Fundraising", [],
-            lp_emails_text="jane@lp.com",
-        )
-        source = SingleSource(MagicMock(), "db-meetings")
-
-        meta = source.get_page_metadata(page)
-
-        assert meta["lp_emails"] == ["jane@lp.com"]
-
-    def test_get_page_metadata_lp_emails_comma_and_semicolon(self):
-        page = _make_meeting_page(
-            "page-1", "LP chat", "2026-04-17", "Fundraising", [],
-            lp_emails_text="jane@lp.com, Bob@LP.com; carol@other.com",
-        )
-        source = SingleSource(MagicMock(), "db-meetings")
-
-        meta = source.get_page_metadata(page)
-
-        # lowercased, whitespace stripped, order preserved
-        assert meta["lp_emails"] == [
-            "jane@lp.com", "bob@lp.com", "carol@other.com",
-        ]
-
-    def test_get_page_metadata_lp_emails_filters_non_emails(self):
-        page = _make_meeting_page(
-            "page-1", "LP chat", "2026-04-17", "Fundraising", [],
-            lp_emails_text="not-an-email, valid@lp.com, , also-bad",
-        )
-        source = SingleSource(MagicMock(), "db-meetings")
-
-        meta = source.get_page_metadata(page)
-
-        assert meta["lp_emails"] == ["valid@lp.com"]
-
-    def test_get_page_metadata_lp_emails_concatenates_rich_text_segments(self):
-        # Notion can split rich_text into multiple segments (e.g., if the user
-        # pastes with formatting). We must stitch them back together.
-        page = _make_meeting_page(
-            "page-1", "LP chat", "2026-04-17", "Fundraising", [],
-        )
-        page["properties"]["LP Emails"] = {
-            "type": "rich_text",
-            "rich_text": [
-                {"plain_text": "jane@lp.com, "},
-                {"plain_text": "bob@lp.com"},
-            ],
-        }
-        source = SingleSource(MagicMock(), "db-meetings")
-
-        meta = source.get_page_metadata(page)
-
-        assert meta["lp_emails"] == ["jane@lp.com", "bob@lp.com"]
 
     def test_mark_page_processed(self):
         client = MagicMock()

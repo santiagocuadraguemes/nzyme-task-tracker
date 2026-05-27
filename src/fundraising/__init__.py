@@ -10,6 +10,7 @@ Returns a structured ``FundraisingOutcome`` so the caller can map onto the
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from src.affinity_client import AffinityClient, AffinityError
@@ -18,9 +19,11 @@ from src.fundraising.affinity_writer import post_meeting_note_to_lps
 from src.fundraising.lp_matcher import (
     build_lp_entity_index,
     extract_external_emails,
+    resolve_attendee_person_ids,
     resolve_lp_list_entries,
 )
 from src.fundraising.outcome import FundraisingOutcome, FundraisingStatus
+from src.meeting_row import _fetch_block_summary
 from src.notion_client_wrapper import NotionClientWrapper
 from src.transcript_pipeline.fetch_transcript import (
     extract_ai_summary,
@@ -31,19 +34,43 @@ from src.transcript_pipeline.fetch_transcript import (
 logger = logging.getLogger(__name__)
 
 
-def _compose_note_body(*, user_notes: str, ai_summary: str) -> str:
-    """Compose the Affinity note body from user notes + Notion AI summary.
+# Markdown list / checkbox marker at the start of a notes line.
+_LIST_MARKER_RE = re.compile(r"^[-*]\s*(\[[ xX]\]\s*)?")
 
-    Returns a multi-line string; ``_build_html_note`` converts ``\\n`` → ``<br>``.
-    Sections appear only when their source has content, with a plain-text label
-    so the reader can tell which is which. When neither is present, returns ""
-    and the writer falls back to a link-only note.
+
+def _strip_template_scaffolding(raw_notes: str) -> str:
+    """Return the user's real notes, or "" when the section is just the
+    untouched meeting template.
+
+    The injected template seeds the notes with section headings
+    (``## Action Items``, ``### Notes``), empty checklist bullets, and a
+    bracketed ``[placeholder]``. Stripping all of that leaves nothing when the
+    user never typed anything — the caller then renders "No manual notes".
+    Lines that carry real content are kept verbatim (markers and all).
     """
-    parts: list[str] = []
-    if user_notes:
-        parts.append(f"Notes:\n{user_notes.strip()}")
-    if ai_summary:
-        parts.append(f"Notion AI summary:\n{ai_summary.strip()}")
+    kept: list[str] = []
+    for line in raw_notes.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("#"):                 # section-heading scaffolding
+            continue
+        body = _LIST_MARKER_RE.sub("", stripped).strip()
+        if not body:                                 # bare "-" / empty checkbox
+            continue
+        if body.startswith("[") and body.endswith("]"):  # bracketed placeholder
+            continue
+        kept.append(stripped)
+    return "\n".join(kept).strip()
+
+
+def _compose_outcome_summary(*, manual_notes: str, ai_summary: str) -> str:
+    """Plain-text rendering of the note's two sections, for the
+    ``FundraisingOutcome.summary`` debug field (not what Affinity receives)."""
+    notes = manual_notes.strip() or "(none)"
+    parts = [f"Manual notes:\n{notes}"]
+    if ai_summary.strip():
+        parts.append(f"Summary:\n{ai_summary.strip()}")
     return "\n\n".join(parts)
 
 
@@ -113,36 +140,48 @@ def write_to_affinity(
                     ),
                 )
 
-            # Pull the note body from Notion: user-written notes (inside the
-            # meeting_notes block) + Notion's auto-generated "AI Summary" page
-            # property. No LLM call here.
+            # Pull the note body from Notion: user-written notes + the Notion
+            # AI summary. The summary lives inside the meeting_notes block
+            # (`summary_block_id`) — what the user sees in the block — so read
+            # that first and only fall back to the legacy "AI Summary" page
+            # property when the block has none. No LLM call here.
             page = notion_client.get_page(page_id)
-            ai_summary = extract_ai_summary(page)
 
             user_notes = ""
+            block_summary = ""
             try:
                 blocks = notion_client.get_block_children(page_id)
                 mn_block = find_meeting_notes_block(blocks)
                 if mn_block is not None:
                     user_notes = fetch_notes_text(mn_block, notion_client)
+                    block_summary = _fetch_block_summary(mn_block, notion_client)
             except Exception:  # noqa: BLE001
                 logger.exception(
-                    "Failed to fetch user notes from page %s — continuing with "
-                    "summary-only body",
+                    "Failed to fetch notes/summary from page %s — continuing "
+                    "with whatever was retrieved",
                     page_id,
                 )
 
-            summary_text = _compose_note_body(
-                user_notes=user_notes, ai_summary=ai_summary,
+            ai_summary = block_summary or extract_ai_summary(page)
+
+            manual_notes = _strip_template_scaffolding(user_notes)
+            summary_text = _compose_outcome_summary(
+                manual_notes=manual_notes, ai_summary=ai_summary,
             )
+
+            # Attach the note to the meeting's people (owner/host + attendees
+            # that exist in Affinity) so it lands on their timelines, not just
+            # the LP opportunity.
+            person_ids = resolve_attendee_person_ids(client, attendees)
 
             posted, failed = post_meeting_note_to_lps(
                 client,
                 opportunity_entity_ids=opportunity_ids,
                 meeting_title=metadata.get("title", ""),
-                meeting_date=metadata.get("date", ""),
-                summary=summary_text,
+                manual_notes=manual_notes,
+                ai_summary=ai_summary,
                 notion_url=notion_url,
+                person_ids=person_ids,
             )
 
             if failed:

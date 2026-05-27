@@ -10,8 +10,39 @@ from unittest.mock import MagicMock, patch
 
 from src.affinity_client import AffinityError
 from src.config import SyncConfig
-from src.fundraising import write_to_affinity
+from src.fundraising import _strip_template_scaffolding, write_to_affinity
 from src.fundraising.outcome import FundraisingStatus
+
+
+class TestStripTemplateScaffolding:
+    def test_untouched_template_yields_empty(self):
+        raw = (
+            "## Action Items\n"
+            "- [List action items here - tag the owner when possible]\n"
+            "- \n"
+            "### Notes"
+        )
+        assert _strip_template_scaffolding(raw) == ""
+
+    def test_empty_input_yields_empty(self):
+        assert _strip_template_scaffolding("") == ""
+
+    def test_real_action_items_preserved_verbatim(self):
+        raw = (
+            "## Action Items\n"
+            "- [ ] Send NDA to Francesco\n"
+            "### Notes\n"
+            "They want Portugal exposure."
+        )
+        out = _strip_template_scaffolding(raw)
+        assert "- [ ] Send NDA to Francesco" in out
+        assert "They want Portugal exposure." in out
+        # Headings dropped.
+        assert "Action Items" not in out
+        assert "### Notes" not in out
+
+    def test_freeform_notes_without_markers_preserved(self):
+        assert _strip_template_scaffolding("Just a quick note.") == "Just a quick note."
 
 
 def _make_config(**overrides) -> SyncConfig:
@@ -142,8 +173,8 @@ def test_posted_when_single_lp_match_and_create_note_succeeds(
     # Composed body contains both sections
     assert "User wrote some notes here." in outcome.summary
     assert "Notion's auto summary." in outcome.summary
-    assert "Notes:" in outcome.summary
-    assert "Notion AI summary:" in outcome.summary
+    assert "Manual notes:" in outcome.summary
+    assert "Summary:" in outcome.summary
     fake.create_note.assert_called_once()
 
 

@@ -24,7 +24,6 @@ Workspace: `kiboventures.notion.so`
 | Date | date | ISO date; informational only — **not used for processing logic** (created_time and last_edited_time are used instead) |
 | Attendees | people | List of Notion users (returns id + name) |
 | Meeting type | select | Standup, 1:1, Deal review, Portfolio review, Team sync, External, Other, **Fundraising** (Fundraising triggers the Affinity LP Funnel branch when `FUNDRAISING_BRANCH_ENABLED=true`) |
-| LP Emails | rich_text | Manual, comma- or semicolon-separated list of external attendee emails, used by the fundraising branch to match an LP in Affinity when GCal is unavailable. Only read for `Meeting type = Fundraising`. |
 | Processed | checkbox | `false` = unprocessed, `true` = AI extraction completed |
 | Template Injected | checkbox | `false` = template not yet injected, `true` = template applied |
 | Processing | checkbox | Concurrency lock — `true` while a Lambda is extracting tasks from this page |
@@ -198,9 +197,9 @@ pipeline reloads them once per cron tick.
 ## Meeting Mirror DBs
 
 Each topic mirror DB shares the same property convention. Pipeline-control
-columns (`Processed`, `Processing`, `Template Injected`, `Task - Relation`,
-`LP Emails`) intentionally don't exist here — they're silently dropped by
-Notion at clone time because they're absent from the destination schema.
+columns (`Processed`, `Processing`, `Template Injected`, `Task - Relation`)
+intentionally don't exist here — they're silently dropped by Notion at clone
+time because they're absent from the destination schema.
 
 | Property | Type | Notes |
 |----------|------|-------|

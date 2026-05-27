@@ -112,16 +112,6 @@ class SingleSource:
             for p in props.get("Attendees", {}).get("people", [])
         ]
 
-        lp_emails_raw = "".join(
-            p.get("plain_text", "")
-            for p in props.get("LP Emails", {}).get("rich_text", [])
-        )
-        lp_emails: list[str] = []
-        for token in lp_emails_raw.replace(";", ",").split(","):
-            candidate = token.strip().lower()
-            if "@" in candidate:
-                lp_emails.append(candidate)
-
         created_by_prop = page.get("created_by", {})
         created_by = {
             "id": created_by_prop.get("id", ""),
@@ -136,7 +126,6 @@ class SingleSource:
             "detail": detail,
             "external_org": external_org,
             "attendees": attendees,
-            "lp_emails": lp_emails,
             "created_by": created_by,
             "url": page.get("url", ""),
         }

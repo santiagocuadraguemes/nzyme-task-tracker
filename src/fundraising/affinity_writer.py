@@ -11,22 +11,37 @@ from src.affinity_client import AffinityClient, AffinityError
 logger = logging.getLogger(__name__)
 
 
+def _section(label: str, text: str) -> str:
+    """A bolded label paragraph + a body paragraph (newlines → <br>)."""
+    body = html.escape(text.strip()).replace("\n", "<br>")
+    return f"<p><strong>{html.escape(label)}</strong></p><p>{body}</p>"
+
+
 def _build_html_note(
-    *, meeting_title: str, meeting_date: str, summary: str, notion_url: str,
+    *, meeting_title: str, manual_notes: str, ai_summary: str, notion_url: str,
 ) -> str:
+    """Two-section HTML note: manual notes first, then the Notion summary.
+
+    The title carries no date — Notion meeting titles already embed it, and
+    repeating it looks bad. When the manual notes are empty (the user never
+    touched the template), the first section reads "No manual notes". The
+    "Summary" section is omitted entirely when Notion produced no summary.
+    """
     t = html.escape(meeting_title or "Fundraising meeting")
-    d = html.escape(meeting_date or "")
-    s = html.escape(summary.strip()).replace("\n", "<br>")
+    parts = [f"<p><strong>{t}</strong></p>"]
+
+    notes = manual_notes.strip()
+    parts.append(_section("Manual notes", notes) if notes
+                 else "<p><strong>Manual notes</strong></p><p>No manual notes</p>")
+
+    summary = ai_summary.strip()
+    if summary:
+        parts.append(_section("Summary", summary))
+
     u = html.escape(notion_url or "")
-    link = (
-        f'<p><a href="{u}">View full meeting notes in Notion</a></p>' if u else ""
-    )
-    body = f"<p>{s}</p>" if s else ""
-    return (
-        f"<p><strong>{t}</strong> — {d}</p>"
-        f"{body}"
-        f"{link}"
-    )
+    if u:
+        parts.append(f'<p><a href="{u}">View full meeting notes in Notion</a></p>')
+    return "".join(parts)
 
 
 def post_meeting_note_to_lps(
@@ -34,11 +49,16 @@ def post_meeting_note_to_lps(
     *,
     opportunity_entity_ids: list[int],
     meeting_title: str,
-    meeting_date: str,
-    summary: str,
+    manual_notes: str,
+    ai_summary: str,
     notion_url: str,
+    person_ids: list[int] | None = None,
 ) -> tuple[list[int], list[tuple[int, str]]]:
     """Post the same HTML meeting note to every matched LP opportunity.
+
+    The note is attached to each opportunity AND to ``person_ids`` (the
+    meeting's owner/host + attendees resolved to Affinity persons) so it shows
+    on their timelines too — not just the LP organization's.
 
     Returns ``(posted, failed)`` where ``posted`` is the list of opportunity
     ids that received the note and ``failed`` is a list of
@@ -51,8 +71,8 @@ def post_meeting_note_to_lps(
     failed: list[tuple[int, str]] = []
     note_body = _build_html_note(
         meeting_title=meeting_title,
-        meeting_date=meeting_date,
-        summary=summary,
+        manual_notes=manual_notes,
+        ai_summary=ai_summary,
         notion_url=notion_url,
     )
     for opp_id in opportunity_entity_ids:
@@ -61,8 +81,12 @@ def post_meeting_note_to_lps(
                 content=note_body,
                 content_type="html",
                 opportunity_ids=[opp_id],
+                person_ids=person_ids,
             )
-            logger.info("Posted Affinity note to opportunity=%d", opp_id)
+            logger.info(
+                "Posted Affinity note to opportunity=%d (persons=%s)",
+                opp_id, person_ids or [],
+            )
             posted.append(opp_id)
         except AffinityError as e:
             logger.exception(
@@ -72,35 +96,6 @@ def post_meeting_note_to_lps(
     return posted, failed
 
 
-def post_meeting_note_to_lp(
-    client: AffinityClient,
-    *,
-    opportunity_entity_id: int | None,
-    meeting_title: str,
-    meeting_date: str,
-    summary: str,
-    notion_url: str,
-) -> None:
-    """Backward-compat single-LP wrapper. Swallows errors; no return.
-
-    New code should call ``post_meeting_note_to_lps`` and inspect the result.
-    """
-    if opportunity_entity_id is None:
-        logger.warning(
-            "Cannot post meeting note: opportunity_entity_id is None — skipping",
-        )
-        return
-    post_meeting_note_to_lps(
-        client,
-        opportunity_entity_ids=[opportunity_entity_id],
-        meeting_title=meeting_title,
-        meeting_date=meeting_date,
-        summary=summary,
-        notion_url=notion_url,
-    )
-
-
 __all__ = [
-    "post_meeting_note_to_lp",
     "post_meeting_note_to_lps",
 ]

@@ -36,6 +36,21 @@ def test_extract_external_emails_drops_kibo():
     assert emails == ["lp@example.com"]
 
 
+def test_extract_external_emails_drops_partners():
+    """Partners are LPs themselves but host meetings — never treat as a prospect.
+
+    Their @kiboventures.com addresses are already dropped by the internal-domain
+    filter; the non-Kibo (Oliver Wyman) addresses must be dropped too. A real LP
+    in the same meeting still survives.
+    """
+    emails = extract_external_emails([
+        {"email": "joachim.rotering@oliverwyman.com", "name": "Joachim"},
+        {"email": "Pablo.Campos@oliverwyman.com", "name": "Pablo"},
+        {"email": "realprospect@lpfund.com", "name": "Prospect"},
+    ])
+    assert emails == ["realprospect@lpfund.com"]
+
+
 def test_matcher_returns_empty_when_no_external_emails(fake_affinity):
     attendees = [
         {"id": "santiago@kiboventures.com", "name": "Santiago"},

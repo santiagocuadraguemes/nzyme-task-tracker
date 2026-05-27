@@ -543,6 +543,99 @@ def _should_auto_extract(
     return owner.auto_extract_tasks
 
 
+def _mirror_meeting_to_affinity(
+    *,
+    config: SyncConfig,
+    client: NotionClientWrapper,
+    page: dict,
+    metadata: dict,
+    attendees: list[dict[str, str]],
+    page_id: str,
+    short_id: str,
+    db_owner: str,
+) -> None:
+    """Fundraising → Affinity LP Funnel branch.
+
+    Fires for EVERY meeting whose ``Macro Work Block`` matches an active
+    "Fire Affinity LP Funnel" rule in the Meeting Rules DB — like template
+    injection, a tagged meeting is mirrored to its LP regardless of the
+    extraction outcome. It does NOT matter whether the page yielded tasks,
+    has any notes, or whether the owner opted into AI extraction: a
+    fundraising meeting happening is itself worth logging against the LP, and
+    when neither user notes nor the AI Summary are populated the note degrades
+    to title + Notion backlink. The only downstream gate is whether an
+    attendee maps to an LP opportunity (``Skipped: no LP match`` otherwise).
+
+    Soft-fails — never raises. Emits a single structured ``fundraising
+    outcome:`` line so skips and failures stay grep-able in CloudWatch.
+    Skipped wholesale in dry-run.
+    """
+    if (
+        config.dry_run
+        or not config.fundraising_branch_enabled
+        or not config.meeting_rules_db_id
+    ):
+        return
+
+    fundraising_rule_label = ""
+    try:
+        from src.topic_mirror.route_registry import (
+            ACTION_AFFINITY_LP_FUNNEL, load_routes, match_routes,
+        )
+        all_rules = load_routes(client, config.meeting_rules_db_id)
+        affinity_rules = [
+            r for r in all_rules if r.action == ACTION_AFFINITY_LP_FUNNEL
+        ]
+        matched_affinity = match_routes(affinity_rules, page.get("properties", {}))
+        if matched_affinity:
+            fundraising_rule_label = matched_affinity[0].label
+    except Exception:
+        logger.exception(
+            "page=%s failed to evaluate Affinity LP Funnel rules — "
+            "treating as no match",
+            short_id,
+        )
+
+    logger.info(
+        "page=%s db_owner=%s fundraising decision: rule=%r → %s",
+        short_id, db_owner, fundraising_rule_label or None,
+        "RUN" if fundraising_rule_label else "SKIP",
+    )
+    if not fundraising_rule_label:
+        return
+
+    from src.fundraising import write_to_affinity
+    from src.fundraising.outcome import FundraisingStatus
+
+    logger.info(
+        "page=%s db_owner=%s fundraising branch: starting LP match",
+        short_id, db_owner,
+    )
+    # ``tasks`` is vestigial in ``write_to_affinity`` (the note body comes
+    # from user notes + AI Summary, not tasks), so an empty list is correct
+    # here — this runs before extraction.
+    outcome = write_to_affinity(
+        config=config,
+        tasks=[],
+        metadata=metadata,
+        attendees=attendees,
+        notion_url=metadata.get("url", ""),
+        page_id=page_id,
+        notion_client=client,
+    )
+    # Single structured line per run — log level reflects severity so
+    # CloudWatch filters can split actionable failures from expected skips.
+    log_fn = (
+        logger.error
+        if outcome.status == FundraisingStatus.FAILED_API_ERROR
+        else logger.info
+    )
+    log_fn(
+        "fundraising outcome: page=%s db_owner=%s status=%s detail=%s",
+        short_id, db_owner, outcome.status.value, outcome.detail,
+    )
+
+
 def _process_via_literal_notes(
     client: NotionClientWrapper,
     config: SyncConfig,
@@ -1394,9 +1487,27 @@ def run_sync_for_page(
                 extract_transcript_block_id(mn_block) if mn_block else None
             )
 
-            # Declared here so the fundraising branch below can see it
-            # regardless of which extraction path ran.
-            attendees: list[dict[str, str]] = []
+            # Resolve attendees once, up front. Both extraction paths need
+            # them, and the Fundraising → Affinity branch (which fires on
+            # every tagged meeting, immediately below) needs them too —
+            # including on the no-transcript / no-tasks paths that return
+            # early before any extraction runs.
+            attendees: list[dict[str, str]] = _resolve_attendees(
+                client, config, mn_block, page, metadata,
+                org_chart_rows=ctx.get("org_chart_rows"),
+            )
+
+            # Fundraising → Affinity LP Funnel. Runs for EVERY meeting whose
+            # Macro Work Block matches an active rule, regardless of what the
+            # extraction below decides — like template injection, a tagged
+            # meeting is mirrored to its LP whether or not it yields tasks,
+            # has notes, or opted into AI extraction. Placed before the
+            # extraction branches so their early returns can't skip it.
+            _mirror_meeting_to_affinity(
+                config=config, client=client, page=page, metadata=metadata,
+                attendees=attendees, page_id=page_id, short_id=short_id,
+                db_owner=db_owner,
+            )
 
             if not _should_auto_extract(config, owner):
                 # --- Literal-notes path (LLM extraction, verbatim) ---
@@ -1404,10 +1515,6 @@ def run_sync_for_page(
                 logger.info(
                     "page=%s '%s' starting (path=literal_notes, auto_extract_tasks=False)",
                     short_id, title[:60],
-                )
-                attendees = _resolve_attendees(
-                    client, config, mn_block, page, metadata,
-                    org_chart_rows=ctx.get("org_chart_rows"),
                 )
                 tasks = _process_via_literal_notes(
                     config=config, client=client, ctx=ctx,
@@ -1438,12 +1545,6 @@ def run_sync_for_page(
                 # --- Transcript path ---
                 path = "transcript"
                 logger.info("page=%s '%s' starting (path=transcript)", short_id, title[:60])
-
-                # Resolve attendees (GCal → Notion → governance)
-                attendees = _resolve_attendees(
-                    client, config, mn_block, page, metadata,
-                    org_chart_rows=ctx.get("org_chart_rows"),
-                )
 
                 tasks = _process_via_transcript(
                     client, config, ctx, page_id, page, blocks,
@@ -1480,107 +1581,6 @@ def run_sync_for_page(
                 created_ids = [c["id"] for c in created if c.get("id")]
                 if created_ids:
                     ctx["writer"].link_tasks_to_meeting(page_id, created_ids)
-
-            # Fundraising add-on: mirror the next step to Affinity's LP Funnel
-            # when this is a fundraising meeting. Soft-fails; errors do not
-            # block the primary tracker write that just succeeded.
-            #
-            # Fires on every Fundraising meeting regardless of whether the
-            # extractor produced tasks: a Fundraising meeting happening is
-            # itself worth logging against the LP, and the summarizer copes
-            # with empty task lists (returns nulls + a generic details_text).
-            #
-            # If two Kibo members independently capture the same meeting in
-            # their respective DBs, both pages fire and Affinity gets two
-            # notes — that's intentional: each member's notes capture distinct
-            # insights and are independently valuable on the LP timeline.
-
-            # Fundraising → Affinity branch.
-            #
-            # No Notion property tracks status — the only persistence is
-            # CloudWatch logs. Every fundraising-branch run emits a single
-            # structured "fundraising outcome:" line so silent skips become
-            # grep-able. AffinityClient handles transient retries within the
-            # same Lambda invocation; longer outages are logged loudly and
-            # require a manual page re-trigger (clear `Processed`).
-            #
-            # Trigger is rule-driven: the Meeting Rules DB carries one or
-            # more rows with Action = "Fire Affinity LP Funnel" whose
-            # Match Property/Match Value identifies the work area(s) that
-            # should fire this branch. Renames in the Hierarchy DB are
-            # absorbed by editing the Match Value in Notion — no code change.
-            fundraising_rule_label = ""
-            if config.fundraising_branch_enabled and config.meeting_rules_db_id:
-                try:
-                    from src.topic_mirror.route_registry import (
-                        ACTION_AFFINITY_LP_FUNNEL, load_routes, match_routes,
-                    )
-                    all_rules = load_routes(client, config.meeting_rules_db_id)
-                    affinity_rules = [
-                        r for r in all_rules
-                        if r.action == ACTION_AFFINITY_LP_FUNNEL
-                    ]
-                    matched_affinity = match_routes(
-                        affinity_rules, page.get("properties", {}),
-                    )
-                    if matched_affinity:
-                        fundraising_rule_label = matched_affinity[0].label
-                except Exception:
-                    logger.exception(
-                        "page=%s failed to evaluate Affinity LP Funnel rules — "
-                        "treating as no match",
-                        short_id,
-                    )
-
-            run_fundraising = (
-                config.fundraising_branch_enabled
-                and bool(fundraising_rule_label)
-                and not config.dry_run
-            )
-            logger.info(
-                "page=%s db_owner=%s fundraising decision: rule=%r → %s",
-                short_id, db_owner, fundraising_rule_label or None,
-                "RUN" if run_fundraising else "SKIP",
-            )
-
-            if run_fundraising:
-                from src.fundraising import write_to_affinity
-                from src.fundraising.outcome import FundraisingStatus
-
-                # Merge manually-supplied LP emails (from the Meeting
-                # Notes "LP Emails" property) into the attendee list.
-                affinity_attendees = list(attendees)
-                existing_ids = {a.get("id") for a in affinity_attendees}
-                for email in metadata.get("lp_emails", []):
-                    if email and email not in existing_ids:
-                        affinity_attendees.append({"id": email, "name": email})
-                        existing_ids.add(email)
-
-                logger.info(
-                    "page=%s db_owner=%s fundraising branch: starting LP match",
-                    short_id, db_owner,
-                )
-                outcome = write_to_affinity(
-                    config=config,
-                    tasks=tasks,
-                    metadata=metadata,
-                    attendees=affinity_attendees,
-                    notion_url=metadata.get("url", ""),
-                    page_id=page_id,
-                    notion_client=client,
-                )
-                # Single structured line per run — log level reflects severity
-                # so CloudWatch filters can split actionable failures from
-                # expected skips (e.g. cold LPs).
-                log_fn = (
-                    logger.error
-                    if outcome.status == FundraisingStatus.FAILED_API_ERROR
-                    else logger.info
-                )
-                log_fn(
-                    "fundraising outcome: page=%s db_owner=%s status=%s detail=%s",
-                    short_id, db_owner, outcome.status.value, outcome.detail,
-                )
 
             # Meeting Mirrors branch — clone tagged pages into topic DBs.
             # Runs on every page; the route registry decides which (if any)

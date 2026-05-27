@@ -363,8 +363,7 @@ def _clone_into_target(
     Properties not declared on the target schema are silently dropped by
     Notion — that's the entire reason this feature works. Pipeline-control
     columns (``Processed``, ``Processing``, ``Template Injected``,
-    ``Task - Relation``, ``LP Emails``) intentionally don't exist on the
-    target DB.
+    ``Task - Relation``) intentionally don't exist on the target DB.
     """
     template = {"type": "template_id", "template_id": source_page["id"]}
     return client._call_with_retry(
