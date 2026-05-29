@@ -26,6 +26,8 @@ Globals:
         SEMANTIC_DEDUP_THRESHOLD: !Ref SemanticDedupThreshold
         GOOGLE_SERVICE_ACCOUNT_SECRET_ARN: !Ref GoogleServiceAccountSecretArn
         GCAL_DELEGATED_USER_DEFAULT: !Ref GCalDelegatedUserDefault
+        GCAL_PROXY_DELEGATED_USER: !Ref GCalProxyDelegatedUser
+        GCAL_PROXY_DOMAINS: !Ref GCalProxyDomains
         GEMINI_API_KEY: !Ref GeminiApiKey
         GEMINI_MODEL: !Ref GeminiModel
         GEMINI_BASE_URL: !Ref GeminiBaseUrl
@@ -103,6 +105,14 @@ Parameters:
     Type: String
     Default: ''
     Description: Default Workspace email to impersonate when the meeting creator can't be resolved.
+  GCalProxyDelegatedUser:
+    Type: String
+    Default: ''
+    Description: In-domain proxy email to impersonate for out-of-domain meeting owners (see GCalProxyDomains). Must have "see all event details" access to their calendars. Empty = disabled.
+  GCalProxyDomains:
+    Type: String
+    Default: ''
+    Description: Comma-separated email domains DWD can't impersonate directly (e.g. nzalpha.com); read via GCalProxyDelegatedUser.
   GeminiApiKey:
     Type: String
     Default: ''

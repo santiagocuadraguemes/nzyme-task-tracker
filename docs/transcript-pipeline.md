@@ -95,6 +95,8 @@ GCal is the **authoritative attendee source** when a matching calendar event exi
 
 **Auth:** Google Cloud **service account** with Domain-Wide Delegation, scope `https://www.googleapis.com/auth/calendar`. The SA impersonates the Notion page creator per-meeting (resolved via `client.users.retrieve`), falling back to `GCAL_DELEGATED_USER_DEFAULT`. Works identically in CLI and Lambda.
 
+**Out-of-domain owners (proxy):** DWD can only impersonate users *inside* the Workspace domain. A meeting owned by an out-of-domain member (e.g. an `nzalpha.com` address like Sakhee / Álvaro) fails token refresh with `unauthorized_client`. To fix without onboarding their domain to DWD, set `GCAL_PROXY_DELEGATED_USER` (an in-domain proxy, e.g. `mar@kiboventures.com`) + `GCAL_PROXY_DOMAINS` (comma-sep, e.g. `nzalpha.com`). For owners in those domains the SA impersonates the **proxy** and reads the **owner's calendar by id** (`get_gcal_attendees(..., calendar_id=<owner email>)`) instead of the proxy's `primary` — so the proxy must have **"see all event details"** sharing on those calendars (cross-org calendar sharing). `_gcal_impersonation_target()` in `pipeline.py` decides `(impersonate, calendar_id)`. Empty `GCAL_PROXY_DOMAINS` = unchanged behaviour. Independent of the Meeting Mirrors `Internal attendees` field, which reads the Notion meeting block, not GCal.
+
 **Name resolution:** Calendar event attendees come back with emails only (no `displayName`), and the `directory.readonly` scope is not authorized. Names are resolved by matching attendee emails against the **Email** property on the Notion Org Chart DB. External attendees (non-Kibo emails) pass through with email-only — the LLM handles them as "external guests."
 
 **Credentials:**

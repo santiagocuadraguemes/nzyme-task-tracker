@@ -189,6 +189,22 @@ class TestCloneOrMergeIntegration:
             lambda fn, *a, **kw: fn(*a, **kw)
         )
 
+        # Block reads used by the internal-attendees + first-contributor-label
+        # paths. A meeting_notes block (no calendar_event → no attendees, so no
+        # list_users call) plus a notes child so the container reads non-empty
+        # and the label prepends on the first poll (no real sleeps).
+        client.get_block_children.return_value = [
+            {
+                "type": "meeting_notes",
+                "meeting_notes": {"children": {"notes_block_id": "notes-block-1"}},
+            },
+            {
+                "id": "notes-heading-1",
+                "type": "heading_3",
+                "heading_3": {"rich_text": [{"plain_text": "Notes"}]},
+            },
+        ]
+
         route = Route(
             match_property="Detail",
             match_value="AI",
@@ -251,6 +267,21 @@ class TestCloneOrMergeIntegration:
         assert create_kwargs["template"] == {
             "type": "template_id", "template_id": "source-page-id",
         }
+
+        # 3. First contributor's cloned notes get a blue "<Name>'s notes" H3
+        # prepended at the top of the notes container (position: start).
+        label_call = next(
+            c for c in client.append_block_children.call_args_list
+            if c.kwargs.get("position") == {"type": "start"}
+        )
+        label_block = label_call.kwargs["children"][0]
+        assert label_call.kwargs["block_id"] == "notes-block-1"
+        assert label_block["type"] == "heading_3"
+        assert label_block["heading_3"]["color"] == "blue_background"
+        assert (
+            label_block["heading_3"]["rich_text"][0]["text"]["content"]
+            == "Guillermo's notes"
+        )
 
         from src.topic_mirror.outcome import MirrorAction
         assert action == MirrorAction.CLONED

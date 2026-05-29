@@ -33,7 +33,11 @@ from src.notion_client_wrapper import NotionClientWrapper
 from src.topic_mirror.notes_extractor import fetch_notes_blocks_for_clone
 from src.topic_mirror.outcome import MirrorAction
 from src.topic_mirror.route_registry import Route
-from src.transcript_pipeline.fetch_transcript import find_meeting_notes_block
+from src.transcript_pipeline.fetch_transcript import (
+    extract_attendee_ids,
+    find_meeting_notes_block,
+    strip_title_datetime,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,10 +49,13 @@ _NOTES_BLOCK_POLL_DELAY_SECONDS = 2.0
 
 
 def _normalize_title(title: str) -> str:
-    """Strip Notion's duplicate ``(N)`` suffix and lower-case for matching.
+    """Strip the trailing ISO datetime + Notion's ``(N)`` suffix, lower-case.
 
-    Mirrors the normalization used by ``_meeting_fingerprint`` in pipeline.py.
+    Stripping the datetime makes dedup robust across the title-cleanup change:
+    a mirror stored before the cleanup (title carries the ISO suffix) still
+    matches a freshly-cleaned source title, and vice-versa.
     """
+    title = strip_title_datetime(title)
     return re.sub(r"\s*\(\d+\)\s*$", "", title).strip().lower()
 
 
@@ -125,7 +132,10 @@ def find_existing_mirror(
 
 
 def _build_clone_properties(
-    source_page: dict, source_title: str, owner_user_id: str,
+    source_page: dict,
+    source_title: str,
+    owner_user_id: str,
+    internal_attendee_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """Properties to set on the new mirror page at clone time.
 
@@ -147,12 +157,23 @@ def _build_clone_properties(
     """
     src_props = source_page.get("properties") or {}
 
+    # Notion auto-names meetings "<GCal title> <ISO datetime>" (e.g. "... modelo
+    # 2026-05-29T14:00:00.000+02:00"). Strip the trailing datetime so the mirror
+    # shows a clean title instead of the raw timestamp.
+    clean_title = strip_title_datetime(source_title) or "(untitled)"
     properties: dict[str, Any] = {
-        "Meeting": {"title": [{"type": "text", "text": {"content": source_title or "(untitled)"}}]},
+        "Meeting": {"title": [{"type": "text", "text": {"content": clean_title}}]},
     }
 
     if owner_user_id:
         properties["Owner"] = {"people": [{"id": owner_user_id}]}
+
+    # Internal attendees (people) — the meeting's Notion-member attendees.
+    # Dropped by _filter_to_target_schema on DBs that don't declare the column.
+    if internal_attendee_ids:
+        properties["Internal attendees"] = {
+            "people": [{"id": uid} for uid in internal_attendee_ids],
+        }
 
     date_val = _source_date_value(source_page)
     if date_val:
@@ -376,10 +397,7 @@ def _clone_into_target(
 
 def _read_owner_ids(mirror_page: dict) -> list[str]:
     """Return the list of Notion user UUIDs currently in the mirror's Owner."""
-    prop = (mirror_page.get("properties") or {}).get("Owner", {}) or {}
-    if prop.get("type") != "people":
-        return []
-    return [p["id"] for p in prop.get("people") or [] if p.get("id")]
+    return _read_people_ids(mirror_page, "Owner")
 
 
 def _find_mirror_notes_block_id(
@@ -418,7 +436,11 @@ def _find_mirror_notes_block_id(
 
 
 def _build_contributor_heading(contributor: str) -> dict[str, Any]:
-    """Build the ``### <Name>'s Notes`` H3 heading block (create-format)."""
+    """Build the ``<Name>'s notes`` H3 label block (create-format).
+
+    Blue background so each contributor's section is visually demarcated
+    inside the shared notes container.
+    """
     return {
         "object": "block",
         "type": "heading_3",
@@ -426,9 +448,10 @@ def _build_contributor_heading(contributor: str) -> dict[str, Any]:
             "rich_text": [
                 {
                     "type": "text",
-                    "text": {"content": f"{contributor}'s Notes"},
+                    "text": {"content": f"{contributor}'s notes"},
                 },
             ],
+            "color": "blue_background",
         },
     }
 
@@ -457,6 +480,114 @@ def _append_contributor_notes(
     children = [_build_contributor_heading(contributor), *notes_blocks]
     client.append_block_children(block_id=notes_block_id, children=children)
     return True
+
+
+def _label_first_contributor_notes(
+    client: NotionClientWrapper, mirror_page_id: str, contributor: str,
+) -> bool:
+    """Prepend ``<Name>'s notes`` (blue H3) at the top of the first
+    contributor's notes container.
+
+    The ``template_id`` clone carries the first contributor's entire notes
+    container (Action Items + Notes + written notes) into the mirror unlabeled.
+    We prepend their label H3 at the very top of that container — above their
+    whole section — mirroring how the merge path appends later contributors'
+    ``<Name>'s notes`` sections below. ``position: start`` doesn't depend on
+    the notes heading text (which a member may rename, e.g. "Notes [TEST]"), so
+    it's robust to template drift.
+
+    Best-effort: the clone is async, so we poll until the notes container has
+    populated before prepending. Returns False if it hasn't within the poll
+    budget — the notes are still present, just unlabeled.
+    """
+    notes_block_id = _find_mirror_notes_block_id(client, mirror_page_id)
+    if not notes_block_id:
+        logger.warning(
+            "Mirror %s has no notes_block_id after %d polls — skipping first "
+            "contributor label", mirror_page_id[:8], _NOTES_BLOCK_POLL_ATTEMPTS,
+        )
+        return False
+
+    label = _build_contributor_heading(contributor)
+    for attempt in range(1, _NOTES_BLOCK_POLL_ATTEMPTS + 1):
+        # Wait for the async clone to populate the container so we prepend
+        # above real content rather than into an empty block mid-populate.
+        if client.get_block_children(notes_block_id):
+            client.append_block_children(
+                block_id=notes_block_id, children=[label],
+                position={"type": "start"},
+            )
+            return True
+        if attempt < _NOTES_BLOCK_POLL_ATTEMPTS:
+            time.sleep(_NOTES_BLOCK_POLL_DELAY_SECONDS)
+
+    logger.warning(
+        "Mirror %s notes container still empty after %d polls — leaving first "
+        "contributor notes unlabeled", mirror_page_id[:8], _NOTES_BLOCK_POLL_ATTEMPTS,
+    )
+    return False
+
+
+def _internal_attendee_ids(
+    client: NotionClientWrapper, source_page_id: str,
+) -> list[str]:
+    """Notion-member attendee UUIDs from a source page's meeting_notes block.
+
+    "Internal" = attendees that resolve to a real workspace member
+    (``type == "person"``). External meeting participants aren't Notion users
+    and never appear here, so the membership filter is what separates the team
+    from any stray guest/bot id. Order-preserving and deduped. Empty when the
+    page has no meeting_notes block or no member attendees.
+    """
+    blocks = client.get_block_children(source_page_id)
+    mn_block = find_meeting_notes_block(blocks)
+    if mn_block is None:
+        return []
+    attendee_ids = extract_attendee_ids(mn_block)
+    if not attendee_ids:
+        return []
+    member_ids = {
+        u.get("id") for u in client.list_users() if u.get("type") == "person"
+    }
+    out: list[str] = []
+    seen: set[str] = set()
+    for uid in attendee_ids:
+        if uid in member_ids and uid not in seen:
+            seen.add(uid)
+            out.append(uid)
+    return out
+
+
+def _read_people_ids(page: dict, prop_name: str) -> list[str]:
+    """Return the Notion user UUIDs in a page's *prop_name* people property."""
+    prop = (page.get("properties") or {}).get(prop_name, {}) or {}
+    if prop.get("type") != "people":
+        return []
+    return [p["id"] for p in prop.get("people") or [] if p.get("id")]
+
+
+def _update_internal_attendees(
+    client: NotionClientWrapper, mirror_page: dict, new_ids: list[str],
+) -> None:
+    """Union *new_ids* into the mirror's ``Internal attendees`` people property.
+
+    Graceful no-op when the target DB doesn't declare the column (the property
+    is absent from the page) or when there's nothing new to add — so re-runs
+    don't issue redundant PATCHes.
+    """
+    if not new_ids:
+        return
+    prop = (mirror_page.get("properties") or {}).get("Internal attendees")
+    if prop is None or prop.get("type") != "people":
+        return
+    current = _read_people_ids(mirror_page, "Internal attendees")
+    merged = list(dict.fromkeys([*current, *new_ids]))
+    if merged == current:
+        return
+    client.update_page(
+        page_id=mirror_page["id"],
+        properties={"Internal attendees": {"people": [{"id": uid} for uid in merged]}},
+    )
 
 
 def _update_owners(
@@ -489,11 +620,14 @@ def clone_or_merge(
 ) -> MirrorAction:
     """Mirror *source_page* into *route.target_db_id*.
 
-    First contributor → ``MirrorAction.CLONED`` (writes ``Owner`` people).
-    Subsequent contributor with notes → ``MirrorAction.MERGED``
-    (appends ``### <owner_name>'s Notes`` H3 + content inside the mirror's
-    notes_block_id, adds ``owner_user_id`` to ``Owner``).
-    Owner already in the Owner list, or no notes to merge → ``MirrorAction.NOOP``.
+    First contributor → ``MirrorAction.CLONED`` (writes ``Owner`` + ``Internal
+    attendees`` people, then labels their cloned notes with a ``<Name>'s
+    notes`` blue H3). Subsequent contributor with notes → ``MirrorAction.MERGED``
+    (appends ``<owner_name>'s notes`` blue H3 + content inside the mirror's
+    notes_block_id, unions ``owner_user_id`` into ``Owner`` and the
+    contributor's member attendees into ``Internal attendees``).
+    Owner already in the Owner list, or no notes to merge → ``MirrorAction.NOOP``
+    (``Internal attendees`` is still unioned in either case).
 
     *owner_user_id* is the Notion user UUID used for the Owner people field;
     *owner_name* is the display name used for the appended heading. Pass
@@ -502,6 +636,7 @@ def clone_or_merge(
     Raises ``APIResponseError`` only for unexpected failures (the caller
     catches and converts to a failed-route entry in the outcome).
     """
+    internal_ids = _internal_attendee_ids(client, source_page["id"])
     existing = find_existing_mirror(client, route.target_db_id, source_title, source_date)
     if existing is None:
         # Retrieve target schema once so we can (a) drop source props the
@@ -512,7 +647,9 @@ def clone_or_merge(
         target_schema = (
             client.retrieve_data_source(route.target_db_id).get("properties") or {}
         )
-        properties = _build_clone_properties(source_page, source_title, owner_user_id)
+        properties = _build_clone_properties(
+            source_page, source_title, owner_user_id, internal_ids,
+        )
         properties, dropped = _filter_to_target_schema(properties, target_schema)
         if dropped:
             logger.info(
@@ -535,7 +672,15 @@ def clone_or_merge(
             route.label,
             owner_name or owner_user_id[:8],
         )
+        # Label the first contributor's cloned notes (best-effort — async clone).
+        _label_first_contributor_notes(
+            client, mirror["id"], owner_name or "Unknown",
+        )
         return MirrorAction.CLONED
+
+    # Union this contributor's member attendees into Internal attendees up
+    # front, so it's kept current even when the notes-merge path no-ops.
+    _update_internal_attendees(client, existing, internal_ids)
 
     current_owner_ids = _read_owner_ids(existing)
     if owner_user_id and owner_user_id in current_owner_ids:

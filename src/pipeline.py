@@ -284,6 +284,23 @@ def _resolve_delegated_user(
     return default_email
 
 
+def _gcal_impersonation_target(
+    delegated_user: str, config: SyncConfig,
+) -> tuple[str, str]:
+    """Resolve ``(impersonate_email, calendar_id)`` for a GCal lookup.
+
+    Domain-wide delegation can only impersonate in-domain users. When the
+    meeting owner's email is in an out-of-domain set (``gcal_proxy_domains``)
+    and a proxy is configured, impersonate the in-domain proxy and read the
+    owner's calendar by id (the proxy must have "see all event details" access).
+    Everyone else impersonates themselves and reads their own ``"primary"``.
+    """
+    domain = delegated_user.rsplit("@", 1)[-1].lower()
+    if domain in config.gcal_proxy_domains and config.gcal_proxy_delegated_user:
+        return config.gcal_proxy_delegated_user, delegated_user
+    return delegated_user, "primary"
+
+
 def _enrich_attendee_names(
     attendees: list[dict[str, str]],
     org_chart_rows: list[dict] | None,
@@ -364,9 +381,20 @@ def _resolve_attendees(
                     "No Workspace user to impersonate for GCal lookup — skipping",
                 )
             else:
-                logger.debug("GCal lookup impersonating %s", delegated_user)
+                # Domain-wide delegation can't impersonate out-of-domain owners
+                # (e.g. nzalpha.com) — those are read via an in-domain proxy
+                # against the owner's calendar id. In-domain owners read their
+                # own "primary".
+                impersonate, calendar_id = _gcal_impersonation_target(
+                    delegated_user, config,
+                )
+                logger.debug(
+                    "GCal lookup impersonating %s (calendar=%s)",
+                    impersonate, calendar_id,
+                )
                 gcal_attendees = get_gcal_attendees(
-                    metadata["title"], metadata["date"], delegated_user,
+                    metadata["title"], metadata["date"], impersonate,
+                    calendar_id=calendar_id,
                 )
                 if gcal_attendees:
                     attendees = [
@@ -1386,6 +1414,70 @@ def run_inject_templates_for_page(
         raise
 
 
+def _run_topic_mirror(
+    *,
+    config: SyncConfig,
+    client: NotionClientWrapper,
+    page: dict,
+    metadata: dict,
+    short_id: str,
+    db_owner: str,
+) -> None:
+    """Mirror a tagged meeting into its topic DB(s).
+
+    Runs on EVERY processed page — including ones that yielded no action items
+    or have no transcript — because a contributor's notes must be mirrored even
+    when their recording produced no tasks. The route registry decides which
+    (if any) mirrors apply; NO_MATCH / DISABLED outcomes stay at DEBUG so
+    untagged pages don't flood CloudWatch. Never raises (``mirror_to_topic_dbs``
+    maps every failure to a ``MirrorOutcome``).
+    """
+    if not (config.topic_mirror_enabled and not config.dry_run):
+        return
+
+    from src.topic_mirror import mirror_to_topic_dbs
+    from src.topic_mirror.outcome import MirrorStatus
+
+    # Owner identity: prefer the meeting page's Notion creator (a real user
+    # UUID, suitable for the People property); fall back to empty when
+    # created_by is missing (rare — would leave Owner unset on the mirror).
+    # db_owner is the human display name used for the contributor-label H3.
+    creator = metadata.get("created_by") or {}
+    owner_user_id = creator.get("id") or ""
+
+    mirror_outcome = mirror_to_topic_dbs(
+        config=config,
+        client=client,
+        source_page=page,
+        metadata=metadata,
+        owner_user_id=owner_user_id,
+        owner_name=db_owner,
+    )
+    if mirror_outcome.status in (
+        MirrorStatus.FAILED, MirrorStatus.PARTIAL_FAILURE,
+    ):
+        logger.error(
+            "topic mirror outcome: page=%s owner=%s status=%s detail=%s",
+            short_id, db_owner,
+            mirror_outcome.status.value, mirror_outcome.detail,
+        )
+    elif mirror_outcome.status == MirrorStatus.POSTED:
+        logger.info(
+            "topic mirror outcome: page=%s owner=%s status=%s detail=%s",
+            short_id, db_owner,
+            mirror_outcome.status.value, mirror_outcome.detail,
+        )
+    else:
+        # NO_MATCH / DISABLED — silent at INFO to avoid CloudWatch noise on
+        # untagged pages, but surfaced under --verbose so local diagnostic
+        # runs can confirm the branch ran.
+        logger.debug(
+            "topic mirror outcome: page=%s owner=%s status=%s detail=%s",
+            short_id, db_owner,
+            mirror_outcome.status.value, mirror_outcome.detail,
+        )
+
+
 def run_sync_for_page(
     config: SyncConfig,
     client: NotionClientWrapper,
@@ -1557,6 +1649,12 @@ def run_sync_for_page(
                         "(auto_extract_tasks=False)",
                         short_id, title[:60],
                     )
+                    # Still mirror — a contributor's notes must be copied even
+                    # when their recording yielded no action items.
+                    _run_topic_mirror(
+                        config=config, client=client, page=page,
+                        metadata=metadata, short_id=short_id, db_owner=db_owner,
+                    )
                     if not config.dry_run and not force:
                         source.mark_page_processed(page_id)
                     return 0
@@ -1599,6 +1697,12 @@ def run_sync_for_page(
                     "page=%s '%s' skipped: auto_extract_tasks=True but no transcript available",
                     short_id, title[:60],
                 )
+                # Still mirror — clone the tagged meeting's notes even without
+                # a transcript / extracted tasks.
+                _run_topic_mirror(
+                    config=config, client=client, page=page,
+                    metadata=metadata, short_id=short_id, db_owner=db_owner,
+                )
                 if not config.dry_run:
                     source.mark_page_processed(page_id)
                 return 0
@@ -1613,52 +1717,10 @@ def run_sync_for_page(
                     ctx["writer"].link_tasks_to_meeting(page_id, created_ids)
 
             # Meeting Mirrors branch — clone tagged pages into topic DBs.
-            # Runs on every page; the route registry decides which (if any)
-            # mirrors apply. NO_MATCH / DISABLED outcomes are not logged so
-            # untagged pages don't flood CloudWatch.
-            if config.topic_mirror_enabled and not config.dry_run:
-                from src.topic_mirror import mirror_to_topic_dbs
-                from src.topic_mirror.outcome import MirrorStatus
-
-                # Owner identity: prefer the meeting page's Notion creator
-                # (a real user UUID, suitable for the People property);
-                # fall back to empty when created_by is missing (rare —
-                # would leave Owner unset on the mirror). db_owner is the
-                # human display name used for the merge-path H3 heading.
-                creator = metadata.get("created_by") or {}
-                owner_user_id = creator.get("id") or ""
-
-                mirror_outcome = mirror_to_topic_dbs(
-                    config=config,
-                    client=client,
-                    source_page=page,
-                    metadata=metadata,
-                    owner_user_id=owner_user_id,
-                    owner_name=db_owner,
-                )
-                if mirror_outcome.status in (
-                    MirrorStatus.FAILED, MirrorStatus.PARTIAL_FAILURE,
-                ):
-                    logger.error(
-                        "topic mirror outcome: page=%s owner=%s status=%s detail=%s",
-                        short_id, db_owner,
-                        mirror_outcome.status.value, mirror_outcome.detail,
-                    )
-                elif mirror_outcome.status == MirrorStatus.POSTED:
-                    logger.info(
-                        "topic mirror outcome: page=%s owner=%s status=%s detail=%s",
-                        short_id, db_owner,
-                        mirror_outcome.status.value, mirror_outcome.detail,
-                    )
-                else:
-                    # NO_MATCH / DISABLED — silent at INFO to avoid CloudWatch
-                    # noise on untagged pages, but surfaced under --verbose
-                    # so local diagnostic runs can confirm the branch ran.
-                    logger.debug(
-                        "topic mirror outcome: page=%s owner=%s status=%s detail=%s",
-                        short_id, db_owner,
-                        mirror_outcome.status.value, mirror_outcome.detail,
-                    )
+            _run_topic_mirror(
+                config=config, client=client, page=page,
+                metadata=metadata, short_id=short_id, db_owner=db_owner,
+            )
 
             if not config.dry_run and not force:
                 source.mark_page_processed(page_id)

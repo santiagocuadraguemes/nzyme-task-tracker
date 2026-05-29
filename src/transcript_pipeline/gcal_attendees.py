@@ -153,6 +153,7 @@ def get_gcal_attendees(
     meeting_title: str,
     meeting_date: str,
     delegated_user: str,
+    calendar_id: str = "primary",
 ) -> list[dict[str, str]]:
     """Query Google Calendar for a meeting and return its attendees.
 
@@ -160,8 +161,15 @@ def get_gcal_attendees(
         meeting_title: Meeting title to search for.
         meeting_date: ISO datetime string from Notion (e.g.
             "2026-04-08T12:00:00.000+02:00").
-        delegated_user: Workspace email to impersonate. The service account
-            searches this user's primary calendar.
+        delegated_user: Workspace email to impersonate. Domain-wide delegation
+            only authorises in-domain users, so for meetings owned by an
+            out-of-domain member (e.g. an ``nzalpha.com`` address) the caller
+            impersonates an in-domain proxy here and passes the member's own
+            calendar via *calendar_id*.
+        calendar_id: Calendar to search. Defaults to the impersonated user's
+            ``"primary"``; pass another address to read a calendar the
+            impersonated proxy has been granted "see all event details" access
+            to (cross-org calendar sharing).
 
     Returns:
         List of {"email": ..., "name": ...} dicts for all attendees including
@@ -178,13 +186,13 @@ def get_gcal_attendees(
     time_max = (notion_dt + timedelta(hours=12)).isoformat()
 
     logger.debug(
-        "Searching Google Calendar (keyword) for '%s' around %s (as %s)",
-        cleaned_title, meeting_date, delegated_user,
+        "Searching Google Calendar (keyword) for '%s' around %s (as %s, calendar=%s)",
+        cleaned_title, meeting_date, delegated_user, calendar_id,
     )
     pass1 = (
         service.events()
         .list(
-            calendarId="primary",
+            calendarId=calendar_id,
             q=cleaned_title,
             timeMin=time_min,
             timeMax=time_max,
@@ -209,7 +217,7 @@ def get_gcal_attendees(
     pass2 = (
         service.events()
         .list(
-            calendarId="primary",
+            calendarId=calendar_id,
             timeMin=time_min,
             timeMax=time_max,
             singleEvents=True,

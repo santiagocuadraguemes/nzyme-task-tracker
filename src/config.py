@@ -124,6 +124,24 @@ class SyncConfig(BaseModel):
             "can't be resolved (e.g., bot-created pages, ex-employees)."
         ),
     )
+    gcal_proxy_delegated_user: str | None = Field(
+        None,
+        description=(
+            "In-domain Workspace email to impersonate for meetings owned by an "
+            "out-of-domain member (see gcal_proxy_domains). The proxy must have "
+            "'see all event details' access to those members' calendars; the SA "
+            "then reads the member's calendar by id via the proxy. Empty = behave "
+            "as before (impersonate the owner directly)."
+        ),
+    )
+    gcal_proxy_domains: frozenset[str] = Field(
+        default_factory=frozenset,
+        description=(
+            "Email domains that domain-wide delegation can't impersonate directly "
+            "(e.g. {'nzalpha.com'}). Meetings owned by these domains are read via "
+            "gcal_proxy_delegated_user. Lower-cased."
+        ),
+    )
 
     @property
     def gcal_enabled(self) -> bool:
@@ -239,6 +257,12 @@ def load_config() -> SyncConfig:
         google_service_account_file=os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE"),
         google_service_account_secret_arn=os.getenv("GOOGLE_SERVICE_ACCOUNT_SECRET_ARN"),
         gcal_delegated_user_default=os.getenv("GCAL_DELEGATED_USER_DEFAULT"),
+        gcal_proxy_delegated_user=os.getenv("GCAL_PROXY_DELEGATED_USER"),
+        gcal_proxy_domains=frozenset(
+            d.strip().lower()
+            for d in os.getenv("GCAL_PROXY_DOMAINS", "").split(",")
+            if d.strip()
+        ),
         fundraising_branch_enabled=os.getenv("FUNDRAISING_BRANCH_ENABLED", "false").lower()
         in ("true", "1", "yes"),
         affinity_api_key=os.getenv("AFFINITY_API_KEY"),

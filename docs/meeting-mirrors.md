@@ -15,10 +15,12 @@ Notion `POST /v1/pages` with `template: {type: "template_id", template_id: <sour
 ## Cross-DB dedup + contributor merge
 
 - Dedup key = `normalize(Meeting title) + Date.start[:10]`, matched workspace-wide on the target DB.
-- **First contributor** processed → full `template_id` clone. Their `## Notes` content rides along in the cloned `meeting_notes` block. Stamp `Primary Source URL`, write `Owner` (people) with the Notion user UUID of the meeting page's creator.
-- **Subsequent contributor** with the same title+date → no re-clone. Pull just their `## Notes` content from THEIR source page, append a `### <Name>'s Notes` H3 heading + content **inside** the mirror's `meeting_notes.notes_block_id`, then add their Notion user UUID to the `Owner` people property. (Option B.)
+- **First contributor** processed → full `template_id` clone. Their entire notes container (Action Items + Notes + written notes) rides along verbatim in the cloned `meeting_notes` block. Stamp `Primary Source URL`, write `Owner` (people) with the Notion user UUID of the meeting page's creator, and write `Internal attendees` (people). Then label their notes: prepend a `<Name>'s notes` blue-background H3 at the **top** of the mirror's `notes_block_id` (`append_block_children(..., position={"type": "start"})`) so it sits above their whole section.
+- **Subsequent contributor** with the same title+date → no re-clone. Copy their **entire** notes container verbatim from THEIR source page (every child of their `notes_block_id`, preserving block types + `color` via `_block_to_create_format` — nothing sliced), append a `<Name>'s notes` blue-bg H3 + that full copy at the **end** of the mirror's `meeting_notes.notes_block_id`, add their Notion user UUID to `Owner`, and union their member attendees into `Internal attendees`. (Option B.)
 - Owner dedup key is the Notion user UUID (not name string), so two people with the same display name don't collapse.
-- The first contributor's notes intentionally stay unlabeled — Notion's `blocks.children.append` has no atomic prepend, so retroactive labeling would require destructive delete+rebuild on AI-cloned content. Documented trade-off; reconsider if it bites.
+- **Contributor labels** (every contributor, including the first): a `heading_3` with `color: "blue_background"` reading `<Org Chart name>'s notes`. The first contributor's label is prepended at the top of the notes container; each subsequent contributor's label + full notes copy are appended below. `position: start` is used rather than inserting after the `## Notes` heading because members rename that heading (e.g. "Notes [TEST]"), so a text-based anchor isn't reliable. Best-effort: if the async clone hasn't populated the notes container within the poll budget, the first contributor's notes are left unlabeled (still present) — a `Processed=false` re-trigger does not retry the label (Owner is already set), so the poll is generous.
+- **`Internal attendees`** (people) = the meeting's attendees that resolve to a real Notion workspace member (`type == "person"`), read from the source page's `meeting_notes.calendar_event.attendees`. External participants aren't Notion users and never appear there, so the membership filter separates the team from any stray guest/bot id. Set at clone time and unioned on every subsequent contributor (kept current even when the notes-merge no-ops). Gracefully skipped on target DBs that don't declare the column.
+- **Title cleanup:** Notion auto-names meetings `<GCal title> <ISO datetime>` (e.g. `… modelo 2026-05-29T14:00:00.000+02:00`). The mirror's `Meeting` title is run through `strip_title_datetime()` so it reads cleanly without the raw timestamp. `_normalize_title` also strips the datetime before matching, so dedup is robust whether the existing mirror was stored with or without the suffix.
 - Tag removal does not delete mirrors (v1 scope — additive only).
 
 ## Owner resolution
@@ -27,7 +29,7 @@ The writer takes the Notion user UUID from `metadata['created_by']['id']` (the s
 
 ## Mirror DB schema convention
 
-Narrow on purpose. Each topic DB must declare exactly the columns it wants populated; everything else gets silently dropped by Notion at clone time. Standard column set: `Meeting` (title), `Date`, `Meeting type`, `Detail`, `External Org`, `AI Summary`, `Files & media`, `Owner` (people, multi-person — every contributor accumulates here), `Governance: Edit & View Access` (people — copied as-is from source), `Primary Source URL`. `Tasks` was intentionally dropped from the convention on 2026-05-18 — the action items already live in the Team Task Tracker via `Task - Relation` on the source page, no need to mirror their rich-text dump.
+Narrow on purpose. Each topic DB must declare exactly the columns it wants populated; everything else gets silently dropped by Notion at clone time. Standard column set: `Meeting` (title), `Date`, `Meeting type`, `Detail`, `External Org`, `AI Summary`, `Files & media`, `Owner` (people, multi-person — every contributor accumulates here), `Internal attendees` (people — the meeting's Notion-member attendees; accumulates across contributors), `Governance: Edit & View Access` (people — copied as-is from source), `Primary Source URL`. `Internal attendees` is optional per DB — the writer drops it when absent, so older mirror DBs keep working. `Tasks` was intentionally dropped from the convention on 2026-05-18 — the action items already live in the Team Task Tracker via `Task - Relation` on the source page, no need to mirror their rich-text dump.
 
 ## Async clone caveat
 
@@ -50,8 +52,8 @@ topic mirror outcome: page=<short> owner=<member> status=<enum> detail=<text>
 - `src/topic_mirror/__init__.py` — orchestrator `mirror_to_topic_dbs(...)`; returns `MirrorOutcome`. Never raises.
 - `src/topic_mirror/outcome.py` — `MirrorStatus` / `MirrorAction` enums + `MirrorOutcome` dataclass.
 - `src/topic_mirror/route_registry.py` — loads Routes DB and matches a page's tags against active routes.
-- `src/topic_mirror/notes_extractor.py` — pulls a contributor's `## Notes` content from their source page and converts it to create-format blocks.
-- `src/topic_mirror/writer.py` — `clone_or_merge` per route: find-or-clone by title+date, then merge or noop.
+- `src/topic_mirror/notes_extractor.py` — `fetch_notes_blocks_for_clone` copies a contributor's ENTIRE notes container (all children of their `notes_block_id`) to create-format blocks, preserving structure + color.
+- `src/topic_mirror/writer.py` — `clone_or_merge` per route: find-or-clone by title+date, then merge or noop. Owns contributor labeling (`_build_contributor_heading`, `_label_first_contributor_notes` — prepends at `position: start`) and `Internal attendees` (`_internal_attendee_ids`, `_update_internal_attendees`).
 
 ## Env vars
 

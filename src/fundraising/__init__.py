@@ -29,6 +29,7 @@ from src.transcript_pipeline.fetch_transcript import (
     extract_ai_summary,
     fetch_notes_text,
     find_meeting_notes_block,
+    strip_title_datetime,
 )
 
 logger = logging.getLogger(__name__)
@@ -177,7 +178,7 @@ def write_to_affinity(
             posted, failed = post_meeting_note_to_lps(
                 client,
                 opportunity_entity_ids=opportunity_ids,
-                meeting_title=metadata.get("title", ""),
+                meeting_title=strip_title_datetime(metadata.get("title", "")),
                 manual_notes=manual_notes,
                 ai_summary=ai_summary,
                 notion_url=notion_url,
