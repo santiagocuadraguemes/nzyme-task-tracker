@@ -760,11 +760,18 @@ def sync(client: NotionClientWrapper, config: SyncConfig) -> SyncReport:
             skip_page_ids=skip_page_ids,
         )
 
+        # mapping_writes can be non-empty when bootstrap-adopt matched
+        # by sanitized name with no rename needed (new member DB whose
+        # option names already match canonical). Without checking it
+        # here, the upsert below is skipped and those mappings never
+        # land in Supabase. Skipping is fine only when nothing at all
+        # is pending — including pure mapping writes.
         if (
             not plan.changed
             and not plan.renames
             and not plan.drops
             and not plan.mapping_deletes
+            and not plan.mapping_writes
         ):
             logger.debug(
                 "macro_block_sync: %s already in sync (%d options)",
