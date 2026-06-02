@@ -209,9 +209,10 @@ Parameters:
     Type: String
     Default: ''
     Description: |
-      Notion DB ID for the '🏢 External Orgs' Settings DB. Mirror target for
-      Supabase ReportingNz_deals. Empty disables the external_org_db_sync
-      sub-sync (it skips with a benign warning).
+      DEPRECATED 2026-06-02 — dead config. Was the '🏢 External Orgs' Settings
+      DB mirror target; replaced by deal_hierarchy_sync (Hierarchy DB rows) +
+      external_org_applier_sync (member-DB External Org fan-out). Nothing reads
+      it; safe to drop in a future cleanup.
   SupabaseUrl:
     Type: String
     Default: ''

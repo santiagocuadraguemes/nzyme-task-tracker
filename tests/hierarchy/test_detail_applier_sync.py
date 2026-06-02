@@ -60,15 +60,19 @@ class TestPlanMemberDbUpdate:
         assert plan.renamed == 0
         assert plan.created == 0
 
-    def test_color_only_change_via_mapping_triggers_rename(self):
+    def test_color_only_change_is_ignored_not_recolored(self):
+        """Notion's API can't recolor an existing option (400). A color-only
+        drift on an existing option must be left untouched — no recolor, no
+        change — so we never emit a doomed PATCH."""
         rows = [_drow("d-1", "Legal DD", "green")]
         mappings = {"d-1": _Mapping("d-1", "mdb-1", "opt-1", "Legal DD")}
         current = [{"id": "opt-1", "name": "Legal DD", "color": "blue"}]
         plan = _plan_member_db_update(rows, mappings, current, "mdb-1")
-        assert plan.changed is True
-        assert plan.renamed == 1
+        assert plan.changed is False
+        assert plan.renamed == 0
+        # Option keeps its existing (blue) color — canonical green is NOT forced.
         assert plan.new_options == [
-            {"id": "opt-1", "name": "Legal DD", "color": "green"},
+            {"id": "opt-1", "name": "Legal DD", "color": "blue"},
         ]
 
     def test_name_change_via_mapping_preserves_id(self):
@@ -89,14 +93,16 @@ class TestPlanMemberDbUpdate:
         assert plan.new_options == [{"name": "New Topic", "color": "orange"}]
         assert plan.mapping_writes[0].option_id == ""
 
-    def test_bootstrap_adopt_by_sanitized_name_with_color_update(self):
-        """Existing option has the same name but the wrong color → adopt + recolor."""
+    def test_bootstrap_adopt_by_sanitized_name_ignores_color_drift(self):
+        """Adopt an existing same-name option by id, but do NOT recolor it —
+        Notion forbids recoloring an existing option."""
         rows = [_drow("d-1", "Legal DD", "blue")]
         current = [{"id": "opt-1", "name": "Legal DD", "color": "default"}]
         plan = _plan_member_db_update(rows, {}, current, "mdb-1")
-        assert plan.changed is True
-        assert plan.renamed == 1
-        assert plan.new_options[0]["color"] == "blue"
+        assert plan.changed is False
+        assert plan.renamed == 0
+        # Keeps its existing color; mapping is still recorded (adoption).
+        assert plan.new_options[0]["color"] == "default"
         assert plan.mapping_writes[0].option_id == "opt-1"
 
     def test_archive_when_active_false(self):

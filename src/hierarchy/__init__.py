@@ -16,7 +16,7 @@ from src.hierarchy import (
     canonical_mirror_sync,
     detail_applier_sync,
     detail_canonical_mirror_sync,
-    external_org_db_sync,
+    external_org_applier_sync,
     macro_block_sync,
     tracker_applier_sync,
 )
@@ -26,18 +26,26 @@ from src.notion_client_wrapper import NotionClientWrapper
 logger = logging.getLogger(__name__)
 
 
-# Order matters: every canonical mirror runs before the applier(s) reading
-# it (PR2: hierarchy_rows / PR4: detail_rows). Among appliers, order is
-# independent (different Notion targets; different mapping tables).
-# external_org_db_sync has no canonical mirror — it reads ReportingNz_deals
-# live each tick and mirrors it into the single External Orgs Settings DB
-# (no member-DB fan-out).
+# Order matters: every canonical mirror runs before the applier(s) reading it
+# (hierarchy_rows / detail_rows). Among appliers, order is independent
+# (different Notion targets; different mapping tables). external_org_applier_sync
+# reads ReportingNz_deals live and fans the tracked deals out to each member
+# DB's `External Org` select (Portfolio→orange, dealflow→blue).
+#
+# PAUSED 2026-06-02: `deal_hierarchy_sync` (ReportingNz_deals → Hierarchy DB
+# rows) is deliberately UNWIRED. Its first live run created duplicate rows for
+# deals that were already hand-curated in the Hierarchy DB. The module has since
+# been fixed to ADOPT an existing same-name row (stamp its Deal ID) instead of
+# creating a duplicate, but the hierarchy is human-curated and already correct,
+# so the writer stays OFF until explicitly re-enabled. To turn it on, add
+# `deal_hierarchy_sync.sync` as the FIRST entry below (before
+# canonical_mirror_sync) and re-import it above.
 _SUB_SYNCS: list[SubSync] = [
     canonical_mirror_sync.sync,          # Hierarchy DB → hierarchy_rows
     detail_canonical_mirror_sync.sync,   # Detail Options Settings DB → detail_rows
     macro_block_sync.sync,               # Tier 0 → member-DB Macro Work Block
     detail_applier_sync.sync,            # detail_rows → member-DB Detail
-    external_org_db_sync.sync,           # ReportingNz_deals → External Orgs Settings DB
+    external_org_applier_sync.sync,      # ReportingNz_deals → member-DB External Org
     tracker_applier_sync.sync,           # hierarchy_rows → Team Task Tracker
 ]
 

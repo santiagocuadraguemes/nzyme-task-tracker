@@ -200,9 +200,11 @@ class SyncConfig(BaseModel):
     external_orgs_db_id: str | None = Field(
         None,
         description=(
-            "Notion DB ID for the '🏢 External Orgs' Settings DB. Mirror target "
-            "for Supabase ReportingNz_deals (one row per deal, sync'd by "
-            "external_org_db_sync)."
+            "DEPRECATED 2026-06-02 — dead config, read by nothing. Was the "
+            "'🏢 External Orgs' Settings DB mirror target; replaced by "
+            "deal_hierarchy_sync (Hierarchy DB rows) + external_org_applier_sync "
+            "(member-DB External Org fan-out). Retained only to avoid breaking "
+            "existing .env / SAM wiring; safe to remove in a future cleanup."
         ),
     )
 

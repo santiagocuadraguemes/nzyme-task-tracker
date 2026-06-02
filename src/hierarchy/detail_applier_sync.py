@@ -316,15 +316,17 @@ def _plan_member_db_update(
                 continue
 
             if not name_changed:
-                # Color-only change → PATCH it directly (current behaviour).
-                # The saga is only used for name changes; color-only PATCHes
-                # have not been independently shown to silently no-op.
-                out[idx] = {
-                    **current_opt,
-                    "name": desired_sanitized,
-                    "color": desired_color,
-                }
-                result.renamed += 1
+                # Color-only drift. Notion's API CANNOT recolor an existing
+                # select/multi-select option — it 400s "Cannot update color of
+                # select with id: X". Color is honored ONLY when an option is
+                # first created. So leave the member-DB option exactly as it is
+                # (its color is authoritative) and just refresh the mapping.
+                if color_changed:
+                    result.details.append(
+                        f"member={member_db_id} row={row.notion_page_id[:8]} "
+                        f"color drift {current_color}→{desired_color} ignored "
+                        "(Notion can't recolor an existing option)",
+                    )
                 result.mapping_writes.append(_Mapping(
                     detail_notion_page_id=row.notion_page_id,
                     member_db_id=member_db_id,
@@ -438,30 +440,21 @@ def _plan_member_db_update(
                     option_id="",  # back-filled from saga
                     option_name=desired_sanitized,
                 ))
-            elif color_changed:
-                # Adopt + color-only PATCH.
-                out[idx] = {
-                    **adopted,
-                    "name": desired_sanitized,
-                    "color": desired_color,
-                }
-                result.renamed += 1
-                result.details.append(
-                    f"member={member_db_id} row={row.notion_page_id[:8]} "
-                    f"adopted existing option (color update only "
-                    f"{current_color}→{desired_color})",
-                )
-                result.mapping_writes.append(_Mapping(
-                    detail_notion_page_id=row.notion_page_id,
-                    member_db_id=member_db_id,
-                    option_id=adopt_id,
-                    option_name=desired_sanitized,
-                ))
             else:
-                result.details.append(
-                    f"member={member_db_id} row={row.notion_page_id[:8]} "
-                    "adopted existing option by sanitized-name match",
-                )
+                # Adopt by sanitized-name match. If only the color differs we
+                # still do NOT recolor — Notion can't recolor an existing
+                # option (400). Keep it as-is and just record the mapping.
+                if color_changed:
+                    result.details.append(
+                        f"member={member_db_id} row={row.notion_page_id[:8]} "
+                        f"adopted; color drift {current_color}→{desired_color} "
+                        "ignored (Notion can't recolor an existing option)",
+                    )
+                else:
+                    result.details.append(
+                        f"member={member_db_id} row={row.notion_page_id[:8]} "
+                        "adopted existing option by sanitized-name match",
+                    )
                 result.mapping_writes.append(_Mapping(
                     detail_notion_page_id=row.notion_page_id,
                     member_db_id=member_db_id,
@@ -873,6 +866,20 @@ def sync(client: NotionClientWrapper, config: SyncConfig) -> SyncReport:
             renames=plan.renames,
             saga_results=saga_results,
         )
+        # Notion rejects recoloring an EXISTING option (400 "Cannot update
+        # color of select with id: X") — color is honored only at creation.
+        # Force every option that already existed on this member DB back to its
+        # current color; only brand-new options (saga/bootstrap creates, whose
+        # ids Notion just assigned, or entries with no id yet) keep the
+        # canonical color. Belt-and-suspenders so no code path can emit a
+        # forbidden recolor PATCH.
+        _orig_colors = {
+            o["id"]: o.get("color") for o in current_options if o.get("id")
+        }
+        for o in final_desired:
+            oid = o.get("id")
+            if oid in _orig_colors and _orig_colors[oid] is not None:
+                o["color"] = _orig_colors[oid]
         patched_options = current_state
         if not _options_equal(final_desired, current_state):
             try:
