@@ -38,6 +38,7 @@ def mirror_to_topic_dbs(
     metadata: dict,
     owner_user_id: str,
     owner_name: str,
+    owner_default_visibility: str = "Shared",
 ) -> MirrorOutcome:
     """Mirror a single meeting page into every matching topic DB.
 
@@ -58,6 +59,11 @@ def mirror_to_topic_dbs(
         heading when this contributor is the 2nd/3rd/... to tag the same
         meeting. The Owner UUID is the dedup key; the name is what readers see.
         Falls back to "Unknown" if empty.
+    owner_default_visibility:
+        The DB owner's Org Chart ``Default Mirror Visibility`` ("Shared" /
+        "Private"), used by the confidentiality gate only when the meeting's
+        ``Confidential`` select is blank. Defaults to "Shared" (mirror as
+        before).
     """
     if not config.topic_mirror_enabled:
         return MirrorOutcome(status=MirrorStatus.DISABLED, detail="topic_mirror_enabled=False")
@@ -88,6 +94,21 @@ def mirror_to_topic_dbs(
             detail=(
                 f"page tags matched 0 of {len(mirror_routes)} active "
                 f"Mirror-to-DB rule(s)"
+            ),
+        )
+
+    # Confidentiality gate — only meetings that WOULD have mirrored are gated,
+    # so a held-back meeting that matched ≥1 rule surfaces a distinct log line
+    # while untagged pages stay the silent NO_MATCH above.
+    from src.topic_mirror.confidentiality import mirror_allowed, read_confidential
+    confidential = read_confidential(source_page.get("properties", {}))
+    if not mirror_allowed(confidential, owner_default_visibility):
+        reason = confidential or f"default={owner_default_visibility}"
+        return MirrorOutcome(
+            status=MirrorStatus.SKIPPED_CONFIDENTIAL,
+            detail=(
+                f"{reason}; held back from "
+                f"[{','.join(r.label for r in matched)}]"
             ),
         )
 

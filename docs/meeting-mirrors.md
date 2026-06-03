@@ -12,6 +12,46 @@ Notion `POST /v1/pages` with `template: {type: "template_id", template_id: <sour
 
 `Topic Mirror Routes` DB under Nzyme Home with columns `Match Property` (select: Meeting type / Detail / External Org), `Match Value` (text), `Target DB` (url), `Active` (checkbox). One row per topic→DB mapping. The pipeline reloads the table once per cron tick. See `docs/notion-schema.md` for the full property list.
 
+## Confidentiality gate (opt-out)
+
+A meeting can be kept out of the shared topic DBs even when it matches a rule.
+The gate runs in `mirror_to_topic_dbs` **after** `match_routes` and **before**
+the clone/merge loop — so only meetings that *would* have mirrored are gated.
+
+Two inputs decide it:
+
+- **`Confidential`** — a `select` on each per-member Meeting Notes DB:
+  `Confidential` (force-private) / `Shareable` (force-share) / blank.
+- **`Default Mirror Visibility`** — a `select` on each Org Chart row:
+  `Private` / `Shared`. Read into `MeetingDB.default_mirror_visibility` by
+  `discover_meeting_dbs` and threaded down via `_run_topic_mirror`. Used only
+  when the meeting's `Confidential` value is blank. The default is keyed to the
+  **DB owner** (the member whose Meeting Notes DB the page lives in), not the
+  page's Notion `created_by` creator.
+
+An explicit meeting value always wins; blank falls back to the owner default,
+which itself defaults to `Shared`:
+
+| Owner default ↓ / Meeting → | blank | `Shareable` | `Confidential` |
+|---|---|---|---|
+| **Shared** (or unset) | mirror ✅ | mirror ✅ | **skip** 🔒 |
+| **Private** | **skip** 🔒 | mirror ✅ | **skip** 🔒 |
+
+The resolver is the pure `mirror_allowed(confidential, owner_default)` in
+`src/topic_mirror/confidentiality.py`. A held-back meeting returns
+`MirrorStatus.SKIPPED_CONFIDENTIAL` and emits a CloudWatch line at INFO
+(`topic mirror outcome: ... status=Skipped: confidential detail=<reason>; held
+back from [<routes>]`) — distinct from the silent `NO_MATCH`.
+
+**Graceful degradation / provisioning.** Both columns are *manual* (not
+canonical-synced like `Macro Work Block`/`Detail`). A member DB without the
+`Confidential` column reads the property as absent → blank → owner default; an
+Org Chart row without `Default Mirror Visibility` defaults to `Shared` (mirror
+as before). So the gate is fully back-compat and the columns can be added in
+Notion at any time. Add `Default Mirror Visibility` (`Private`/`Shared`) to the
+Org Chart and `Confidential` (`Confidential`/`Shareable`) to each member
+Meeting Notes DB to make the feature usable.
+
 ## Cross-DB dedup + contributor merge
 
 - Dedup key = `normalize(Meeting title) + Date.start[:10]`, matched workspace-wide on the target DB.
@@ -52,6 +92,7 @@ topic mirror outcome: page=<short> owner=<member> status=<enum> detail=<text>
 - `src/topic_mirror/__init__.py` — orchestrator `mirror_to_topic_dbs(...)`; returns `MirrorOutcome`. Never raises.
 - `src/topic_mirror/outcome.py` — `MirrorStatus` / `MirrorAction` enums + `MirrorOutcome` dataclass.
 - `src/topic_mirror/route_registry.py` — loads Routes DB and matches a page's tags against active routes.
+- `src/topic_mirror/confidentiality.py` — pure `read_confidential` / `mirror_allowed` resolver for the confidentiality gate (meeting `Confidential` select + owner `Default Mirror Visibility`).
 - `src/topic_mirror/notes_extractor.py` — `fetch_notes_blocks_for_clone` copies a contributor's ENTIRE notes container (all children of their `notes_block_id`) to create-format blocks, preserving structure + color.
 - `src/topic_mirror/writer.py` — `clone_or_merge` per route: find-or-clone by title+date, then merge or noop. Owns contributor labeling (`_build_contributor_heading`, `_label_first_contributor_notes` — prepends at `position: start`) and `Internal attendees` (`_internal_attendee_ids`, `_update_internal_attendees`).
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import time
 
 from notion_client import APIResponseError
 
@@ -11,6 +12,16 @@ from src.notion_client_wrapper import NotionClientWrapper
 from src.pipeline import run_inject_templates_for_page
 
 logger = logging.getLogger(__name__)
+
+# load_registry() is backed by a single Org Chart data_sources.query that
+# intermittently returns a partial result set (observed in prod: 1-3 of 13
+# member DBs), which wrongly rejects a real member's page as coming from an
+# "unknown database" and skips template injection. On a miss we reload the
+# registry a few times before giving up — a partial read almost always
+# resolves within a couple retries, while a genuinely unknown (non-member)
+# DB stays absent across every reload.
+_REGISTRY_LOOKUP_ATTEMPTS = 3
+_REGISTRY_LOOKUP_RETRY_DELAY_SECONDS = 1.0
 
 
 def _set_date_to_created_time(
@@ -70,19 +81,41 @@ def handle_automation_webhook(
         return {"status": "error", "reason": "missing page id"}
 
     # Verify the page belongs to one of the registered Meeting Notes DBs.
+    #
+    # Use include_inactive=True (no `Active` checkbox filter): the unfiltered
+    # Org Chart query is empirically far more complete than the filtered one,
+    # and an inactive member's meeting should still get a template. Reload a
+    # few times on a miss to ride out partial reads (see module constants).
     parent = data.get("parent", {})
     db_id = parent.get("database_id", "").replace("-", "").lower()
-    try:
-        registry = load_registry(config, client)
-    except Exception:
-        logger.exception("Failed to load Meeting Notes DB registry — rejecting webhook")
-        return {"status": "error", "reason": "registry load failed"}
 
-    known_db_ids = {db.db_id.replace("-", "").lower() for db in registry}
-    if db_id not in known_db_ids:
+    known = False
+    registry_size = 0
+    for attempt in range(1, _REGISTRY_LOOKUP_ATTEMPTS + 1):
+        try:
+            registry = load_registry(config, client, include_inactive=True)
+        except Exception:
+            logger.exception("Failed to load Meeting Notes DB registry — rejecting webhook")
+            return {"status": "error", "reason": "registry load failed"}
+
+        known_db_ids = {db.db_id.replace("-", "").lower() for db in registry}
+        registry_size = len(known_db_ids)
+        if db_id in known_db_ids:
+            known = True
+            break
+        if attempt < _REGISTRY_LOOKUP_ATTEMPTS:
+            logger.info(
+                "Page %s DB %s not in registry (attempt %d/%d, registry has %d "
+                "DB(s)) — reloading",
+                page_id, db_id, attempt, _REGISTRY_LOOKUP_ATTEMPTS, registry_size,
+            )
+            time.sleep(_REGISTRY_LOOKUP_RETRY_DELAY_SECONDS)
+
+    if not known:
         logger.info(
-            "Ignoring page %s from unknown database %s (registry has %d DB(s))",
-            page_id, db_id, len(known_db_ids),
+            "Ignoring page %s from unknown database %s (registry has %d DB(s) "
+            "after %d attempt(s))",
+            page_id, db_id, registry_size, _REGISTRY_LOOKUP_ATTEMPTS,
         )
         return {"status": "ignored", "reason": "unknown database"}
 

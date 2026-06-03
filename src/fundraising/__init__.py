@@ -84,6 +84,7 @@ def write_to_affinity(
     notion_url: str,
     page_id: str,
     notion_client: NotionClientWrapper,
+    meeting_owner: str = "",
 ) -> FundraisingOutcome:
     """Main fundraising-branch entry point.
 
@@ -183,6 +184,7 @@ def write_to_affinity(
                 ai_summary=ai_summary,
                 notion_url=notion_url,
                 person_ids=person_ids,
+                meeting_owner=meeting_owner,
             )
 
             if failed:

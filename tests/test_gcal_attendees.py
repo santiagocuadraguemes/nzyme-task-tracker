@@ -8,7 +8,11 @@ from unittest.mock import patch
 import pytest
 
 from src.transcript_pipeline import gcal_attendees
-from src.transcript_pipeline.gcal_attendees import _flatten_attendees, _load_sa_info
+from src.transcript_pipeline.gcal_attendees import (
+    _flatten_attendees,
+    _load_sa_info,
+    _search_query,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -73,6 +77,33 @@ class TestLoadSaInfo:
         second = _load_sa_info()
         assert first is second
         assert second["client_email"] == "cached@x.com"
+
+
+class TestSearchQuery:
+    def test_strips_glued_hyphen_that_poisons_calendar_search(self):
+        # The real incident: "Cap-" is a glued-hyphen token that Calendar's
+        # q-search reads as an operator, zeroing the whole AND query.
+        assert (
+            _search_query("Ext.call Access Cap- Nzyme re: Portugal")
+            == "Ext call Access Cap Nzyme re Portugal"
+        )
+
+    def test_standalone_dash_collapses_to_same_clean_query(self):
+        # Spaced-dash variant already worked pre-fix; must stay equivalent.
+        assert (
+            _search_query("Ext.call Access Cap - Nzyme re: Portugal")
+            == "Ext call Access Cap Nzyme re Portugal"
+        )
+
+    def test_plain_title_is_unchanged(self):
+        assert _search_query("Weekly sync") == "Weekly sync"
+
+    def test_collapses_whitespace_and_trims(self):
+        assert _search_query("  Foo   /  Bar  ") == "Foo Bar"
+
+    def test_preserves_accented_letters_for_spanish_titles(self):
+        # \w is Unicode-aware: accented words stay intact, only punctuation goes.
+        assert _search_query("Reunión Begoña: ¡revisión!") == "Reunión Begoña revisión"
 
 
 class TestFlattenAttendees:

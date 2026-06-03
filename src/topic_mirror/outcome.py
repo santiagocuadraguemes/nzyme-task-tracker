@@ -15,6 +15,9 @@ class MirrorStatus(str, Enum):
     POSTED — at least one route ran successfully and no route failed.
     NO_MATCH — the page's tags matched zero active routes.
     DISABLED — feature flag off or routes DB unset.
+    SKIPPED_CONFIDENTIAL — the page matched ≥1 route but the confidentiality
+        gate held it back (meeting marked Confidential, or blank with the
+        owner's default = Private).
     PARTIAL_FAILURE — some routes succeeded, others raised.
     FAILED — every matched route raised (or registry load failed).
     """
@@ -22,6 +25,7 @@ class MirrorStatus(str, Enum):
     POSTED = "Posted"
     NO_MATCH = "Skipped: no matching route"
     DISABLED = "Skipped: feature disabled"
+    SKIPPED_CONFIDENTIAL = "Skipped: confidential"
     PARTIAL_FAILURE = "Partial: some routes failed"
     FAILED = "Failed: all routes failed"
 

@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -32,6 +33,22 @@ logger = logging.getLogger(__name__)
 
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
 MIN_FUZZY_SCORE = 60
+
+
+def _search_query(title: str) -> str:
+    r"""Strip punctuation from a title for Google Calendar's ``q`` parameter.
+
+    Calendar free-text search is an AND across whitespace-delimited tokens,
+    and a token with glued punctuation (e.g. ``Cap-`` from a title like
+    "Access Cap- Nzyme") matches nothing — the trailing hyphen reads as a
+    search operator — which zeroes the whole query even when the event title
+    matches verbatim. Replacing every non-alphanumeric run with a space turns
+    such tokens back into plain words. ``\w`` is Unicode-aware, so accented
+    letters in Spanish titles (e.g. "Reunión") survive — only punctuation is
+    dropped. Used *only* for the ``q`` argument; fuzzy title scoring keeps the
+    original (rapidfuzz handles punctuation).
+    """
+    return re.sub(r"\s+", " ", re.sub(r"[^\w]+", " ", title)).strip()
 
 _SA_INFO_CACHE: dict[str, Any] | None = None
 
@@ -181,19 +198,20 @@ def get_gcal_attendees(
     service = _build_calendar_service(delegated_user)
 
     cleaned_title = strip_title_datetime(meeting_title)
+    search_q = _search_query(cleaned_title)
     notion_dt = datetime.fromisoformat(meeting_date)
     time_min = (notion_dt - timedelta(hours=12)).isoformat()
     time_max = (notion_dt + timedelta(hours=12)).isoformat()
 
     logger.debug(
-        "Searching Google Calendar (keyword) for '%s' around %s (as %s, calendar=%s)",
-        cleaned_title, meeting_date, delegated_user, calendar_id,
+        "Searching Google Calendar (keyword='%s') for '%s' around %s (as %s, calendar=%s)",
+        search_q, cleaned_title, meeting_date, delegated_user, calendar_id,
     )
     pass1 = (
         service.events()
         .list(
             calendarId=calendar_id,
-            q=cleaned_title,
+            q=search_q,
             timeMin=time_min,
             timeMax=time_max,
             singleEvents=True,

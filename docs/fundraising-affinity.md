@@ -16,7 +16,7 @@ The extraction sweep discovers Meeting Notes DBs via the Org Chart. Normally it 
 
 1. Matches the meeting to **all** LPs via attendee emails → Affinity persons → opportunity → list entry. Multi-LP meetings (e.g. cross-LP intros) get the same note posted to every match.
 2. Resolves the meeting's **people** (owner/host + attendees) to Affinity person ids via `resolve_attendee_person_ids` (searches every attendee email, internal Kibo included, and keeps the ids of those that exist in Affinity).
-3. Posts an HTML meeting note attached to each matched LP's **opportunity** *and* to those person ids — so it shows on the people's timelines, not just the LP org. The note has a plain **title** — run through `strip_title_datetime()` to drop the raw ISO timestamp Notion appends to auto-created meeting names (`… 2026-05-29T14:00:00.000+02:00`), which looked ugly in Affinity — and two labeled sections:
+3. Posts an HTML meeting note attached to each matched LP's **opportunity** *and* to those person ids — so it shows on the people's timelines, not just the LP org. The note has a plain **title** — run through `strip_title_datetime()` to drop the raw ISO timestamp Notion appends to auto-created meeting names (`… 2026-05-29T14:00:00.000+02:00`), which looked ugly in Affinity — an **Owner** line (the `db_owner`, i.e. the Kibo member whose Meeting Notes DB the meeting lives in / who hosted it; rendered right under the title, omitted when the owner can't be resolved — `db_owner == "?"`), and two labeled sections:
    - **Manual notes** — the user's `## Notes` content with the meeting template scaffolding (headings, empty bullets, `[placeholder]`) stripped by `_strip_template_scaffolding`. When the user never touched the template, this reads **"No manual notes"**.
    - **Summary** — the Notion-generated AI summary, read from the **meeting_notes block** (`summary_block_id`, via `_fetch_block_summary`) — i.e. what the user sees in the block — falling back to the legacy `AI Summary` page property only when the block has none. Omitted entirely when both are empty. (Most meetings carry the summary in the block, not the property — reading only the property is why the summary was missing before 2026-05-27.)
 
@@ -58,7 +58,7 @@ Not implemented. Manual re-trigger of an already-posted page would create a dupl
 - `src/fundraising/__init__.py` — orchestrator `write_to_affinity`; returns a `FundraisingOutcome`. Never raises. `_strip_template_scaffolding` decides manual-notes-vs-"No manual notes".
 - `src/fundraising/outcome.py` — `FundraisingStatus` enum + `FundraisingOutcome` dataclass
 - `src/fundraising/lp_matcher.py` — `resolve_lp_list_entries` returns *all* matched list_entry_ids (multi-LP meetings post to every match); `resolve_attendee_person_ids` maps attendee emails → Affinity person ids for note attachment
-- `src/fundraising/affinity_writer.py` — `post_meeting_note_to_lps(..., manual_notes, ai_summary, person_ids)` builds the two-section HTML note and attaches it to each opportunity + the person ids; returns `(posted, failed)`
+- `src/fundraising/affinity_writer.py` — `post_meeting_note_to_lps(..., manual_notes, ai_summary, person_ids, meeting_owner)` builds the HTML note (title + optional Owner line + two sections) and attaches it to each opportunity + the person ids; returns `(posted, failed)`
 
 ## Env vars
 

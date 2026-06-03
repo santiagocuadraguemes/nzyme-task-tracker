@@ -72,6 +72,35 @@ class TestNoteBody:
         assert "Real notes." in content
         assert "Summary" not in content
 
+    def test_owner_line_rendered_on_top_when_provided(self, client):
+        post_meeting_note_to_lps(
+            client,
+            opportunity_entity_ids=[701],
+            meeting_title="LP X",
+            manual_notes="Real notes.",
+            ai_summary="",
+            notion_url="",
+            meeting_owner="Vicente",
+        )
+        content = client.create_note.call_args.kwargs["content"]
+        assert "Owner:" in content
+        assert "Vicente" in content
+        # Owner line sits above the manual notes section.
+        assert content.index("Vicente") < content.index("Real notes.")
+
+    def test_owner_line_omitted_when_blank(self, client):
+        post_meeting_note_to_lps(
+            client,
+            opportunity_entity_ids=[701],
+            meeting_title="LP X",
+            manual_notes="Real notes.",
+            ai_summary="",
+            notion_url="",
+            meeting_owner="",
+        )
+        content = client.create_note.call_args.kwargs["content"]
+        assert "Owner:" not in content
+
     def test_person_ids_forwarded_to_create_note(self, client):
         post_meeting_note_to_lps(
             client,

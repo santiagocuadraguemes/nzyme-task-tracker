@@ -69,7 +69,18 @@
       "PowerShell(../venv/Scripts/python -m pytest tests/ -q --tb=short 2>&1 | Select-Object -Last 50)",
       "PowerShell(aws lambda invoke *)",
       "PowerShell([Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $start = [DateTimeOffset]::Parse\\(\"2026-05-26T00:00:00Z\"\\).ToUnixTimeMilliseconds\\(\\); $end = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds\\(\\); foreach \\($pat in @\\('\"[ERROR]\"','\"Task timed out\"','\"Traceback\"','\"Exception\"','\"timeout\"','\"RateLimit\"','\"429\"','\"500\"','\"503\"'\\)\\) { $count = 0; $token = $null; do { if \\($token\\) { $resp = aws logs filter-log-events --log-group-name \"/aws/lambda/kibo-talent-engine\" --profile company --region eu-west-1 --start-time $start --end-time $end --filter-pattern $pat --next-token $token --output json | ConvertFrom-Json } else { $resp = aws logs filter-log-events --log-group-name \"/aws/lambda/kibo-talent-engine\" --profile company --region eu-west-1 --start-time $start --end-time $end --filter-pattern $pat --output json | ConvertFrom-Json } $count += $resp.events.Count; $token = $resp.nextToken } while \\($token\\); Write-Output \\(\"{0,-25} {1}\" -f $pat, $count\\) })",
-      "PowerShell(Out-Null *)"
+      "PowerShell(Out-Null *)",
+      "mcp__claude_ai_Google_Calendar__list_calendars",
+      "PowerShell($env:PYTHONPATH = \".\"; ..\\\\venv\\\\Scripts\\\\python scripts\\\\usage_stats.py --days 30 2>&1 | Select-Object -Last 120)",
+      "PowerShell($env:PYTHONPATH = \".\"; ..\\\\venv\\\\Scripts\\\\python scripts\\\\usage_stats.py --days 30 2>&1 | Select-Object -Last 60)",
+      "PowerShell($env:PYTHONPATH = \".\"; ..\\\\venv\\\\Scripts\\\\python scripts\\\\usage_stats.py --days 30 2>&1 | Select-Object -Last 50)",
+      "PowerShell($env:PYTHONPATH = \".\"; ..\\\\venv\\\\Scripts\\\\python scripts\\\\_debug_one_page.py 34583e67e2e78081b515f5e33926f153 2>&1 | Select-Object -Last 100)",
+      "PowerShell($env:PYTHONPATH = \".\"; ..\\\\venv\\\\Scripts\\\\python scripts\\\\_debug_one_page.py 34583e67e2e78081b515f5e33926f153 2>&1 | Select-Object -First 200)",
+      "mcp__claude_ai_Custom_Supabase__execute_sql",
+      "mcp__claude_ai_Custom_Supabase__list_edge_functions",
+      "mcp__claude_ai_Custom_Supabase__get_logs",
+      "mcp__claude_ai_Custom_Supabase__apply_migration",
+      "PowerShell($env:PYTHONPATH = \\(Get-Location\\).Path; ..\\\\venv\\\\Scripts\\\\python.exe scripts\\\\usage_stats.py --only-active --days 30)"
     ]
   }
 }

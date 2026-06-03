@@ -22,8 +22,10 @@ MEETING_DB_PROPERTY = "Meeting Notes DB"
 AUTO_EXTRACT_TASKS_PROPERTY = "Auto-extract Tasks"
 
 # Notion URLs end in a 32-char hex UUID, optionally preceded by a slug + dash.
+# Covers both the classic hosts (notion.so/<workspace>/<slug>-<id>) and the
+# newer copy-link format (app.notion.com/p/<workspace>/<id>?v=...).
 _NOTION_URL_RE = re.compile(
-    r"(?:notion\.so|notion\.site)/(?:[^/?#]+/)?(?:[^/?#]*-)?([0-9a-fA-F]{32})"
+    r"(?:notion\.so|notion\.site|notion\.com)/(?:[^/?#]+/)*(?:[^/?#]*-)?([0-9a-fA-F]{32})"
 )
 
 
@@ -45,6 +47,12 @@ class MeetingDB:
     # their meetings (task extraction is skipped). Always True unless the
     # registry was loaded with `include_inactive=True`.
     active: bool = True
+    # Org Chart `Default Mirror Visibility` select — the owner's preference for
+    # meetings left untagged by the `Confidential` column. "Shared" (mirror, as
+    # before) or "Private" (hold back). Defaults to "Shared" when the column is
+    # missing/unset and for the single-DB dev override, so the Meeting Mirrors
+    # confidentiality gate is back-compat. See src/topic_mirror/confidentiality.py.
+    default_mirror_visibility: str = "Shared"
 
 
 def _extract_db_id(url: str) -> str | None:
@@ -141,12 +149,22 @@ def discover_meeting_dbs(
         if isinstance(active_prop, dict) and active_prop.get("type") == "checkbox":
             active = bool(active_prop.get("checkbox"))
 
+        # Owner's per-member mirror default. Missing/unset → "Shared"
+        # (mirror as before); only "Private" flips the gate for blank meetings.
+        visibility = "Shared"
+        v_prop = props.get("Default Mirror Visibility")
+        if isinstance(v_prop, dict) and v_prop.get("type") == "select":
+            v_name = ((v_prop.get("select") or {}).get("name") or "").strip()
+            if v_name:
+                visibility = v_name
+
         dbs.append(MeetingDB(
             db_id=db_id,
             owner_name=name,
             owner_email=email,
             auto_extract_tasks=auto_extract,
             active=active,
+            default_mirror_visibility=visibility,
         ))
 
     if dbs:

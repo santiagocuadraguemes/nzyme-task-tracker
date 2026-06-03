@@ -29,6 +29,7 @@ def _make_org_row(
     mn_db_url: str | None,
     auto_extract_tasks: bool | None = None,
     active: bool = True,
+    default_mirror_visibility: str | None = None,
 ) -> dict:
     props = {
         "Name": {"type": "title", "title": [{"plain_text": name}]},
@@ -39,6 +40,10 @@ def _make_org_row(
     if auto_extract_tasks is not None:
         props["Auto-extract Tasks"] = {
             "type": "checkbox", "checkbox": auto_extract_tasks,
+        }
+    if default_mirror_visibility is not None:
+        props["Default Mirror Visibility"] = {
+            "type": "select", "select": {"name": default_mirror_visibility},
         }
     return {"properties": props}
 
@@ -55,6 +60,14 @@ class TestExtractDbId:
     def test_parses_url_with_slug(self):
         url = "https://www.notion.so/kiboventures/Reyes-Meeting-Notes-b07976472620499fa4b89be7b03c07d0"
         assert _extract_db_id(url) == "b0797647-2620-499f-a4b8-9be7b03c07d0"
+
+    def test_parses_new_app_notion_com_copy_link(self):
+        # Notion's newer "Copy link" format: app.notion.com/p/<workspace>/<id>
+        url = (
+            "https://app.notion.com/p/kiboventures/9aa3940845bf4defa26f2efbe372b348"
+            "?v=59c8778ea915491886fd82dd6f0c084b&source=copy_link"
+        )
+        assert _extract_db_id(url) == "9aa39408-45bf-4def-a26f-2efbe372b348"
 
     def test_returns_none_for_non_notion_url(self):
         assert _extract_db_id("https://example.com/page-1234") is None
@@ -140,6 +153,39 @@ class TestDiscoverMeetingDbs:
 
         assert len(result) == 1
         assert result[0].owner_name == "Owner A"
+
+    def test_default_mirror_visibility_defaults_to_shared_when_absent(self):
+        client = MagicMock()
+        client.query_database.return_value = {
+            "results": [
+                _make_org_row(
+                    name="No Pref",
+                    email="np@x.com",
+                    mn_db_url="https://www.notion.so/34583e67e2e78081b515f5e33926f153",
+                ),
+            ],
+        }
+
+        result = discover_meeting_dbs(client, "org-chart-db")
+
+        assert result[0].default_mirror_visibility == "Shared"
+
+    def test_reads_private_default_mirror_visibility(self):
+        client = MagicMock()
+        client.query_database.return_value = {
+            "results": [
+                _make_org_row(
+                    name="Privacy First",
+                    email="pf@x.com",
+                    mn_db_url="https://www.notion.so/34583e67e2e78081b515f5e33926f153",
+                    default_mirror_visibility="Private",
+                ),
+            ],
+        }
+
+        result = discover_meeting_dbs(client, "org-chart-db")
+
+        assert result[0].default_mirror_visibility == "Private"
 
     def test_filters_for_active_rows(self):
         """Discovery passes Active=true filter to the query."""

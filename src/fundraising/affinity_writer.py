@@ -19,6 +19,7 @@ def _section(label: str, text: str) -> str:
 
 def _build_html_note(
     *, meeting_title: str, manual_notes: str, ai_summary: str, notion_url: str,
+    meeting_owner: str = "",
 ) -> str:
     """Two-section HTML note: manual notes first, then the Notion summary.
 
@@ -26,9 +27,21 @@ def _build_html_note(
     repeating it looks bad. When the manual notes are empty (the user never
     touched the template), the first section reads "No manual notes". The
     "Summary" section is omitted entirely when Notion produced no summary.
+
+    ``meeting_owner`` (the Kibo member whose Meeting Notes DB this meeting
+    lives in — i.e. who hosted/recorded it) is rendered as an "Owner" line
+    right under the title, when provided. The note attaches every attendee as
+    an Affinity person but doesn't otherwise say who owns the meeting; this
+    line makes that explicit on the LP timeline.
     """
     t = html.escape(meeting_title or "Fundraising meeting")
     parts = [f"<p><strong>{t}</strong></p>"]
+
+    owner = meeting_owner.strip()
+    if owner:
+        parts.append(
+            f"<p><strong>Owner:</strong> {html.escape(owner)}</p>"
+        )
 
     notes = manual_notes.strip()
     parts.append(_section("Manual notes", notes) if notes
@@ -41,7 +54,10 @@ def _build_html_note(
     u = html.escape(notion_url or "")
     if u:
         parts.append(f'<p><a href="{u}">View full meeting notes in Notion</a></p>')
-    return "".join(parts)
+    # One blank line between top-level blocks (title, Owner, each section, the
+    # link) — an empty paragraph is what an "extra Enter" produces in Affinity's
+    # rich-text editor. Within a section the label and body stay tight.
+    return "<p></p>".join(parts)
 
 
 def post_meeting_note_to_lps(
@@ -53,6 +69,7 @@ def post_meeting_note_to_lps(
     ai_summary: str,
     notion_url: str,
     person_ids: list[int] | None = None,
+    meeting_owner: str = "",
 ) -> tuple[list[int], list[tuple[int, str]]]:
     """Post the same HTML meeting note to every matched LP opportunity.
 
@@ -74,6 +91,7 @@ def post_meeting_note_to_lps(
         manual_notes=manual_notes,
         ai_summary=ai_summary,
         notion_url=notion_url,
+        meeting_owner=meeting_owner,
     )
     for opp_id in opportunity_entity_ids:
         try:

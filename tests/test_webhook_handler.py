@@ -2,6 +2,7 @@
 from unittest.mock import MagicMock, patch
 
 from src.config import SyncConfig
+from src.meeting_db_registry import MeetingDB
 from src.webhook.handler import handle_automation_webhook
 
 
@@ -98,6 +99,7 @@ class TestHandleAutomationWebhook:
 
         assert result["status"] == "skipped"
 
+    @patch("src.webhook.handler._REGISTRY_LOOKUP_RETRY_DELAY_SECONDS", 0)
     def test_ignores_wrong_database(self):
         config = _make_config()
         client = _client_with_page()
@@ -108,6 +110,32 @@ class TestHandleAutomationWebhook:
         assert result["status"] == "ignored"
         assert result["reason"] == "unknown database"
         client.update_page.assert_not_called()
+
+    @patch("src.webhook.handler._REGISTRY_LOOKUP_RETRY_DELAY_SECONDS", 0)
+    @patch("src.webhook.handler.run_inject_templates_for_page")
+    @patch("src.webhook.handler.load_registry")
+    def test_recovers_when_registry_load_is_partial(self, mock_load, mock_inject):
+        """A partial registry read must not wrongly reject a real member DB.
+
+        Regression for the prod bug where load_registry() intermittently
+        returned 1-3 of 13 member DBs, so the page's DB looked unknown and
+        template injection was skipped. The handler reloads on a miss.
+        """
+        config = _make_config()
+        client = _client_with_page()
+        mock_inject.return_value = True
+        # First read omits the target DB (partial); reload includes it.
+        mock_load.side_effect = [
+            [MeetingDB(db_id="some-other-db", owner_name="X", owner_email="")],
+            [MeetingDB(db_id="db-meetings-1234", owner_name="Guille", owner_email="")],
+        ]
+        payload = _make_automation_payload("page-1", database_id="db-meetings-1234")
+
+        result = handle_automation_webhook(payload, config, client)
+
+        assert result["status"] == "injected"
+        assert mock_load.call_count == 2
+        mock_inject.assert_called_once_with(config, client, "page-1")
 
     def test_ignores_non_automation_payload(self):
         config = _make_config()

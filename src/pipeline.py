@@ -39,7 +39,6 @@ from src.transcript_pipeline.fetch_transcript import (
     extract_transcript_block_id,
     extract_attendee_ids,
     extract_governance_attendees,
-    build_user_lookup,
     fetch_notes_text,
 )
 from src.transcript_pipeline.transcript_cleaner import clean as clean_transcript
@@ -388,9 +387,9 @@ def _resolve_attendees(
                 impersonate, calendar_id = _gcal_impersonation_target(
                     delegated_user, config,
                 )
-                logger.debug(
-                    "GCal lookup impersonating %s (calendar=%s)",
-                    impersonate, calendar_id,
+                logger.info(
+                    "GCal lookup for owner=%s (impersonating %s, calendar=%s)",
+                    delegated_user, impersonate, calendar_id,
                 )
                 gcal_attendees = get_gcal_attendees(
                     metadata["title"], metadata["date"], impersonate,
@@ -650,6 +649,8 @@ def _mirror_meeting_to_affinity(
         notion_url=metadata.get("url", ""),
         page_id=page_id,
         notion_client=client,
+        # db_owner is "?" when unresolved — don't render "Owner: ?".
+        meeting_owner="" if db_owner == "?" else db_owner,
     )
     # Single structured line per run — log level reflects severity so
     # CloudWatch filters can split actionable failures from expected skips.
@@ -1273,7 +1274,6 @@ def run_sync(config: SyncConfig, client: NotionClientWrapper) -> None:
             logger.exception("Failed to load sync context — aborting sync")
             raise
 
-        parent_titles_map = _flatten_hierarchy(ctx["hierarchy"])
         total_tasks = 0
 
         # When --db-id (or MEETING_NOTES_DB_ID) is set, this is a manual
@@ -1422,6 +1422,7 @@ def _run_topic_mirror(
     metadata: dict,
     short_id: str,
     db_owner: str,
+    owner_default_visibility: str = "Shared",
 ) -> None:
     """Mirror a tagged meeting into its topic DB(s).
 
@@ -1452,6 +1453,7 @@ def _run_topic_mirror(
         metadata=metadata,
         owner_user_id=owner_user_id,
         owner_name=db_owner,
+        owner_default_visibility=owner_default_visibility,
     )
     if mirror_outcome.status in (
         MirrorStatus.FAILED, MirrorStatus.PARTIAL_FAILURE,
@@ -1461,7 +1463,12 @@ def _run_topic_mirror(
             short_id, db_owner,
             mirror_outcome.status.value, mirror_outcome.detail,
         )
-    elif mirror_outcome.status == MirrorStatus.POSTED:
+    elif mirror_outcome.status in (
+        MirrorStatus.POSTED, MirrorStatus.SKIPPED_CONFIDENTIAL,
+    ):
+        # SKIPPED_CONFIDENTIAL is rare (matched a rule but held back) and worth
+        # surfacing in CloudWatch — kept at INFO alongside POSTED, not in the
+        # silent NO_MATCH/DISABLED bucket below.
         logger.info(
             "topic mirror outcome: page=%s owner=%s status=%s detail=%s",
             short_id, db_owner,
@@ -1702,6 +1709,9 @@ def run_sync_for_page(
                 _run_topic_mirror(
                     config=config, client=client, page=page,
                     metadata=metadata, short_id=short_id, db_owner=db_owner,
+                    owner_default_visibility=(
+                        owner.default_mirror_visibility if owner else "Shared"
+                    ),
                 )
                 if not config.dry_run:
                     source.mark_page_processed(page_id)
@@ -1720,6 +1730,9 @@ def run_sync_for_page(
             _run_topic_mirror(
                 config=config, client=client, page=page,
                 metadata=metadata, short_id=short_id, db_owner=db_owner,
+                owner_default_visibility=(
+                    owner.default_mirror_visibility if owner else "Shared"
+                ),
             )
 
             if not config.dry_run and not force:

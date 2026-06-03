@@ -67,7 +67,7 @@ class TestTeamTaskTrackerWriter:
         writer = TeamTaskTrackerWriter(client, "db-tracker")
 
         task = {"title": "Simple task", "priority": "Low", "category": "Other"}
-        result = writer.create_task(task)
+        writer.create_task(task)
 
         props = client.create_page.call_args.args[1]
         assert "Assignee (edit access)" not in props

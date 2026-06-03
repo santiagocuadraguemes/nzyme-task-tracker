@@ -12,7 +12,7 @@
 | Meeting Mirrors parent page | `36483e67e2e780a0b480ccac6a07ff2b` | "🗂️ Meeting Mirrors" — container page for every topic-mirror DB. |
 | Topic Mirror Routes DB | `daa0ef7ac48c40bea82163ebe84ade6b` | Routing config for the Meeting Mirrors feature. Editing rows takes effect on the next cron tick. |
 | Meeting Mirrors → AI & Tech | `dc0e537633cb4e8c9c2b97210878d7d2` | First topic mirror DB. Receives pages tagged `Detail = "AI & Tech"`. |
-| 🏢 External Orgs Settings DB | `36d83e67e2e7807792b4f1f381f12800` | Mirror of Supabase `ReportingNz_deals` (one row per deal), maintained by `external_org_db_sync`. `EXTERNAL_ORGS_DB_ID`. |
+| ~~🏢 External Orgs Settings DB~~ | `36d83e67e2e7807792b4f1f381f12800` | **Deprecated 2026-06-02.** Was a mirror of `ReportingNz_deals`; replaced by `deal_hierarchy_sync` (Hierarchy DB rows) + `external_org_applier_sync` (member-DB `External Org` fan-out). `EXTERNAL_ORGS_DB_ID` is now dead config. |
 
 Workspace: `kiboventures.notion.so`
 
@@ -24,6 +24,7 @@ Workspace: `kiboventures.notion.so`
 | Date | date | ISO date; informational only — **not used for processing logic** (created_time and last_edited_time are used instead) |
 | Attendees | people | List of Notion users (returns id + name) |
 | Meeting type | select | Standup, 1:1, Deal review, Portfolio review, Team sync, External, Other, **Fundraising** (Fundraising triggers the Affinity LP Funnel branch when `FUNDRAISING_BRANCH_ENABLED=true`) |
+| Confidential | select | `Confidential` / `Shareable` (optional). Meeting Mirrors confidentiality gate: `Confidential` = never mirror, `Shareable` = always mirror, blank = use owner's `Default Mirror Visibility` (Org Chart). Not auto-synced. See [docs/meeting-mirrors.md](meeting-mirrors.md) |
 | Processed | checkbox | `false` = unprocessed, `true` = AI extraction completed |
 | Template Injected | checkbox | `false` = template not yet injected, `true` = template applied |
 | Processing | checkbox | Concurrency lock — `true` while a Lambda is extracting tasks from this page |
@@ -120,6 +121,7 @@ Source of truth for the firm's work-block taxonomy as edited by humans, but the 
 | Sub-item | relation | Self-relation to Hierarchy DB (children, inverse of Parent item) |
 | Tracker Node | relation | Human-readable cache of the matching `[DETAILS INSIDE]` row in the Team Task Tracker. **Authoritative mapping lives in Supabase `public.hierarchy_rows.tracker_node_page_id`** — `tracker_applier_sync` writes there first and updates this Notion column on a best-effort basis. Don't clear by hand; the next sync run heals divergence. |
 | Notes | text | One-sentence description (read by the classifier LLM to disambiguate similarly-named nodes) |
+| Deal ID | text | **Auto-managed by `deal_hierarchy_sync`** — the Supabase `ReportingNz_deals.id` UUID for rows it creates from the deal pipeline (dealflow opportunities + PortCos). A row carrying a `Deal ID` is owned by the sync (never hand-edit/delete it; it's archived via `Active=false` when the deal leaves the tracked stages). Rows with an empty `Deal ID` are hand-made and never touched by the deal sync. Hidden in the default view. |
 
 The canonical mirror of this DB lives in Supabase (`public.hierarchy_rows` in the Neo project). The daily `canonical_mirror_sync` writes Notion's current state to that table and surfaces structured `created` / `edited` / `deleted` / `reactivated` events in `public.hierarchy_sync_runs` for queryable history. The companion `tracker_applier_sync` then reads that canonical to keep the Team Task Tracker `[DETAILS INSIDE]` rows aligned (rename / soft-archive / create + back-fill — never delete), and `macro_block_sync` reads it to keep each member DB's `Macro Work Block` select aligned (id-preserving renames via `public.work_area_option_mappings`).
 
@@ -136,17 +138,19 @@ Source of truth for the `Detail` multi-select on every member Meeting Notes DB. 
 
 Like the Hierarchy DB, `Detail Options` rows are mirrored to Supabase by `detail_canonical_mirror_sync` (table `public.detail_rows`, audit trail `public.detail_sync_runs`). The Notion side keeps commas verbatim; the Notion-option-side comma stripping happens in the applier via the same `_sanitize_option_name` rule as Macro Work Block.
 
-## 🏢 External Orgs Settings DB
+## External Org (member-DB select, deal-driven)
 
-DB id `36d83e67e2e7807792b4f1f381f12800` (data source `36d83e67-e2e7-801f-ac29-000ba95ef32f`). Lives in the **Nzyme Settings** page. A **one-way mirror of the deal pipeline**: `external_org_db_sync` reads `public."ReportingNz_deals"` each tick and maintains one row per deal here. This replaced the old per-member `External Org` select fan-out (2026-05-27) — that select column on member DBs is now frozen/manual.
+`External Org` is a `select` property on every member Meeting Notes DB whose option list is fanned out from the deal pipeline (`public."ReportingNz_deals"`, Affinity → Supabase) by `external_org_applier_sync` — the same applier pattern as `Macro Work Block` / `Detail`:
 
-| Property | Type | Values / Notes |
-|----------|------|----------------|
-| Name | title | Deal name, stored **verbatim** (commas allowed in a title). |
-| Stage | select | Deal stage, comma-stripped via `_sanitize_option_name`. Schema colors + option order: `Portfolio` (orange), `DD phase`, `Working on a deal (significant effort)`, `Under analysis (team assigned moderate effort)` (blue). The default view sorts by Stage (option order) then Name → Portfolio first. Stages outside the tracked four (e.g. `Discarded`) are auto-added by Notion with a default color. |
-| Deal ID | text | The Supabase `ReportingNz_deals.id` UUID — the row's stable identity (replaces the old mapping table). Hidden in the default view. |
+- **Tracked stages → options.** Deals in `Portfolio` + `DD phase` + `Working on a deal (significant effort)` + `Under analysis (team assigned, moderate effort)` become options.
+- **Color is canonical-driven:** `Portfolio` → orange, the three dealflow stages → blue.
+- **Order:** stage priority (Portfolio → DD phase → Working → Under analysis) then alphabetical by name; `(archived) X` options sink to the bottom.
+- **Stage-out → soft-archive** (`X` → `(archived) X` via the rename saga); re-entry un-archives in place. Never deletes an option a meeting has been tagged on.
+- Mapping table `public.external_org_option_mappings` pins `(deal_id, member_db_id) → option_id` so renames are id-preserving. Don't edit the option list by hand — manual edits are overwritten on the next tick.
 
-Behavior: rows are **created** for deals in the 4 tracked stages and **updated** in place when name/stage drift; **never deleted** (a deal that leaves the tracked stages keeps its row with `Stage` refreshed). Rows without a `Deal ID` (manual rows) are ignored by the sync. There is no canonical-mirror or mapping table — `ReportingNz_deals` is itself the source of truth, and the obsolete `external_org_option_mappings` + `deal_hierarchy_links` tables were dropped.
+The same tracked deals are written into the Hierarchy DB as rows by `deal_hierarchy_sync` (see the Hierarchy DB `Deal ID` property above), so each opportunity/PortCo is also a fileable `[DETAILS INSIDE]` tracker node.
+
+> **Deprecated:** the old single `🏢 External Orgs` Settings DB (id `36d83e67e2e7807792b4f1f381f12800`) + its `external_org_db_sync` sub-sync were retired 2026-06-02 when the member-DB fan-out + Hierarchy writes were rebuilt. `EXTERNAL_ORGS_DB_ID` is now dead config; the Settings DB page can be archived in Notion (nothing reads it).
 
 ## Org Chart DB
 
@@ -160,6 +164,7 @@ member's pages are processed. One row per active team member.
 | Active | checkbox | `true` = polled by registry; `false` removes the member from the run without deleting the row |
 | Meeting Notes DB | url | Member's personal Meeting Notes DB. Required — rows without a URL are skipped |
 | **Auto-extract Tasks** | checkbox | **`true`** = run the full transcript pipeline (correct → extract → classify). **`false`** = literal-notes path: a single light LLM call (gpt-5-mini) on the page's notes content, using the Notion-hosted prompt at `LITERAL_NOTES_EXTRACTION_PROMPT_PAGE_ID` that instructs the model to keep titles verbatim and split assignees into internal/external. The same classifier as the transcript path resolves category/parent/`assignee_id` afterwards. Defaults to `true` when the column is missing or unset. |
+| Default Mirror Visibility | select | `Private` / `Shared` (optional). The member's Meeting Mirrors default for meetings left untagged by the per-meeting `Confidential` column. Blank/unset ⇒ `Shared` (mirror as before); `Private` holds back blank meetings. Read into `MeetingDB.default_mirror_visibility`. See [docs/meeting-mirrors.md](meeting-mirrors.md) |
 | Role | rich_text | Free-text role used by the transcript pipeline for speaker identification |
 | Department | select | Used by the transcript pipeline |
 | Seniority | select | Used by the transcript pipeline |
