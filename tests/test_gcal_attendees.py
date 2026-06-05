@@ -151,3 +151,67 @@ class TestFlattenAttendees:
         result = _flatten_attendees(event)
         emails = [r["email"] for r in result]
         assert sorted(emails) == ["a@x.com", "b@x.com"]
+
+
+class TestTimeWindowRfc3339:
+    """Regression: date-only Notion dates must yield offset-bearing timeMin/timeMax.
+
+    Google's Calendar API rejects naive RFC3339 timestamps with 400 Bad
+    Request — every date-only meeting silently lost its GCal lookup until
+    2026-06-04.
+    """
+
+    def test_date_only_meeting_date_gets_utc_offset(self):
+        captured: dict = {}
+
+        class FakeEvents:
+            def list(self, **kwargs):
+                captured.update(kwargs)
+
+                class _Exec:
+                    def execute(self_inner):
+                        return {"items": []}
+
+                return _Exec()
+
+        class FakeService:
+            def events(self):
+                return FakeEvents()
+
+        with patch.object(
+            gcal_attendees, "_build_calendar_service", return_value=FakeService(),
+        ):
+            result = gcal_attendees.get_gcal_attendees(
+                "LP X update", "2026-05-08", "santiago@kiboventures.com",
+            )
+        assert result == []
+        # Both bounds must carry a timezone offset (naive → Google 400).
+        assert captured["timeMin"].endswith("+00:00")
+        assert captured["timeMax"].endswith("+00:00")
+
+    def test_datetime_meeting_date_keeps_original_offset(self):
+        captured: dict = {}
+
+        class FakeEvents:
+            def list(self, **kwargs):
+                captured.update(kwargs)
+
+                class _Exec:
+                    def execute(self_inner):
+                        return {"items": []}
+
+                return _Exec()
+
+        class FakeService:
+            def events(self):
+                return FakeEvents()
+
+        with patch.object(
+            gcal_attendees, "_build_calendar_service", return_value=FakeService(),
+        ):
+            gcal_attendees.get_gcal_attendees(
+                "LP X update", "2026-05-08T10:00:00.000+02:00",
+                "santiago@kiboventures.com",
+            )
+        assert captured["timeMin"].endswith("+02:00")
+        assert captured["timeMax"].endswith("+02:00")

@@ -10,7 +10,7 @@ Notion `POST /v1/pages` with `template: {type: "template_id", template_id: <sour
 
 ## Routing config (Notion-driven, no redeploy)
 
-`Topic Mirror Routes` DB under Nzyme Home with columns `Match Property` (select: Meeting type / Detail / External Org), `Match Value` (text), `Target DB` (url), `Active` (checkbox). One row per topic→DB mapping. The pipeline reloads the table once per cron tick. See `docs/notion-schema.md` for the full property list.
+`Meeting Rules` DB (was: Topic Mirror Routes) under Nzyme Home with columns `Match Property` (select: Macro Work Block / Detail / External Org), `Match Value` (text), `Action` (select: Mirror to DB / Fire Affinity LP Funnel (no transcript) / Fire Affinity LP Funnel (with transcript) — the mirror consumes `Mirror to DB` rows only), `Target DB` (url), `Active` (checkbox). One row per rule. The pipeline reloads the table once per cron tick. See `docs/notion-schema.md` for the full property list.
 
 ## Confidentiality gate (opt-out)
 

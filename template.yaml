@@ -187,9 +187,10 @@ Parameters:
     Description: |
       Notion DB ID for the Meeting Rules registry (was: Topic Mirror Routes).
       Each row maps a tag (Match Property + Match Value) to an Action:
-      'Mirror to DB' (clone meeting into target DB) or 'Fire Affinity LP Funnel'
-      (drive Fundraising branch). Required when TopicMirrorEnabled = true or
-      FundraisingBranchEnabled = true.
+      'Mirror to DB' (clone meeting into target DB) or 'Fire Affinity LP Funnel
+      (no transcript)' / '... (with transcript)' (drive Fundraising branch,
+      optionally appending the raw transcript to the Affinity note). Required
+      when TopicMirrorEnabled = true or FundraisingBranchEnabled = true.
   HierarchyDbId:
     Type: String
     Default: ''

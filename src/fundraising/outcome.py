@@ -24,3 +24,6 @@ class FundraisingOutcome:
     status: FundraisingStatus
     detail: str = ""
     summary: str | None = None
+    # Affinity opportunity ids the note was posted to (POSTED only) —
+    # recorded into the Supabase claim row for audit/debug.
+    opportunity_ids: list[int] | None = None

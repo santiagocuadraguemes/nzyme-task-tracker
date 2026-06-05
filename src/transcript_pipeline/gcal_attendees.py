@@ -22,7 +22,7 @@ import json
 import logging
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from google.oauth2 import service_account
@@ -200,6 +200,11 @@ def get_gcal_attendees(
     cleaned_title = strip_title_datetime(meeting_title)
     search_q = _search_query(cleaned_title)
     notion_dt = datetime.fromisoformat(meeting_date)
+    if notion_dt.tzinfo is None:
+        # Date-only Notion dates ("2026-05-08") parse naive; Google requires
+        # an RFC3339 offset on timeMin/timeMax (naive → 400 Bad Request).
+        # UTC is fine — the ±12h window absorbs the Madrid offset.
+        notion_dt = notion_dt.replace(tzinfo=timezone.utc)
     time_min = (notion_dt - timedelta(hours=12)).isoformat()
     time_max = (notion_dt + timedelta(hours=12)).isoformat()
 

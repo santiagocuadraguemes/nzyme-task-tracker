@@ -39,33 +39,44 @@ def _credentials() -> tuple[str, str]:
 
 
 def upsert_meetings(rows: list[dict[str, Any]]) -> None:
-    """POST rows to `meeting_transcripts` with on_conflict=page_id."""
+    """POST rows to `meeting_transcripts` with on_conflict=page_id.
+
+    Rows may omit columns to leave them untouched on merge (e.g.
+    ``attendee_emails`` is popped when resolution didn't run, so an upsert
+    never NULLs out previously stored emails). PostgREST requires uniform
+    keys within one POST, so rows are grouped by key shape and sent in one
+    request per shape.
+    """
     if not rows:
         return
     url, key = _credentials()
     endpoint = (
         f"{url.rstrip('/')}/rest/v1/meeting_transcripts?on_conflict=page_id"
     )
-    body = json.dumps(rows, ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(
-        endpoint,
-        data=body,
-        method="POST",
-        headers={
-            "apikey": key,
-            "Authorization": f"Bearer {key}",
-            "Content-Type": "application/json",
-            "Prefer": "resolution=merge-duplicates,return=minimal",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            resp.read()
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode("utf-8", errors="replace")
-        raise RuntimeError(
-            f"Supabase upsert failed ({e.code}): {detail}",
-        ) from e
+    groups: dict[frozenset[str], list[dict[str, Any]]] = {}
+    for row in rows:
+        groups.setdefault(frozenset(row), []).append(row)
+    for group in groups.values():
+        body = json.dumps(group, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(
+            endpoint,
+            data=body,
+            method="POST",
+            headers={
+                "apikey": key,
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json",
+                "Prefer": "resolution=merge-duplicates,return=minimal",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                resp.read()
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", errors="replace")
+            raise RuntimeError(
+                f"Supabase upsert failed ({e.code}): {detail}",
+            ) from e
 
 
 def fetch_max_last_edited(db_ids: list[str]) -> dict[str, str]:

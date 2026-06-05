@@ -13,8 +13,11 @@ consumer filters the matched list by ``action`` and runs its own
 operation:
 
   - ``Mirror to DB`` (default) → consumed by ``src.topic_mirror``.
-  - ``Fire Affinity LP Funnel`` → consumed by the Fundraising branch in
-    ``src.pipeline``.
+  - ``Fire Affinity LP Funnel (no transcript)`` / ``Fire Affinity LP Funnel
+    (with transcript)`` → consumed by the Fundraising branch in
+    ``src.pipeline``. The variant decides whether the raw meeting transcript
+    is appended to the Affinity note. The pre-rename tag ``Fire Affinity LP
+    Funnel`` is normalized to the no-transcript variant on load.
 """
 from __future__ import annotations
 
@@ -38,9 +41,21 @@ _VALID_MATCH_PROPERTIES = frozenset({MATCH_MACRO_WORK_BLOCK, MATCH_DETAIL, MATCH
 # Action cell default to ACTION_MIRROR_TO_DB (back-compat for rows that
 # pre-date the schema change).
 ACTION_MIRROR_TO_DB = "Mirror to DB"
-ACTION_AFFINITY_LP_FUNNEL = "Fire Affinity LP Funnel"
+ACTION_AFFINITY_LP_FUNNEL = "Fire Affinity LP Funnel (no transcript)"
+ACTION_AFFINITY_LP_FUNNEL_TRANSCRIPT = "Fire Affinity LP Funnel (with transcript)"
 
-_VALID_ACTIONS = frozenset({ACTION_MIRROR_TO_DB, ACTION_AFFINITY_LP_FUNNEL})
+# Both Affinity variants fire the Fundraising branch; the transcript one also
+# appends the raw meeting transcript to the posted note.
+AFFINITY_LP_ACTIONS = frozenset(
+    {ACTION_AFFINITY_LP_FUNNEL, ACTION_AFFINITY_LP_FUNNEL_TRANSCRIPT}
+)
+
+# Pre-rename tag (before the no/with-transcript split, 2026-06-03).
+# Normalized to the no-transcript variant on load so a row that was never
+# re-tagged in Notion keeps firing.
+_LEGACY_AFFINITY_ACTION = "Fire Affinity LP Funnel"
+
+_VALID_ACTIONS = frozenset({ACTION_MIRROR_TO_DB}) | AFFINITY_LP_ACTIONS
 
 # A Notion page/DB ID is 32 hex characters; URLs may have dashes or trailing
 # query strings. Pull the last 32-char hex run from the URL.
@@ -124,6 +139,8 @@ def load_routes(client: NotionClientWrapper, db_id: str) -> list[Route]:
         # for rows that pre-date the `Action` column.
         action_sel = props.get("Action", {}).get("select") or {}
         action = action_sel.get("name", "") or ACTION_MIRROR_TO_DB
+        if action == _LEGACY_AFFINITY_ACTION:
+            action = ACTION_AFFINITY_LP_FUNNEL
         if action not in _VALID_ACTIONS:
             logger.info(
                 "Meeting Rules row %s skipped: Action %r not in %s",
@@ -194,7 +211,9 @@ def match_routes(routes: list[Route], page_properties: dict[str, Any]) -> list[R
 
 __all__ = [
     "ACTION_AFFINITY_LP_FUNNEL",
+    "ACTION_AFFINITY_LP_FUNNEL_TRANSCRIPT",
     "ACTION_MIRROR_TO_DB",
+    "AFFINITY_LP_ACTIONS",
     "MATCH_DETAIL",
     "MATCH_EXTERNAL_ORG",
     "MATCH_MACRO_WORK_BLOCK",

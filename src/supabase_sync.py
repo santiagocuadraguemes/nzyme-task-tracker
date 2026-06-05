@@ -54,8 +54,14 @@ def _sync_db(
     db: MeetingDB,
     client: NotionClientWrapper,
     since: str | None,
+    *,
+    config=None,
 ) -> int:
-    """Sync one DB; return number of rows upserted."""
+    """Sync one DB; return number of rows upserted.
+
+    When ``config`` is provided, GCal attendee resolution runs for every
+    extracted page (`attendee_emails`) — the mirror is the complete record.
+    """
     try:
         pages = _query_pages_since(client, db.db_id, since)
     except Exception:
@@ -78,7 +84,15 @@ def _sync_db(
     written = 0
     for page in pages:
         try:
-            row = extract_row(page, db, client)
+            row = extract_row(
+                page, db, client,
+                config=config,
+                resolve_attendees=config is not None,
+            )
+            # Never downgrade: a None here (resolution off / GCal failure /
+            # no emails found) must not NULL out previously stored emails.
+            if row.get("attendee_emails") is None:
+                row.pop("attendee_emails", None)
         except Exception:
             logger.exception(
                 "Failed to extract row for page %s — skipping",
@@ -109,7 +123,11 @@ def _sync_db(
     return written
 
 
-def sync_incremental(client: NotionClientWrapper, registry: list[MeetingDB]) -> int:
+def sync_incremental(
+    client: NotionClientWrapper,
+    registry: list[MeetingDB],
+    config=None,
+) -> int:
     """For each DB, pull pages edited since our checkpoint and upsert."""
     db_ids = [db.db_id for db in registry]
     try:
@@ -123,7 +141,7 @@ def sync_incremental(client: NotionClientWrapper, registry: list[MeetingDB]) -> 
 
     total = 0
     for db in registry:
-        total += _sync_db(db, client, checkpoints.get(db.db_id))
+        total += _sync_db(db, client, checkpoints.get(db.db_id), config=config)
     return total
 
 
@@ -131,6 +149,7 @@ def sync_full(
     client: NotionClientWrapper,
     registry: list[MeetingDB],
     lookback_days: int = 14,
+    config=None,
 ) -> int:
     """Re-sync every page modified in the last `lookback_days`, all DBs."""
     cutoff = (
@@ -140,17 +159,20 @@ def sync_full(
 
     total = 0
     for db in registry:
-        total += _sync_db(db, client, cutoff)
+        total += _sync_db(db, client, cutoff, config=config)
     return total
 
 
 def run_incremental(config, client: NotionClientWrapper) -> int:
     """CLI/Lambda entry — discover registry and run incremental sync."""
-    registry = load_registry(config, client)
+    # include_inactive: the mirror covers EVERY member DB, not just active
+    # members — fundraising meetings live in inactive partners' DBs and the
+    # standalone fundraising consumer reads its candidates from the mirror.
+    registry = load_registry(config, client, include_inactive=True)
     if not registry:
         logger.warning("No Meeting Notes DBs in registry; nothing to sync.")
         return 0
-    return sync_incremental(client, registry)
+    return sync_incremental(client, registry, config=config)
 
 
 def run_full(
@@ -159,8 +181,8 @@ def run_full(
     lookback_days: int = 14,
 ) -> int:
     """CLI/Lambda entry — discover registry and run full safety-net sweep."""
-    registry = load_registry(config, client)
+    registry = load_registry(config, client, include_inactive=True)
     if not registry:
         logger.warning("No Meeting Notes DBs in registry; nothing to sync.")
         return 0
-    return sync_full(client, registry, lookback_days=lookback_days)
+    return sync_full(client, registry, lookback_days=lookback_days, config=config)

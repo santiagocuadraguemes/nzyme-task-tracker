@@ -580,22 +580,35 @@ def _mirror_meeting_to_affinity(
     page_id: str,
     short_id: str,
     db_owner: str,
+    db_id: str | None = None,
 ) -> None:
     """Fundraising → Affinity LP Funnel branch.
 
     Fires for EVERY meeting whose ``Macro Work Block`` matches an active
-    "Fire Affinity LP Funnel" rule in the Meeting Rules DB — like template
-    injection, a tagged meeting is mirrored to its LP regardless of the
-    extraction outcome. It does NOT matter whether the page yielded tasks,
-    has any notes, or whether the owner opted into AI extraction: a
-    fundraising meeting happening is itself worth logging against the LP, and
-    when neither user notes nor the AI Summary are populated the note degrades
-    to title + Notion backlink. The only downstream gate is whether an
-    attendee maps to an LP opportunity (``Skipped: no LP match`` otherwise).
+    "Fire Affinity LP Funnel (no transcript)" / "... (with transcript)" rule
+    in the Meeting Rules DB — like template injection, a tagged meeting is
+    mirrored to its LP regardless of the extraction outcome. It does NOT
+    matter whether the page yielded tasks, has any notes, or whether the
+    owner opted into AI extraction: a fundraising meeting happening is itself
+    worth logging against the LP, and when neither user notes nor the AI
+    Summary are populated the note degrades to title + Notion backlink. The
+    only downstream gate is whether an attendee maps to an LP opportunity
+    (``Skipped: no LP match`` otherwise).
+
+    The rule's Action variant decides whether the raw, full-length meeting
+    transcript is appended to the note (below the Summary). If a page somehow
+    matches both variants, with-transcript wins.
 
     Soft-fails — never raises. Emits a single structured ``fundraising
     outcome:`` line so skips and failures stay grep-able in CloudWatch.
     Skipped wholesale in dry-run.
+
+    Idempotency: before posting, the branch must win an atomic claim on
+    ``public.affinity_meeting_posts`` in Supabase (``fundraising.state``) —
+    one row per page, keyed by the canonical page UUID. Already-posted /
+    skipped pages are never re-posted on pipeline retries; failed and stale
+    claims are re-claimed. Fail-closed: Supabase unreachable → no post this
+    run.
     """
     if (
         config.dry_run
@@ -605,17 +618,23 @@ def _mirror_meeting_to_affinity(
         return
 
     fundraising_rule_label = ""
+    include_transcript = False
     try:
         from src.topic_mirror.route_registry import (
-            ACTION_AFFINITY_LP_FUNNEL, load_routes, match_routes,
+            ACTION_AFFINITY_LP_FUNNEL_TRANSCRIPT, AFFINITY_LP_ACTIONS,
+            load_routes, match_routes,
         )
         all_rules = load_routes(client, config.meeting_rules_db_id)
         affinity_rules = [
-            r for r in all_rules if r.action == ACTION_AFFINITY_LP_FUNNEL
+            r for r in all_rules if r.action in AFFINITY_LP_ACTIONS
         ]
         matched_affinity = match_routes(affinity_rules, page.get("properties", {}))
         if matched_affinity:
             fundraising_rule_label = matched_affinity[0].label
+            include_transcript = any(
+                r.action == ACTION_AFFINITY_LP_FUNNEL_TRANSCRIPT
+                for r in matched_affinity
+            )
     except Exception:
         logger.exception(
             "page=%s failed to evaluate Affinity LP Funnel rules — "
@@ -624,8 +643,8 @@ def _mirror_meeting_to_affinity(
         )
 
     logger.info(
-        "page=%s db_owner=%s fundraising decision: rule=%r → %s",
-        short_id, db_owner, fundraising_rule_label or None,
+        "page=%s db_owner=%s fundraising decision: rule=%r transcript=%s → %s",
+        short_id, db_owner, fundraising_rule_label or None, include_transcript,
         "RUN" if fundraising_rule_label else "SKIP",
     )
     if not fundraising_rule_label:
@@ -633,6 +652,30 @@ def _mirror_meeting_to_affinity(
 
     from src.fundraising import write_to_affinity
     from src.fundraising.outcome import FundraisingStatus
+    from src.fundraising.state import claim_post, record_outcome
+    from src.meeting_row import _hex_to_uuid
+
+    # Claim-before-post (Supabase). The canonical UUID form joins
+    # meeting_transcripts.page_id; write_to_affinity keeps the hex id.
+    post_page_id = _hex_to_uuid(page_id)
+    if post_page_id is None:
+        logger.error(
+            "page=%s could not normalize page_id to uuid — skipping Affinity post",
+            short_id,
+        )
+        return
+    if not claim_post(
+        page_id=post_page_id,
+        db_id=_hex_to_uuid(db_id),
+        owner_name="" if db_owner == "?" else db_owner,
+        include_transcript=include_transcript,
+    ):
+        logger.info(
+            "page=%s db_owner=%s fundraising branch: claim not acquired "
+            "(terminal / in-flight / fail-closed) — skipping",
+            short_id, db_owner,
+        )
+        return
 
     logger.info(
         "page=%s db_owner=%s fundraising branch: starting LP match",
@@ -651,6 +694,14 @@ def _mirror_meeting_to_affinity(
         notion_client=client,
         # db_owner is "?" when unresolved — don't render "Owner: ?".
         meeting_owner="" if db_owner == "?" else db_owner,
+        include_transcript=include_transcript,
+    )
+    # Write the terminal status back to the Supabase claim row. Soft-fails
+    # internally (row stays 'claimed'; stale-retry may duplicate — accepted).
+    record_outcome(
+        page_id=post_page_id,
+        outcome=outcome,
+        opportunity_ids=outcome.opportunity_ids,
     )
     # Single structured line per run — log level reflects severity so
     # CloudWatch filters can split actionable failures from expected skips.
@@ -1621,7 +1672,7 @@ def run_sync_for_page(
             _mirror_meeting_to_affinity(
                 config=config, client=client, page=page, metadata=metadata,
                 attendees=attendees, page_id=page_id, short_id=short_id,
-                db_owner=db_owner,
+                db_owner=db_owner, db_id=page_db_id,
             )
 
             # Inactive members are polled ONLY for the fundraising branch

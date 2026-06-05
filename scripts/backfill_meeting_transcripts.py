@@ -39,6 +39,7 @@ from notion_client import Client as NotionClient
 # Allow running as `python scripts/backfill_...py` from the repo root.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from src.config import load_config
 from src.meeting_db_registry import discover_meeting_dbs, MeetingDB
 from src.meeting_row import extract_row
 from src.notion_client_wrapper import NotionClientWrapper
@@ -65,6 +66,9 @@ def main() -> int:
                         help="Print rows as JSON; do not write to Supabase")
     parser.add_argument("--db", type=str, default=None,
                         help="Only process this Meeting Notes DB ID")
+    parser.add_argument("--skip-attendees", action="store_true",
+                        help="Skip GCal attendee resolution (faster re-runs; "
+                             "attendee_emails left as-is in Supabase)")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -106,10 +110,32 @@ def main() -> int:
     if args.db:
         registry = [MeetingDB(db_id=args.db, owner_name="?", owner_email="")]
     else:
-        registry = discover_meeting_dbs(client, org_chart_db_id)
+        # include_inactive: the mirror covers everyone — fundraising meetings
+        # live in inactive partners' DBs (same as the Lambda sync).
+        registry = discover_meeting_dbs(
+            client, org_chart_db_id, include_inactive=True,
+        )
 
     if not registry:
         sys.exit("No Meeting Notes DBs to process.")
+
+    # GCal attendee resolution for EVERY meeting — the mirror is the
+    # complete record. Best-effort: a partial .env (missing
+    # pipeline-required vars) just disables resolution instead of aborting
+    # the backfill.
+    config = None
+    if not args.skip_attendees:
+        try:
+            config = load_config()
+        except Exception as exc:
+            logger.warning(
+                "Could not load full config (%s) — attendee_emails will "
+                "stay as-is this run", exc,
+            )
+    if config is not None:
+        logger.info("Attendee resolution: ON (gcal_enabled=%s)", config.gcal_enabled)
+    else:
+        logger.info("Attendee resolution: OFF — existing attendee_emails preserved")
 
     total_pages = 0
     total_written = 0
@@ -123,18 +149,27 @@ def main() -> int:
             if args.limit is not None and total_pages >= args.limit:
                 break
             try:
-                row = extract_row(page, db, client)
+                row = extract_row(
+                    page, db, client,
+                    config=config,
+                    resolve_attendees=config is not None,
+                )
             except Exception as exc:
                 logger.exception("Skipping page %s: %s", page.get("id"), exc)
                 continue
+            # Never downgrade: a None here (resolution off / GCal failure /
+            # no emails found) must not NULL out previously stored emails.
+            if row.get("attendee_emails") is None:
+                row.pop("attendee_emails", None)
             total_pages += 1
             db_pages += 1
             t = len(row.get("transcript") or "")
             s = len(row.get("notion_summary") or "")
             n = len(row.get("notes") or "")
+            a = len(row.get("attendee_emails") or [])
             logger.info(
-                "  %s  '%s'  t=%d s=%d n=%d",
-                row["page_id"], (row["title"][:50] or "?"), t, s, n,
+                "  %s  '%s'  t=%d s=%d n=%d a=%d",
+                row["page_id"], (row["title"][:50] or "?"), t, s, n, a,
             )
             if args.dry_run:
                 print(json.dumps(row, ensure_ascii=False))

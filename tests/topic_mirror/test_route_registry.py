@@ -5,7 +5,9 @@ from unittest.mock import MagicMock
 
 from src.topic_mirror.route_registry import (
     ACTION_AFFINITY_LP_FUNNEL,
+    ACTION_AFFINITY_LP_FUNNEL_TRANSCRIPT,
     ACTION_MIRROR_TO_DB,
+    AFFINITY_LP_ACTIONS,
     MATCH_DETAIL,
     MATCH_MACRO_WORK_BLOCK,
     load_routes,
@@ -104,6 +106,41 @@ class TestLoadRoutes:
         assert routes[0].match_property == MATCH_MACRO_WORK_BLOCK
         assert routes[0].match_value == "LPs & Fundraising"
         assert routes[0].label == "Affinity LP Funnel"
+
+    def test_affinity_with_transcript_action_loads(self):
+        client = MagicMock()
+        client.query_database.return_value = {
+            "results": [
+                _make_row(
+                    match_property=MATCH_MACRO_WORK_BLOCK,
+                    match_value="LPs & Fundraising",
+                    target_db_url="",
+                    action=ACTION_AFFINITY_LP_FUNNEL_TRANSCRIPT,
+                ),
+            ],
+        }
+        routes = load_routes(client, "db-rules")
+        assert len(routes) == 1
+        assert routes[0].action == ACTION_AFFINITY_LP_FUNNEL_TRANSCRIPT
+        assert routes[0].action in AFFINITY_LP_ACTIONS
+
+    def test_legacy_affinity_action_normalizes_to_no_transcript(self):
+        """A row still carrying the pre-rename 'Fire Affinity LP Funnel' tag
+        keeps firing, as the no-transcript variant."""
+        client = MagicMock()
+        client.query_database.return_value = {
+            "results": [
+                _make_row(
+                    match_property=MATCH_MACRO_WORK_BLOCK,
+                    match_value="LPs & Fundraising",
+                    target_db_url="",
+                    action="Fire Affinity LP Funnel",
+                ),
+            ],
+        }
+        routes = load_routes(client, "db-rules")
+        assert len(routes) == 1
+        assert routes[0].action == ACTION_AFFINITY_LP_FUNNEL
 
     def test_unknown_action_skips_row(self):
         client = MagicMock()

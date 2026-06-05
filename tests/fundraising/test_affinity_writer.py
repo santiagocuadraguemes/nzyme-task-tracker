@@ -113,10 +113,40 @@ class TestNoteBody:
         )
         assert client.create_note.call_args.kwargs["person_ids"] == [11, 22, 33]
 
+    def test_transcript_section_rendered_below_summary_above_link(self, client):
+        post_meeting_note_to_lps(
+            client,
+            opportunity_entity_ids=[701],
+            meeting_title="LP X",
+            manual_notes="Real notes.",
+            ai_summary="The summary.",
+            notion_url="https://www.notion.so/kibo/page-abc",
+            transcript="Speaker 1: hello\nSpeaker 2: hi there",
+        )
+        content = client.create_note.call_args.kwargs["content"]
+        assert "Full transcript" in content
+        assert "Speaker 1: hello" in content
+        # Below the summary, above the Notion backlink.
+        assert content.index("The summary.") < content.index("Full transcript")
+        assert content.index("Full transcript") < content.index("page-abc")
+
+    def test_transcript_section_omitted_when_empty(self, client):
+        post_meeting_note_to_lps(
+            client,
+            opportunity_entity_ids=[701],
+            meeting_title="LP X",
+            manual_notes="Real notes.",
+            ai_summary="The summary.",
+            notion_url="",
+            transcript="",
+        )
+        content = client.create_note.call_args.kwargs["content"]
+        assert "Full transcript" not in content
+
 
 class TestPostMeetingNoteToLps:
     def test_all_lps_receive_the_note(self, client):
-        posted, failed = post_meeting_note_to_lps(
+        posted, failed, degraded = post_meeting_note_to_lps(
             client,
             opportunity_entity_ids=[701, 702, 703],
             meeting_title="LP X & Y intro",
@@ -127,6 +157,7 @@ class TestPostMeetingNoteToLps:
         )
         assert posted == [701, 702, 703]
         assert failed == []
+        assert degraded == []
         assert client.create_note.call_count == 3
         # Each call attaches to exactly ONE opportunity (separate notes), and
         # carries the same person attachments.
@@ -145,7 +176,7 @@ class TestPostMeetingNoteToLps:
             return {"id": opp + 9000}
 
         client.create_note.side_effect = flaky
-        posted, failed = post_meeting_note_to_lps(
+        posted, failed, degraded = post_meeting_note_to_lps(
             client,
             opportunity_entity_ids=[701, 702, 703],
             meeting_title="t",
@@ -155,13 +186,14 @@ class TestPostMeetingNoteToLps:
         )
         assert seen == [701, 702, 703]
         assert posted == [701, 703]
+        assert degraded == []
         assert len(failed) == 1
         opp_id, err_msg = failed[0]
         assert opp_id == 702
         assert "boom" in err_msg
 
     def test_empty_list_is_a_noop(self, client):
-        posted, failed = post_meeting_note_to_lps(
+        posted, failed, degraded = post_meeting_note_to_lps(
             client,
             opportunity_entity_ids=[],
             meeting_title="t",
@@ -171,4 +203,107 @@ class TestPostMeetingNoteToLps:
         )
         assert posted == []
         assert failed == []
+        assert degraded == []
         client.create_note.assert_not_called()
+
+
+class TestTranscriptFallback:
+    """Failing handler: a rejected full-transcript note retries once without
+    the transcript before counting as failed."""
+
+    def test_rejected_transcript_note_falls_back_without_transcript(self, client):
+        calls: list[str] = []
+
+        def reject_large(content, content_type, opportunity_ids, **kwargs):
+            calls.append(content)
+            if "Speaker 1" in content:
+                raise AffinityError(413, "payload too large", "/notes")
+            return {"id": 9000}
+
+        client.create_note.side_effect = reject_large
+        posted, failed, degraded = post_meeting_note_to_lps(
+            client,
+            opportunity_entity_ids=[701],
+            meeting_title="LP X",
+            manual_notes="Real notes.",
+            ai_summary="The summary.",
+            notion_url="https://notion.so/p",
+            transcript="Speaker 1: hello\n" * 1000,
+        )
+        assert posted == [701]
+        assert degraded == [701]
+        assert failed == []
+        assert len(calls) == 2
+        # Fallback keeps the other sections + the backlink, swaps the
+        # transcript body for an omission notice.
+        fallback = calls[1]
+        assert "Speaker 1" not in fallback
+        assert "Full transcript" in fallback
+        assert "omitted" in fallback
+        assert "Real notes." in fallback
+        assert "The summary." in fallback
+        assert "notion.so/p" in fallback
+
+    def test_fallback_failure_records_both_errors(self, client):
+        client.create_note.side_effect = AffinityError(500, "boom", "/notes")
+        posted, failed, degraded = post_meeting_note_to_lps(
+            client,
+            opportunity_entity_ids=[701],
+            meeting_title="LP X",
+            manual_notes="",
+            ai_summary="",
+            notion_url="",
+            transcript="Speaker 1: hello",
+        )
+        assert posted == []
+        assert degraded == []
+        assert len(failed) == 1
+        opp_id, err_msg = failed[0]
+        assert opp_id == 701
+        assert "with transcript" in err_msg
+        assert "without transcript" in err_msg
+        # Exactly two attempts: full, then fallback.
+        assert client.create_note.call_count == 2
+
+    def test_no_fallback_attempt_without_transcript(self, client):
+        """A failure on a transcript-less note keeps the single-attempt
+        behavior — nothing to strip, so retrying the same body is pointless."""
+        client.create_note.side_effect = AffinityError(500, "boom", "/notes")
+        posted, failed, degraded = post_meeting_note_to_lps(
+            client,
+            opportunity_entity_ids=[701],
+            meeting_title="LP X",
+            manual_notes="",
+            ai_summary="",
+            notion_url="",
+        )
+        assert posted == []
+        assert degraded == []
+        assert len(failed) == 1
+        assert client.create_note.call_count == 1
+
+    def test_fallback_is_per_opportunity(self, client):
+        """One opportunity rejecting the large note doesn't degrade the
+        others' posts."""
+
+        def reject_701_full(content, content_type, opportunity_ids, **kwargs):
+            if opportunity_ids[0] == 701 and "Speaker 1" in content:
+                raise AffinityError(413, "too large", "/notes")
+            return {"id": 9000}
+
+        client.create_note.side_effect = reject_701_full
+        posted, failed, degraded = post_meeting_note_to_lps(
+            client,
+            opportunity_entity_ids=[701, 702],
+            meeting_title="LP X",
+            manual_notes="",
+            ai_summary="",
+            notion_url="",
+            transcript="Speaker 1: hello",
+        )
+        assert posted == [701, 702]
+        assert degraded == [701]
+        assert failed == []
+        # 701 got the fallback body; 702 still got the full transcript.
+        last_call_content = client.create_note.call_args_list[-1].kwargs["content"]
+        assert "Speaker 1" in last_call_content

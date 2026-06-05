@@ -1,11 +1,15 @@
 """Fundraising → Affinity branch.
 
-Entry point called by ``src.pipeline.run_sync_for_page`` after the primary
-Team Task Tracker write succeeds, and by the cron retry sweep in
-``lambda_handler`` for pages stuck at ``Failed: API error`` or ``Pending``.
+Entry point called by ``_mirror_meeting_to_affinity`` in ``src.pipeline``,
+which runs BEFORE the extraction branches so a rule-matching meeting is
+mirrored to its LP regardless of the extraction outcome. The caller first
+acquires an atomic claim on ``public.affinity_meeting_posts`` in Supabase
+(``src.fundraising.state``) — the idempotency layer; there is no Notion
+status property and no cron retry sweep.
 
-Returns a structured ``FundraisingOutcome`` so the caller can map onto the
-``Affinity Status`` Notion property — silent skips are no longer possible.
+Returns a structured ``FundraisingOutcome`` that the caller records back to
+the Supabase claim row and logs as one ``fundraising outcome:`` line —
+silent skips are not possible.
 """
 from __future__ import annotations
 
@@ -27,10 +31,12 @@ from src.meeting_row import _fetch_block_summary
 from src.notion_client_wrapper import NotionClientWrapper
 from src.transcript_pipeline.fetch_transcript import (
     extract_ai_summary,
+    extract_transcript_block_id,
     fetch_notes_text,
     find_meeting_notes_block,
     strip_title_datetime,
 )
+from src.utils.blocks_to_text import blocks_to_text
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +71,24 @@ def _strip_template_scaffolding(raw_notes: str) -> str:
     return "\n".join(kept).strip()
 
 
+def _fetch_transcript_text(
+    mn_block: dict[str, Any], client: NotionClientWrapper,
+) -> str:
+    """Raw Notion transcript from the meeting_notes block, or "" when
+    transcription was paused/disabled or the recording isn't processed yet.
+
+    This is the RAW transcript, not the Gemini-corrected one — the fundraising
+    branch runs before extraction (and for members/pages extraction never
+    touches), so the corrected text may not exist. Raw keeps the branch
+    zero-LLM-cost and universally available.
+    """
+    transcript_block_id = extract_transcript_block_id(mn_block)
+    if not transcript_block_id:
+        return ""
+    transcript_blocks = client.get_block_children(transcript_block_id)
+    return blocks_to_text(transcript_blocks, client) if transcript_blocks else ""
+
+
 def _compose_outcome_summary(*, manual_notes: str, ai_summary: str) -> str:
     """Plain-text rendering of the note's two sections, for the
     ``FundraisingOutcome.summary`` debug field (not what Affinity receives)."""
@@ -85,12 +109,18 @@ def write_to_affinity(
     page_id: str,
     notion_client: NotionClientWrapper,
     meeting_owner: str = "",
+    include_transcript: bool = False,
 ) -> FundraisingOutcome:
     """Main fundraising-branch entry point.
 
     Never raises — every failure mode maps to a ``FundraisingOutcome``. The
     caller (the pipeline) logs a structured ``fundraising outcome:`` line so
     the result is grep-able in CloudWatch.
+
+    ``include_transcript`` (the "Fire Affinity LP Funnel (with transcript)"
+    rule variant) appends the raw, full-length meeting transcript to the note
+    below the Summary. Degrades silently to the no-transcript note when the
+    page has no transcript (transcription paused / recording not processed).
     """
     if not config.affinity_api_key:
         logger.error("AFFINITY_API_KEY unset — fundraising branch cannot run")
@@ -151,17 +181,28 @@ def write_to_affinity(
 
             user_notes = ""
             block_summary = ""
+            transcript_text = ""
             try:
                 blocks = notion_client.get_block_children(page_id)
                 mn_block = find_meeting_notes_block(blocks)
                 if mn_block is not None:
                     user_notes = fetch_notes_text(mn_block, notion_client)
                     block_summary = _fetch_block_summary(mn_block, notion_client)
+                    if include_transcript:
+                        transcript_text = _fetch_transcript_text(
+                            mn_block, notion_client,
+                        )
             except Exception:  # noqa: BLE001
                 logger.exception(
-                    "Failed to fetch notes/summary from page %s — continuing "
-                    "with whatever was retrieved",
+                    "Failed to fetch notes/summary/transcript from page %s — "
+                    "continuing with whatever was retrieved",
                     page_id,
+                )
+            if include_transcript and not transcript_text:
+                logger.info(
+                    "page=%s rule asked for transcript but none is available "
+                    "— posting the note without it",
+                    page_id[:16],
                 )
 
             ai_summary = block_summary or extract_ai_summary(page)
@@ -176,7 +217,7 @@ def write_to_affinity(
             # the LP opportunity.
             person_ids = resolve_attendee_person_ids(client, attendees)
 
-            posted, failed = post_meeting_note_to_lps(
+            posted, failed, degraded = post_meeting_note_to_lps(
                 client,
                 opportunity_entity_ids=opportunity_ids,
                 meeting_title=strip_title_datetime(metadata.get("title", "")),
@@ -185,6 +226,7 @@ def write_to_affinity(
                 notion_url=notion_url,
                 person_ids=person_ids,
                 meeting_owner=meeting_owner,
+                transcript=transcript_text,
             )
 
             if failed:
@@ -197,12 +239,25 @@ def write_to_affinity(
                     status=FundraisingStatus.FAILED_API_ERROR,
                     detail=detail,
                     summary=summary_text,
+                    # Partial-success audit: a retry re-posts to ALL matched
+                    # opportunities, so these may receive a duplicate note.
+                    opportunity_ids=list(posted) or None,
                 )
 
+            detail = f"posted_to=[{','.join(map(str, posted))}]"
+            if degraded:
+                # Fallback notes (transcript omitted) still count as posted —
+                # a batch retry would only duplicate them — but the outcome
+                # line flags which opportunities got the degraded note.
+                detail += (
+                    f" transcript_omitted_for="
+                    f"[{','.join(map(str, degraded))}]"
+                )
             return FundraisingOutcome(
                 status=FundraisingStatus.POSTED,
-                detail=f"posted_to=[{','.join(map(str, posted))}]",
+                detail=detail,
                 summary=summary_text,
+                opportunity_ids=list(posted) or None,
             )
     except AffinityError as e:
         return FundraisingOutcome(

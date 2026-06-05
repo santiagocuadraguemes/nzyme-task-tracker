@@ -173,7 +173,9 @@ class SyncConfig(BaseModel):
             "Notion DB ID for the Meeting Rules registry (was: Topic Mirror "
             "Routes). Each row maps a tag (Match Property + Match Value) to "
             "an Action: 'Mirror to DB' (clone the meeting into a target DB) "
-            "or 'Fire Affinity LP Funnel' (drive the Fundraising branch). "
+            "or 'Fire Affinity LP Funnel (no transcript)' / '... (with "
+            "transcript)' (drive the Fundraising branch, optionally appending "
+            "the raw meeting transcript to the Affinity note). "
             "Required when topic_mirror_enabled is True or "
             "fundraising_branch_enabled is True."
         ),

@@ -23,7 +23,7 @@ Workspace: `kiboventures.notion.so`
 | Meeting | title | Meeting title text |
 | Date | date | ISO date; informational only — **not used for processing logic** (created_time and last_edited_time are used instead) |
 | Attendees | people | List of Notion users (returns id + name) |
-| Meeting type | select | Standup, 1:1, Deal review, Portfolio review, Team sync, External, Other, **Fundraising** (Fundraising triggers the Affinity LP Funnel branch when `FUNDRAISING_BRANCH_ENABLED=true`) |
+| Macro Work Block | select | **Renamed from `Meeting type`.** Options flow from Hierarchy DB Tier 0 via `macro_block_sync` (plus pass-through legacy options like Standup, 1:1). `Investor Relations & Fundraising` triggers the Affinity LP Funnel branch (via the Meeting Rules DB) when `FUNDRAISING_BRANCH_ENABLED=true` |
 | Confidential | select | `Confidential` / `Shareable` (optional). Meeting Mirrors confidentiality gate: `Confidential` = never mirror, `Shareable` = always mirror, blank = use owner's `Default Mirror Visibility` (Org Chart). Not auto-synced. See [docs/meeting-mirrors.md](meeting-mirrors.md) |
 | Processed | checkbox | `false` = unprocessed, `true` = AI extraction completed |
 | Template Injected | checkbox | `false` = template not yet injected, `true` = template applied |
@@ -180,24 +180,25 @@ redeploy needed in either direction.
 every page in the run, ignoring the per-row Org Chart flag. Useful for
 debugging without touching Notion.
 
-## Topic Mirror Routes DB
+## Meeting Rules DB (was: Topic Mirror Routes)
 
-`TOPIC_MIRROR_ROUTES_DB_ID` (`daa0ef7ac48c40bea82163ebe84ade6b`). Routes are
-config-as-data — each active row maps a meeting tag to a target DB. The
+`MEETING_RULES_DB_ID` (`daa0ef7ac48c40bea82163ebe84ade6b`). Rules are
+config-as-data — each active row maps a meeting tag to an Action. The
 pipeline reloads them once per cron tick.
 
 | Property | Type | Notes |
 |----------|------|-------|
 | Route | title | Human-readable label (e.g. `Detail = AI & Tech`). Only used in logs. |
-| Match Property | select | One of: `Meeting type`, `Detail`, `External Org`. Rows with any other value are skipped at load. |
+| Match Property | select | One of: `Macro Work Block`, `Detail`, `External Org` (the page property name, not the DB display label). Rows with any other value are skipped at load. |
 | Match Value | rich_text | Exact tag value to match (e.g. `AI & Tech`). Matching is case-sensitive — keep this in sync with the Meeting Notes DB select/multi-select option name. |
-| Target DB | url | Notion DB URL. The pipeline extracts the 32-char hex id from the last URL segment, stripping any `?v=…` view suffix. |
-| Active | checkbox | `false` (or unset) hides the route from the pipeline without losing the row. |
+| Action | select | What the rule fires: `Mirror to DB` (default when unset — back-compat for pre-Action rows), `Fire Affinity LP Funnel (no transcript)`, or `Fire Affinity LP Funnel (with transcript)`. The transcript variant appends the raw meeting transcript to the Affinity note. The pre-split tag `Fire Affinity LP Funnel` is normalized to the no-transcript variant at load. Unknown values skip the row. |
+| Target DB | url | Notion DB URL — required only for `Mirror to DB` (ignored by the Affinity actions). The pipeline extracts the 32-char hex id from the last URL segment, stripping any `?v=…` view suffix. |
+| Active | checkbox | `false` (or unset) hides the rule from the pipeline without losing the row. |
 | Notes | rich_text | Optional free-form description. |
 
 **Add a new topic mirror in two steps:**
 1. Create the destination DB under the Meeting Mirrors parent page with the agreed property convention (Meeting, Date, Meeting type, Detail, External Org, AI Summary, Tasks, Files & media, Contributors, Primary Source URL). Anything missing on the destination is silently dropped at clone time.
-2. Add a row to Topic Mirror Routes: pick `Match Property`, type the `Match Value`, paste the new DB's URL, check `Active`.
+2. Add a row to Meeting Rules: pick `Match Property`, type the `Match Value`, set `Action = Mirror to DB`, paste the new DB's URL, check `Active`.
 
 ## Meeting Mirror DBs
 

@@ -300,6 +300,132 @@ def test_failed_when_one_of_many_lps_fails(
     assert "901" in outcome.detail
 
 
+@patch("src.fundraising.blocks_to_text")
+@patch("src.fundraising.fetch_notes_text")
+@patch("src.fundraising.find_meeting_notes_block")
+@patch("src.fundraising.AffinityClient")
+def test_transcript_included_when_rule_asks_for_it(
+    mock_client_cls, mock_find_mn, mock_fetch_notes, mock_blocks_to_text,
+):
+    """include_transcript=True → raw transcript fetched from the
+    meeting_notes block and rendered in the posted note."""
+    config = _make_config()
+    fake = MagicMock()
+    fake.list_list_entries.return_value = [
+        {"id": 1001, "entity": {"id": 900}},
+    ]
+    fake.search_persons.return_value = [{"id": 1, "opportunity_ids": [900]}]
+    mock_client_cls.return_value.__enter__.return_value = fake
+    mock_find_mn.return_value = {
+        "meeting_notes": {"children": {"transcript_block_id": "tb-1"}},
+    }
+    mock_fetch_notes.return_value = ""
+    mock_blocks_to_text.return_value = "Speaker 1: hola\nSpeaker 2: buenas"
+
+    nc = _make_notion_client(ai_summary="Resumen.")
+    nc.get_block_children.side_effect = (
+        lambda bid: [{"type": "paragraph"}] if bid == "tb-1" else []
+    )
+
+    outcome = write_to_affinity(
+        config=config,
+        tasks=[],
+        metadata=_basic_metadata(),
+        attendees=[{"id": "lp@example.com", "name": "LP"}],
+        notion_url="https://notion.so/p",
+        page_id="page-1",
+        notion_client=nc,
+        include_transcript=True,
+    )
+    assert outcome.status == FundraisingStatus.POSTED
+    content = fake.create_note.call_args.kwargs["content"]
+    assert "Full transcript" in content
+    assert "Speaker 1: hola" in content
+
+
+@patch("src.fundraising.fetch_notes_text")
+@patch("src.fundraising.find_meeting_notes_block")
+@patch("src.fundraising.AffinityClient")
+def test_transcript_rule_degrades_when_page_has_no_transcript(
+    mock_client_cls, mock_find_mn, mock_fetch_notes,
+):
+    """Transcription paused/not processed → note still posts, without the
+    Full transcript section."""
+    config = _make_config()
+    fake = MagicMock()
+    fake.list_list_entries.return_value = [
+        {"id": 1001, "entity": {"id": 900}},
+    ]
+    fake.search_persons.return_value = [{"id": 1, "opportunity_ids": [900]}]
+    mock_client_cls.return_value.__enter__.return_value = fake
+    # No transcript_block_id key → transcription disabled.
+    mock_find_mn.return_value = {"meeting_notes": {"children": {}}}
+    mock_fetch_notes.return_value = ""
+
+    outcome = write_to_affinity(
+        config=config,
+        tasks=[],
+        metadata=_basic_metadata(),
+        attendees=[{"id": "lp@example.com", "name": "LP"}],
+        notion_url="https://notion.so/p",
+        page_id="page-1",
+        notion_client=_make_notion_client(ai_summary="x"),
+        include_transcript=True,
+    )
+    assert outcome.status == FundraisingStatus.POSTED
+    content = fake.create_note.call_args.kwargs["content"]
+    assert "Full transcript" not in content
+
+
+@patch("src.fundraising.blocks_to_text")
+@patch("src.fundraising.fetch_notes_text")
+@patch("src.fundraising.find_meeting_notes_block")
+@patch("src.fundraising.AffinityClient")
+def test_rejected_transcript_note_posts_fallback_and_flags_detail(
+    mock_client_cls, mock_find_mn, mock_fetch_notes, mock_blocks_to_text,
+):
+    """Failing handler end-to-end: full note rejected → fallback posted →
+    outcome=Posted with transcript_omitted_for in the detail."""
+    config = _make_config()
+    fake = MagicMock()
+    fake.list_list_entries.return_value = [
+        {"id": 1001, "entity": {"id": 900}},
+    ]
+    fake.search_persons.return_value = [{"id": 1, "opportunity_ids": [900]}]
+
+    def reject_full(content, content_type, opportunity_ids, **kwargs):
+        if "Speaker 1" in content:
+            raise AffinityError(413, "payload too large", "/notes")
+        return {"id": 9000}
+
+    fake.create_note.side_effect = reject_full
+    mock_client_cls.return_value.__enter__.return_value = fake
+    mock_find_mn.return_value = {
+        "meeting_notes": {"children": {"transcript_block_id": "tb-1"}},
+    }
+    mock_fetch_notes.return_value = ""
+    mock_blocks_to_text.return_value = "Speaker 1: hola"
+
+    nc = _make_notion_client(ai_summary="x")
+    nc.get_block_children.side_effect = (
+        lambda bid: [{"type": "paragraph"}] if bid == "tb-1" else []
+    )
+
+    outcome = write_to_affinity(
+        config=config,
+        tasks=[],
+        metadata=_basic_metadata(),
+        attendees=[{"id": "lp@example.com", "name": "LP"}],
+        notion_url="https://notion.so/p",
+        page_id="page-1",
+        notion_client=nc,
+        include_transcript=True,
+    )
+    assert outcome.status == FundraisingStatus.POSTED
+    assert "transcript_omitted_for=[900]" in outcome.detail
+    assert fake.create_note.call_count == 2
+
+
 @patch("src.fundraising.AffinityClient")
 def test_unexpected_exception_caught_as_failed(mock_client_cls):
     """A generic exception (e.g. JSON decode) shouldn't escape."""

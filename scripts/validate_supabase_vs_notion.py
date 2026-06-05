@@ -38,7 +38,7 @@ def supabase_get(page_ids: list[str], url: str, key: str) -> dict[str, dict]:
         return {}
     in_list = "(" + ",".join(f'"{p}"' for p in page_ids) + ")"
     qs = urllib.parse.urlencode({
-        "select": "page_id,title,meeting_type,detail,meeting_start,"
+        "select": "page_id,title,macro_work_block,detail,meeting_start,"
                   "transcript,notes,notion_summary,task_page_ids,"
                   "owner_name,last_edited_time",
         "page_id": f"in.{in_list}",
@@ -88,7 +88,7 @@ def _norm_ts(v):
 def compare(supa: dict, fresh: dict) -> tuple[bool, list[str]]:
     """Return (matches, diff_messages)."""
     diffs: list[str] = []
-    for field in ("title", "meeting_type", "detail"):
+    for field in ("title", "macro_work_block", "detail"):
         a = supa.get(field)
         b = fresh.get(field)
         if str(a) != str(b):
