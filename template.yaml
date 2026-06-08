@@ -223,9 +223,18 @@ Parameters:
     Default: ''
     Description: Supabase service-role key (RLS bypass — required because the meeting_transcripts table is RLS-enabled with no policies).
     NoEcho: true
+  AlertEmail:
+    Type: String
+    Default: ''
+    Description: |
+      Email for CloudWatch alarm notifications (Supabase sync staleness).
+      The mirror is the read surface for the consumer Lambdas, so a stalled
+      sync starves everything downstream. Empty = alarm exists but notifies
+      nobody (visible in the CloudWatch console only).
 
 Conditions:
   GCalEnabled: !Not [!Equals [!Ref GoogleServiceAccountSecretArn, '']]
+  AlertsEnabled: !Not [!Equals [!Ref AlertEmail, '']]
 
 Resources:
   NzymeFunction:
@@ -303,6 +312,52 @@ Resources:
     Type: AWS::Serverless::HttpApi
     Properties:
       StageName: $default
+
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Condition: AlertsEnabled
+    Properties:
+      TopicName: nzyme-task-tracker-alerts
+      Subscription:
+        - Endpoint: !Ref AlertEmail
+          Protocol: email
+
+  # Counts the per-tick "supabase sync heartbeat:" INFO line emitted by
+  # _handle_supabase_sync (webhook/lambda_handler.py). The exact wording is
+  # load-bearing — keep filter and log line in sync.
+  SupabaseSyncHeartbeatFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: /aws/lambda/nzyme-task-tracker
+      FilterPattern: '{ $.message = "supabase sync heartbeat*" }'
+      MetricTransformations:
+        - MetricNamespace: Nzyme
+          MetricName: SupabaseSyncHeartbeat
+          MetricValue: '1'
+          Unit: Count
+
+  # The sync runs every 5 min → expect ≥3 heartbeats per 15-min period.
+  # Three consecutive periods with <1 heartbeat (= 45 min of silence:
+  # crashes, throttles, a disabled rule, or a paused Lambda) → ALARM.
+  # TreatMissingData breaching catches total silence, not just errors.
+  SupabaseSyncStalledAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: nzyme-supabase-sync-stalled
+      AlarmDescription: >-
+        No "supabase sync heartbeat" log line for 45 minutes. The Notion →
+        Supabase mirror feeds the consumer Lambdas (fundraising/extraction/
+        topic-mirror); a stalled sync silently starves them all.
+      Namespace: Nzyme
+      MetricName: SupabaseSyncHeartbeat
+      Statistic: Sum
+      Period: 900
+      EvaluationPeriods: 3
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions: !If [AlertsEnabled, [!Ref AlertTopic], []]
+      OKActions: !If [AlertsEnabled, [!Ref AlertTopic], []]
 
 Outputs:
   WebhookUrl:

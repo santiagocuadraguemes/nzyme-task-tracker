@@ -163,6 +163,25 @@ def sync_full(
     return total
 
 
+def _sync_config_mirrors(config, client: NotionClientWrapper) -> None:
+    """Org Chart + Meeting Rules → Supabase canonical mirrors.
+
+    Ride every sync tick (both DBs are tiny — one Notion query each) so a
+    member/rule edit lands in Supabase within ≤5 min. Each sub-sync fails
+    independently: a config-mirror error must never block the meeting sync.
+    """
+    from src.config_mirror_sync import sync_meeting_rules, sync_org_chart
+
+    try:
+        sync_org_chart(client, config.org_chart_db_id)
+    except Exception:
+        logger.exception("org_chart mirror sync failed — continuing")
+    try:
+        sync_meeting_rules(client, config.meeting_rules_db_id)
+    except Exception:
+        logger.exception("meeting_rules mirror sync failed — continuing")
+
+
 def run_incremental(config, client: NotionClientWrapper) -> int:
     """CLI/Lambda entry — discover registry and run incremental sync."""
     # include_inactive: the mirror covers EVERY member DB, not just active
@@ -172,7 +191,9 @@ def run_incremental(config, client: NotionClientWrapper) -> int:
     if not registry:
         logger.warning("No Meeting Notes DBs in registry; nothing to sync.")
         return 0
-    return sync_incremental(client, registry, config=config)
+    upserted = sync_incremental(client, registry, config=config)
+    _sync_config_mirrors(config, client)
+    return upserted
 
 
 def run_full(
@@ -185,4 +206,6 @@ def run_full(
     if not registry:
         logger.warning("No Meeting Notes DBs in registry; nothing to sync.")
         return 0
-    return sync_full(client, registry, lookback_days=lookback_days, config=config)
+    upserted = sync_full(client, registry, lookback_days=lookback_days, config=config)
+    _sync_config_mirrors(config, client)
+    return upserted

@@ -366,6 +366,38 @@ During meetings, pages are updated thousands of times. Instead of debouncing tho
 
 See `template.yaml` (SAM) for infrastructure definition and `scripts/deploy.sh` for deployment.
 
+## Supabase mirror (Notion → Supabase, the consumer read surface)
+
+The 5-min `SupabaseSync` cron (`src/supabase_sync.py`, weekly 14-day safety
+sweep on Sundays) maintains Supabase (Neo project) as the **single read
+surface for consumer Lambdas** — the target architecture is ONE Notion
+poller (this sync) feeding independent pull-model consumers (the standalone
+`nzyme-fundraising` Lambda today; extraction and topic-mirror next), each
+with its own claim table and readiness rule. Three mirror tables:
+
+| Table | Source | Writer | Notes |
+|---|---|---|---|
+| `public.meeting_transcripts` | every page in every member Meeting Notes DB (**including inactive members**) | `extract_row` (`src/meeting_row.py`) via `sync_incremental` | Full member-DB replica: title/date, `macro_work_block`, `detail`, `external_org`, `confidential`, `created_by_id/_name`, notes, in-block AI summary, raw transcript, GCal-resolved `attendee_emails` ("never downgrade" — NULL never overwrites stored emails), `task_page_ids`. Deliberately NOT mirrored: `Processed`/`Processing`/`Template Injected` (pipeline state — consumers use Supabase claim tables instead, e.g. `affinity_meeting_posts`). Rows upsert on every Notion edit and **converge over ticks** — a row existing says nothing about the meeting being over; consumers gate on `meeting_end` + `last_edited_time`. |
+| `public.org_chart_rows` | every Org Chart row (incl. inactive, incl. members with no Meeting Notes DB) | `sync_org_chart` (`src/config_mirror_sync.py`) | Member config: email, `meeting_notes_db_id`, `active`, `auto_extract_tasks`, `default_mirror_visibility` (raw; NULL = consumer applies the "Shared" default), `seniority`. |
+| `public.meeting_rule_rows` | every parseable Meeting Rules row (**incl. inactive** — `active` is a column so consumers can tell "off" from "deleted") | `sync_meeting_rules` (`src/config_mirror_sync.py`) | Same validation as `route_registry.load_routes` minus the Active filter; the legacy pre-split Affinity action tag is normalized at mirror time. |
+
+All three use `notion_page_id`/`page_id` as stable identity; the config
+mirrors tombstone vanished rows via `deleted_at` (revived automatically if
+the row reappears). Config-mirror failures are isolated — they never block
+the meeting sync.
+
+**Heartbeat alarm:** `_handle_supabase_sync` logs `supabase sync heartbeat:`
+at INFO on every tick (wording is load-bearing — a CloudWatch metric filter
+in `template.yaml` counts it). The `nzyme-supabase-sync-stalled` alarm fires
+after 45 min without a heartbeat (`TreatMissingData: breaching` catches
+total silence, not just errors); set `ALERT_EMAIL` in `.env` to get SNS
+email notifications.
+
+**Backfill / manual run:**
+`python scripts/sync_meeting_transcripts.py --full --days N` re-syncs every
+page edited in the last N days through the same code path (and runs the
+config mirrors at the end).
+
 ## Key Design Principles
 
 1. **Dynamic schema** — Playbook, hierarchy, and category options are all fetched from Notion at runtime. Schema changes in Notion require no code changes.

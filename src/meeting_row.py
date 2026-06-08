@@ -216,6 +216,11 @@ def extract_row(
             page, title, start, mn_block, client, config,
         )
 
+    # Page creator (partial user object — `name` is usually absent on page
+    # payloads; stored when present). Consumers: extraction assignee fallback
+    # + GCal delegated-user resolution.
+    created_by = page.get("created_by") or {}
+
     return {
         "page_id": page_id,
         "db_id": db_id,
@@ -228,6 +233,10 @@ def extract_row(
         "last_edited_time": page.get("last_edited_time"),
         "macro_work_block": macro_work_block,
         "detail": _select_or_multi_value(props.get("Detail")),
+        "external_org": _select_value(props.get("External Org")),
+        "confidential": _select_value(props.get("Confidential")),
+        "created_by_id": _hex_to_uuid(created_by.get("id")),
+        "created_by_name": created_by.get("name") or None,
         "transcript": transcript or None,
         "notes": notes_text or None,
         "notion_summary": summary_text or None,

@@ -29,6 +29,32 @@ def test_run_full_includes_inactive_members(mock_load, mock_sync):
     assert mock_load.call_args.kwargs["include_inactive"] is True
 
 
+@patch("src.supabase_sync.sync_incremental", return_value=3)
+@patch("src.supabase_sync.load_registry")
+def test_config_mirrors_ride_the_incremental_tick(mock_load, mock_sync):
+    mock_load.return_value = [_DB]
+    config = MagicMock()
+    with patch("src.config_mirror_sync.sync_org_chart") as org, \
+         patch("src.config_mirror_sync.sync_meeting_rules") as rules:
+        assert run_incremental(config, MagicMock()) == 3
+    org.assert_called_once()
+    rules.assert_called_once()
+
+
+@patch("src.supabase_sync.sync_incremental", return_value=3)
+@patch("src.supabase_sync.load_registry")
+def test_config_mirror_failure_never_blocks_meeting_sync(mock_load, mock_sync):
+    mock_load.return_value = [_DB]
+    with patch(
+        "src.config_mirror_sync.sync_org_chart",
+        side_effect=RuntimeError("supabase down"),
+    ), patch("src.config_mirror_sync.sync_meeting_rules") as rules:
+        # Org chart mirror explodes → logged, rules mirror still runs,
+        # the meeting-sync result is still returned.
+        assert run_incremental(MagicMock(), MagicMock()) == 3
+    rules.assert_called_once()
+
+
 @patch("src.supabase_sync.upsert_meetings")
 @patch("src.supabase_sync.extract_row")
 @patch("src.supabase_sync._query_pages_since", return_value=[{"id": "a" * 32}])

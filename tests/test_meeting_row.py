@@ -22,6 +22,9 @@ def _page(
     macro_work_block: str | None = None,
     legacy_meeting_type: str | None = None,
     detail_multi: list[str] | None = None,
+    external_org: str | None = None,
+    confidential: str | None = None,
+    created_by: dict | None = None,
 ) -> dict:
     props: dict = {
         "Meeting": {
@@ -46,11 +49,19 @@ def _page(
             "type": "multi_select",
             "multi_select": [{"name": n} for n in detail_multi],
         }
+    if external_org is not None:
+        props["External Org"] = {
+            "type": "select", "select": {"name": external_org},
+        }
+    if confidential is not None:
+        props["Confidential"] = {
+            "type": "select", "select": {"name": confidential},
+        }
     return {
         "id": PAGE_HEX,
         "created_time": "2026-06-04T08:00:00.000Z",
         "last_edited_time": "2026-06-04T11:00:00.000Z",
-        "created_by": {"id": "u1"},
+        "created_by": created_by if created_by is not None else {"id": "u1"},
         "properties": props,
     }
 
@@ -81,6 +92,53 @@ def test_detail_multi_select_joined():
 def test_detail_absent_is_none():
     row = extract_row(_page(), _OWNER, _client())
     assert row["detail"] is None
+
+
+# ---------------------------------------------------------------------------
+# Full member-DB replica columns (2026-06-05 — multi-Lambda architecture)
+# ---------------------------------------------------------------------------
+
+
+def test_external_org_and_confidential_mirrored():
+    row = extract_row(
+        _page(external_org="Citadel", confidential="Shareable"),
+        _OWNER, _client(),
+    )
+    assert row["external_org"] == "Citadel"
+    assert row["confidential"] == "Shareable"
+
+
+def test_external_org_and_confidential_absent_are_none():
+    row = extract_row(_page(), _OWNER, _client())
+    assert row["external_org"] is None
+    assert row["confidential"] is None
+
+
+def test_created_by_mirrored_and_uuid_normalized():
+    row = extract_row(
+        _page(created_by={"id": "c" * 32, "name": "Santiago"}),
+        _OWNER, _client(),
+    )
+    assert row["created_by_id"] == (
+        "cccccccc-cccc-cccc-cccc-cccccccccccc"
+    )
+    assert row["created_by_name"] == "Santiago"
+
+
+def test_created_by_partial_user_without_name():
+    # Page payloads carry partial user objects ({"id": ...} only) — the
+    # name column stays NULL rather than "".
+    row = extract_row(
+        _page(created_by={"id": "d" * 32}), _OWNER, _client(),
+    )
+    assert row["created_by_id"] is not None
+    assert row["created_by_name"] is None
+
+
+def test_created_by_missing_entirely_is_safe():
+    row = extract_row(_page(created_by={}), _OWNER, _client())
+    assert row["created_by_id"] is None
+    assert row["created_by_name"] is None
 
 
 @patch("src.pipeline._resolve_attendees")

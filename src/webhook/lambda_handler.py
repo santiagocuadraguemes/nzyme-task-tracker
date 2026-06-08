@@ -183,10 +183,12 @@ def _handle_supabase_sync(event, context):
     config, client = _init()
     try:
         upserted = supabase_run_incremental(config, client)
-        if upserted:
-            logger.info("supabase sync: upserted=%d", upserted)
-        else:
-            logger.debug("supabase sync: no changes")
+        # Heartbeat — ALWAYS at INFO, even on no-change ticks. The mirror is
+        # the read surface for the consumer Lambdas (fundraising/extraction/
+        # topic-mirror), so a CloudWatch metric filter counts this exact line
+        # and the SupabaseSyncStalled alarm fires when it goes missing.
+        # Don't reword without updating the filter in template.yaml.
+        logger.info("supabase sync heartbeat: upserted=%d", upserted)
         return {"statusCode": 200, "body": json.dumps({"upserted": upserted})}
     except Exception:
         logger.exception("Supabase incremental sync failed")
