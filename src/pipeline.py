@@ -570,152 +570,6 @@ def _should_auto_extract(
     return owner.auto_extract_tasks
 
 
-def _mirror_meeting_to_affinity(
-    *,
-    config: SyncConfig,
-    client: NotionClientWrapper,
-    page: dict,
-    metadata: dict,
-    attendees: list[dict[str, str]],
-    page_id: str,
-    short_id: str,
-    db_owner: str,
-    db_id: str | None = None,
-) -> None:
-    """Fundraising → Affinity LP Funnel branch.
-
-    Fires for EVERY meeting whose ``Macro Work Block`` matches an active
-    "Fire Affinity LP Funnel (no transcript)" / "... (with transcript)" rule
-    in the Meeting Rules DB — like template injection, a tagged meeting is
-    mirrored to its LP regardless of the extraction outcome. It does NOT
-    matter whether the page yielded tasks, has any notes, or whether the
-    owner opted into AI extraction: a fundraising meeting happening is itself
-    worth logging against the LP, and when neither user notes nor the AI
-    Summary are populated the note degrades to title + Notion backlink. The
-    only downstream gate is whether an attendee maps to an LP opportunity
-    (``Skipped: no LP match`` otherwise).
-
-    The rule's Action variant decides whether the raw, full-length meeting
-    transcript is appended to the note (below the Summary). If a page somehow
-    matches both variants, with-transcript wins.
-
-    Soft-fails — never raises. Emits a single structured ``fundraising
-    outcome:`` line so skips and failures stay grep-able in CloudWatch.
-    Skipped wholesale in dry-run.
-
-    Idempotency: before posting, the branch must win an atomic claim on
-    ``public.affinity_meeting_posts`` in Supabase (``fundraising.state``) —
-    one row per page, keyed by the canonical page UUID. Already-posted /
-    skipped pages are never re-posted on pipeline retries; failed and stale
-    claims are re-claimed. Fail-closed: Supabase unreachable → no post this
-    run.
-    """
-    if (
-        config.dry_run
-        or not config.fundraising_branch_enabled
-        or not config.meeting_rules_db_id
-    ):
-        return
-
-    fundraising_rule_label = ""
-    include_transcript = False
-    try:
-        from src.topic_mirror.route_registry import (
-            ACTION_AFFINITY_LP_FUNNEL_TRANSCRIPT, AFFINITY_LP_ACTIONS,
-            load_routes, match_routes,
-        )
-        all_rules = load_routes(client, config.meeting_rules_db_id)
-        affinity_rules = [
-            r for r in all_rules if r.action in AFFINITY_LP_ACTIONS
-        ]
-        matched_affinity = match_routes(affinity_rules, page.get("properties", {}))
-        if matched_affinity:
-            fundraising_rule_label = matched_affinity[0].label
-            include_transcript = any(
-                r.action == ACTION_AFFINITY_LP_FUNNEL_TRANSCRIPT
-                for r in matched_affinity
-            )
-    except Exception:
-        logger.exception(
-            "page=%s failed to evaluate Affinity LP Funnel rules — "
-            "treating as no match",
-            short_id,
-        )
-
-    logger.info(
-        "page=%s db_owner=%s fundraising decision: rule=%r transcript=%s → %s",
-        short_id, db_owner, fundraising_rule_label or None, include_transcript,
-        "RUN" if fundraising_rule_label else "SKIP",
-    )
-    if not fundraising_rule_label:
-        return
-
-    from src.fundraising import write_to_affinity
-    from src.fundraising.outcome import FundraisingStatus
-    from src.fundraising.state import claim_post, record_outcome
-    from src.meeting_row import _hex_to_uuid
-
-    # Claim-before-post (Supabase). The canonical UUID form joins
-    # meeting_transcripts.page_id; write_to_affinity keeps the hex id.
-    post_page_id = _hex_to_uuid(page_id)
-    if post_page_id is None:
-        logger.error(
-            "page=%s could not normalize page_id to uuid — skipping Affinity post",
-            short_id,
-        )
-        return
-    if not claim_post(
-        page_id=post_page_id,
-        db_id=_hex_to_uuid(db_id),
-        owner_name="" if db_owner == "?" else db_owner,
-        include_transcript=include_transcript,
-    ):
-        logger.info(
-            "page=%s db_owner=%s fundraising branch: claim not acquired "
-            "(terminal / in-flight / fail-closed) — skipping",
-            short_id, db_owner,
-        )
-        return
-
-    logger.info(
-        "page=%s db_owner=%s fundraising branch: starting LP match",
-        short_id, db_owner,
-    )
-    # ``tasks`` is vestigial in ``write_to_affinity`` (the note body comes
-    # from user notes + AI Summary, not tasks), so an empty list is correct
-    # here — this runs before extraction.
-    outcome = write_to_affinity(
-        config=config,
-        tasks=[],
-        metadata=metadata,
-        attendees=attendees,
-        notion_url=metadata.get("url", ""),
-        page_id=page_id,
-        notion_client=client,
-        # db_owner is "?" when unresolved — don't render "Owner: ?".
-        meeting_owner="" if db_owner == "?" else db_owner,
-        include_transcript=include_transcript,
-    )
-    # Write the terminal status back to the Supabase claim row. Soft-fails
-    # internally (row stays 'claimed'; stale-retry may duplicate — accepted).
-    record_outcome(
-        page_id=post_page_id,
-        outcome=outcome,
-        opportunity_ids=outcome.opportunity_ids,
-    )
-    # Single structured line per run — log level reflects severity so
-    # CloudWatch filters can split actionable failures from expected skips.
-    log_fn = (
-        logger.error
-        if outcome.status == FundraisingStatus.FAILED_API_ERROR
-        else logger.info
-    )
-    log_fn(
-        "fundraising outcome: page=%s db_owner=%s status=%s detail=%s",
-        short_id, db_owner, outcome.status.value, outcome.detail,
-    )
-
-
 def _process_via_literal_notes(
     client: NotionClientWrapper,
     config: SyncConfig,
@@ -1304,9 +1158,9 @@ def _load_sync_context(
 def run_sync(config: SyncConfig, client: NotionClientWrapper) -> None:
     """Execute one full sync cycle across every discovered Meeting Notes DB.
 
-    Includes inactive members so the fundraising → Affinity branch can run on
-    their meetings too; inactive members' pages skip task extraction (handled
-    in ``process_meeting``).
+    Includes inactive members so their meetings still reach the Supabase
+    mirror; inactive members' pages skip task extraction (handled in
+    ``process_meeting`` via the owner.active gate).
     """
     try:
         registry = load_registry(config, client, include_inactive=True)
@@ -1601,7 +1455,7 @@ def run_sync_for_page(
     if owner is None:
         try:
             # include_inactive so inactive members resolve with the correct
-            # active flag — the fundraising-only gate below depends on it.
+            # active flag — the extraction-skip gate below depends on it.
             registry = load_registry(config, client, include_inactive=True)
             owner = find_owner_for_page(registry, page_db_id)
         except Exception:
@@ -1654,35 +1508,20 @@ def run_sync_for_page(
             )
 
             # Resolve attendees once, up front. Both extraction paths need
-            # them, and the Fundraising → Affinity branch (which fires on
-            # every tagged meeting, immediately below) needs them too —
-            # including on the no-transcript / no-tasks paths that return
-            # early before any extraction runs.
+            # them.
             attendees: list[dict[str, str]] = _resolve_attendees(
                 client, config, mn_block, page, metadata,
                 org_chart_rows=ctx.get("org_chart_rows"),
             )
 
-            # Fundraising → Affinity LP Funnel. Runs for EVERY meeting whose
-            # Macro Work Block matches an active rule, regardless of what the
-            # extraction below decides — like template injection, a tagged
-            # meeting is mirrored to its LP whether or not it yields tasks,
-            # has notes, or opted into AI extraction. Placed before the
-            # extraction branches so their early returns can't skip it.
-            _mirror_meeting_to_affinity(
-                config=config, client=client, page=page, metadata=metadata,
-                attendees=attendees, page_id=page_id, short_id=short_id,
-                db_owner=db_owner, db_id=page_db_id,
-            )
-
-            # Inactive members are polled ONLY for the fundraising branch
-            # (which just ran). They're not on the Team Task Tracker, so skip
-            # extraction, the tracker write, and the topic-mirror entirely —
-            # mark processed and stop here. (owner=None → treat as active.)
+            # Inactive members are still polled so their meetings reach the
+            # Supabase mirror, but they're not on the Team Task Tracker, so
+            # skip extraction, the tracker write, and the topic-mirror
+            # entirely — mark processed and stop here. (owner=None → treat as
+            # active.)
             if owner is not None and not owner.active:
                 logger.info(
-                    "page=%s db_owner=%s inactive member — fundraising-only, "
-                    "skipping extraction",
+                    "page=%s db_owner=%s inactive member — skipping extraction",
                     short_id, db_owner,
                 )
                 if not config.dry_run and not force:

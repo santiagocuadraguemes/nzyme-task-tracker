@@ -12,9 +12,9 @@ class SyncConfig(BaseModel):
     """Validated runtime configuration."""
 
     notion_api_token: str = Field(..., description="Notion integration token")
-    # Light calls (classifier, fundraising summary, embeddings) → OpenAI
-    openai_api_key: str = Field(..., description="OpenAI API key — used for light calls (classifier, fundraising summary, embeddings)")
-    openai_model: str = Field("gpt-5-mini", description="OpenAI model for light calls (classifier + fundraising summary)")
+    # Light calls (classifier, literal-notes extraction, embeddings) → OpenAI
+    openai_api_key: str = Field(..., description="OpenAI API key — used for light calls (classifier, literal-notes extraction, embeddings)")
+    openai_model: str = Field("gpt-5-mini", description="OpenAI model for light calls (classifier + literal-notes extraction)")
     openai_base_url: str | None = Field(None, description="Deprecated; unused by pipeline routing. Retained for backward compat.")
     # Heavy calls (transcript correction, task extraction) → Gemini via OpenAI-compatible endpoint
     gemini_api_key: str | None = Field(None, description="Google Gemini API key — used for heavy calls (transcript correction, task extraction)")
@@ -148,17 +148,6 @@ class SyncConfig(BaseModel):
         """GCal lookup is active when a credential source AND a default user are configured."""
         has_creds = bool(self.google_service_account_file or self.google_service_account_secret_arn)
         return has_creds and bool(self.gcal_delegated_user_default)
-    # Fundraising → Affinity branch (optional; opt-in via FUNDRAISING_BRANCH_ENABLED)
-    fundraising_branch_enabled: bool = Field(
-        False,
-        description="Enable Affinity sync for meetings tagged 'Meeting type = Fundraising'",
-    )
-    affinity_api_key: str | None = Field(
-        None, description="Affinity API key (HTTP basic auth, empty username)",
-    )
-    affinity_lp_funnel_list_id: int = Field(
-        168609, description="Affinity list ID for the Nzyme - LP Funnel list",
-    )
     # Meeting Mirrors feature (opt-in via TOPIC_MIRROR_ENABLED).
     # Clones tagged meetings (Macro Work Block / Detail / External Org) into
     # topic-specific Notion DBs. Routing rules live in the Meeting Rules
@@ -174,10 +163,9 @@ class SyncConfig(BaseModel):
             "Routes). Each row maps a tag (Match Property + Match Value) to "
             "an Action: 'Mirror to DB' (clone the meeting into a target DB) "
             "or 'Fire Affinity LP Funnel (no transcript)' / '... (with "
-            "transcript)' (drive the Fundraising branch, optionally appending "
-            "the raw meeting transcript to the Affinity note). "
-            "Required when topic_mirror_enabled is True or "
-            "fundraising_branch_enabled is True."
+            "transcript)' (mirrored to Supabase for the standalone fundraising "
+            "Lambda to consume). "
+            "Required when topic_mirror_enabled is True."
         ),
     )
     # Hierarchy DB (source of truth for the Macro Work Block taxonomy).
@@ -267,10 +255,6 @@ def load_config() -> SyncConfig:
             for d in os.getenv("GCAL_PROXY_DOMAINS", "").split(",")
             if d.strip()
         ),
-        fundraising_branch_enabled=os.getenv("FUNDRAISING_BRANCH_ENABLED", "false").lower()
-        in ("true", "1", "yes"),
-        affinity_api_key=os.getenv("AFFINITY_API_KEY"),
-        affinity_lp_funnel_list_id=int(os.getenv("AFFINITY_LP_FUNNEL_LIST_ID", "168609")),
         topic_mirror_enabled=os.getenv("TOPIC_MIRROR_ENABLED", "false").lower()
         in ("true", "1", "yes"),
         # Prefer the new env var; fall back to the old name for one deploy

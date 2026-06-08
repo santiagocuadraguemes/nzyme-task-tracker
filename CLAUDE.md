@@ -98,7 +98,7 @@ When working on a specific area, read the relevant doc first:
 | [docs/architecture.md](docs/architecture.md) | Pipeline orchestrator, per-member DBs, components, error handling, webhook/Lambda mode, weekly Done-task archive sweep |
 | [docs/deployment.md](docs/deployment.md) | Deploy scripts (quick vs full), SAM, pause/resume cron, manual CLI runs with per-stage model overrides + provider auto-detection |
 | [docs/transcript-pipeline.md](docs/transcript-pipeline.md) | Merged vs legacy 2-call extraction, Gemini caching + `response_schema`, deterministic transcript cleanup, shadow-diff validation, output-token harness, GCal integration, transcript CLI |
-| [docs/fundraising-affinity.md](docs/fundraising-affinity.md) | Fundraising → Affinity LP Funnel branch (note-only mode, LP matching, CloudWatch visibility) |
+| [docs/fundraising-affinity.md](docs/fundraising-affinity.md) | Fundraising → Affinity migrated to the standalone `nzyme-fundraising` Lambda (2026-06-08); this repo only maintains the mirror + claim-table contract |
 | [docs/meeting-mirrors.md](docs/meeting-mirrors.md) | Topic-mirror clones (template_id mechanism, cross-DB dedup, contributor merge, Owner resolution) |
 | [docs/notion-schema.md](docs/notion-schema.md) | DB schemas, property mappings, IDs, hierarchy structure, MCP tool reference |
 | [docs/onboarding-member-db.md](docs/onboarding-member-db.md) | Adding a new personal Meeting Notes DB: schema, Org Chart row, seeding option-ID→Supabase mappings, webhook; why option lists must start empty |

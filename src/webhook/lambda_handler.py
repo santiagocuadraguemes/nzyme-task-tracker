@@ -114,9 +114,9 @@ def _handle_extraction(event, context):
     """
     config, client = _init()
 
-    # include_inactive: poll inactive members' DBs too so the fundraising →
-    # Affinity branch runs on their meetings. Inactive members' pages skip
-    # task extraction (gated in process_meeting by owner.active).
+    # include_inactive: poll inactive members' DBs too so their meetings
+    # still reach the Supabase mirror. Inactive members' pages skip task
+    # extraction (gated in process_meeting by owner.active).
     try:
         registry = load_registry(config, client, include_inactive=True)
     except Exception:

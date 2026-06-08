@@ -43,8 +43,8 @@ class MeetingDB:
     # deploy expects every member on the literal-notes path.
     auto_extract_tasks: bool = False
     # Org Chart `Active` flag. Active members get the full pipeline; inactive
-    # members are polled only so the fundraising → Affinity branch can run on
-    # their meetings (task extraction is skipped). Always True unless the
+    # members are still polled so their meetings reach the Supabase mirror,
+    # but task extraction is skipped via this gate. Always True unless the
     # registry was loaded with `include_inactive=True`.
     active: bool = True
     # Org Chart `Default Mirror Visibility` select — the owner's preference for
@@ -80,10 +80,10 @@ def discover_meeting_dbs(
     By default only ``Active = true`` rows are returned (every result has
     ``active=True``). With ``include_inactive=True`` the Active filter is
     dropped and each row's Active flag is recorded on ``MeetingDB.active`` —
-    used by the extraction sweep so the fundraising → Affinity branch can run
-    on inactive members' meetings too (their task extraction is skipped
-    downstream). Other consumers (Supabase sync, hierarchy/detail appliers)
-    keep the default active-only behavior.
+    used by the extraction sweep so inactive members' meetings are still
+    polled (and reach the Supabase mirror); their task extraction is skipped
+    downstream via the ``active`` gate. Other consumers (Supabase sync,
+    hierarchy/detail appliers) keep the default active-only behavior.
 
     Rows missing the URL or with a URL we can't parse are skipped (logged).
     Duplicate DB URLs across rows are skipped after the first match.
@@ -223,8 +223,9 @@ def load_registry(
     configured.
 
     ``include_inactive`` is forwarded to ``discover_meeting_dbs`` — the
-    extraction sweep passes True so inactive members' meetings are polled for
-    the fundraising branch; all other consumers keep the active-only default.
+    extraction sweep passes True so inactive members' meetings are polled (and
+    reach the Supabase mirror); all other consumers keep the active-only
+    default.
     """
     if config.meeting_notes_db_id:
         # Manual single-DB runs (dev / test) keep auto_extract_tasks=True so

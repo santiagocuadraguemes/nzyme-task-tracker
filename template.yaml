@@ -38,9 +38,6 @@ Globals:
         MERGED_TRANSCRIPT_EXTRACTION_PROMPT_PAGE_ID: !Ref MergedTranscriptExtractionPromptPageId
         LITERAL_NOTES_EXTRACTION_PROMPT_PAGE_ID: !Ref LiteralNotesExtractionPromptPageId
         LOGFIRE_TOKEN: !Ref LogfireToken
-        FUNDRAISING_BRANCH_ENABLED: !Ref FundraisingBranchEnabled
-        AFFINITY_API_KEY: !Ref AffinityApiKey
-        AFFINITY_LP_FUNNEL_LIST_ID: !Ref AffinityLpFunnelListId
         TOPIC_MIRROR_ENABLED: !Ref TopicMirrorEnabled
         # Both env vars resolve to the same DB id for one deploy cycle.
         # MEETING_RULES_DB_ID is the new name; TOPIC_MIRROR_ROUTES_DB_ID is
@@ -164,19 +161,6 @@ Parameters:
     Default: ''
     Description: Logfire token for tracing LLM calls.
     NoEcho: true
-  FundraisingBranchEnabled:
-    Type: String
-    Default: 'false'
-    Description: Enable the Affinity sync for Meeting type = Fundraising.
-  AffinityApiKey:
-    Type: String
-    Default: ''
-    Description: Affinity API key (HTTP basic auth).
-    NoEcho: true
-  AffinityLpFunnelListId:
-    Type: String
-    Default: '168609'
-    Description: Affinity list ID for Nzyme - LP Funnel.
   TopicMirrorEnabled:
     Type: String
     Default: 'false'
@@ -188,9 +172,9 @@ Parameters:
       Notion DB ID for the Meeting Rules registry (was: Topic Mirror Routes).
       Each row maps a tag (Match Property + Match Value) to an Action:
       'Mirror to DB' (clone meeting into target DB) or 'Fire Affinity LP Funnel
-      (no transcript)' / '... (with transcript)' (drive Fundraising branch,
-      optionally appending the raw transcript to the Affinity note). Required
-      when TopicMirrorEnabled = true or FundraisingBranchEnabled = true.
+      (no transcript)' / '... (with transcript)' (mirrored to Supabase for the
+      standalone fundraising Lambda to consume). Required when
+      TopicMirrorEnabled = true.
   HierarchyDbId:
     Type: String
     Default: ''
