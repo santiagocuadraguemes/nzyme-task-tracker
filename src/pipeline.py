@@ -1319,77 +1319,6 @@ def run_inject_templates_for_page(
         raise
 
 
-def _run_topic_mirror(
-    *,
-    config: SyncConfig,
-    client: NotionClientWrapper,
-    page: dict,
-    metadata: dict,
-    short_id: str,
-    db_owner: str,
-    owner_default_visibility: str = "Shared",
-) -> None:
-    """Mirror a tagged meeting into its topic DB(s).
-
-    Runs on EVERY processed page — including ones that yielded no action items
-    or have no transcript — because a contributor's notes must be mirrored even
-    when their recording produced no tasks. The route registry decides which
-    (if any) mirrors apply; NO_MATCH / DISABLED outcomes stay at DEBUG so
-    untagged pages don't flood CloudWatch. Never raises (``mirror_to_topic_dbs``
-    maps every failure to a ``MirrorOutcome``).
-    """
-    if not (config.topic_mirror_enabled and not config.dry_run):
-        return
-
-    from src.topic_mirror import mirror_to_topic_dbs
-    from src.topic_mirror.outcome import MirrorStatus
-
-    # Owner identity: prefer the meeting page's Notion creator (a real user
-    # UUID, suitable for the People property); fall back to empty when
-    # created_by is missing (rare — would leave Owner unset on the mirror).
-    # db_owner is the human display name used for the contributor-label H3.
-    creator = metadata.get("created_by") or {}
-    owner_user_id = creator.get("id") or ""
-
-    mirror_outcome = mirror_to_topic_dbs(
-        config=config,
-        client=client,
-        source_page=page,
-        metadata=metadata,
-        owner_user_id=owner_user_id,
-        owner_name=db_owner,
-        owner_default_visibility=owner_default_visibility,
-    )
-    if mirror_outcome.status in (
-        MirrorStatus.FAILED, MirrorStatus.PARTIAL_FAILURE,
-    ):
-        logger.error(
-            "topic mirror outcome: page=%s owner=%s status=%s detail=%s",
-            short_id, db_owner,
-            mirror_outcome.status.value, mirror_outcome.detail,
-        )
-    elif mirror_outcome.status in (
-        MirrorStatus.POSTED, MirrorStatus.SKIPPED_CONFIDENTIAL,
-    ):
-        # SKIPPED_CONFIDENTIAL is rare (matched a rule but held back) and worth
-        # surfacing in CloudWatch — kept at INFO alongside POSTED, not in the
-        # silent NO_MATCH/DISABLED bucket below.
-        logger.info(
-            "topic mirror outcome: page=%s owner=%s status=%s detail=%s",
-            short_id, db_owner,
-            mirror_outcome.status.value, mirror_outcome.detail,
-        )
-    else:
-        # NO_MATCH / DISABLED — silent at INFO to avoid CloudWatch noise on
-        # untagged pages, but surfaced under --verbose so local diagnostic
-        # runs can confirm the branch ran.
-        logger.debug(
-            "topic mirror outcome: page=%s owner=%s status=%s detail=%s",
-            short_id, db_owner,
-            mirror_outcome.status.value, mirror_outcome.detail,
-        )
-
-
 def run_sync_for_page(
     config: SyncConfig,
     client: NotionClientWrapper,
@@ -1546,12 +1475,6 @@ def run_sync_for_page(
                         "(auto_extract_tasks=False)",
                         short_id, title[:60],
                     )
-                    # Still mirror — a contributor's notes must be copied even
-                    # when their recording yielded no action items.
-                    _run_topic_mirror(
-                        config=config, client=client, page=page,
-                        metadata=metadata, short_id=short_id, db_owner=db_owner,
-                    )
                     if not config.dry_run and not force:
                         source.mark_page_processed(page_id)
                     return 0
@@ -1594,15 +1517,6 @@ def run_sync_for_page(
                     "page=%s '%s' skipped: auto_extract_tasks=True but no transcript available",
                     short_id, title[:60],
                 )
-                # Still mirror — clone the tagged meeting's notes even without
-                # a transcript / extracted tasks.
-                _run_topic_mirror(
-                    config=config, client=client, page=page,
-                    metadata=metadata, short_id=short_id, db_owner=db_owner,
-                    owner_default_visibility=(
-                        owner.default_mirror_visibility if owner else "Shared"
-                    ),
-                )
                 if not config.dry_run:
                     source.mark_page_processed(page_id)
                 return 0
@@ -1615,15 +1529,6 @@ def run_sync_for_page(
                 created_ids = [c["id"] for c in created if c.get("id")]
                 if created_ids:
                     ctx["writer"].link_tasks_to_meeting(page_id, created_ids)
-
-            # Meeting Mirrors branch — clone tagged pages into topic DBs.
-            _run_topic_mirror(
-                config=config, client=client, page=page,
-                metadata=metadata, short_id=short_id, db_owner=db_owner,
-                owner_default_visibility=(
-                    owner.default_mirror_visibility if owner else "Shared"
-                ),
-            )
 
             if not config.dry_run and not force:
                 source.mark_page_processed(page_id)

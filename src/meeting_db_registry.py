@@ -50,8 +50,9 @@ class MeetingDB:
     # Org Chart `Default Mirror Visibility` select — the owner's preference for
     # meetings left untagged by the `Confidential` column. "Shared" (mirror, as
     # before) or "Private" (hold back). Defaults to "Shared" when the column is
-    # missing/unset and for the single-DB dev override, so the Meeting Mirrors
-    # confidentiality gate is back-compat. See src/topic_mirror/confidentiality.py.
+    # missing/unset and for the single-DB dev override. Synced to Supabase
+    # (org_chart_rows.default_mirror_visibility) by config_mirror_sync and used
+    # by the standalone nzyme-meeting-mirrors confidentiality gate.
     default_mirror_visibility: str = "Shared"
 
 

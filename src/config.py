@@ -148,24 +148,19 @@ class SyncConfig(BaseModel):
         """GCal lookup is active when a credential source AND a default user are configured."""
         has_creds = bool(self.google_service_account_file or self.google_service_account_secret_arn)
         return has_creds and bool(self.gcal_delegated_user_default)
-    # Meeting Mirrors feature (opt-in via TOPIC_MIRROR_ENABLED).
-    # Clones tagged meetings (Macro Work Block / Detail / External Org) into
-    # topic-specific Notion DBs. Routing rules live in the Meeting Rules
-    # DB so joiners/leavers/new topics don't require a redeploy.
-    topic_mirror_enabled: bool = Field(
-        False,
-        description="Enable cloning of tagged meetings into Topic Mirror DBs",
-    )
+    # Meeting Rules registry DB. Mirrored to Supabase (meeting_rule_rows) by
+    # config_mirror_sync and read by supabase_sync; consumed by the standalone
+    # nzyme-meeting-mirrors ('Mirror to DB' rules) and fundraising ('Fire
+    # Affinity LP Funnel ...') Lambdas. The in-monolith Meeting Mirrors branch
+    # was retired 2026-06-08 (carved out to nzyme-meeting-mirrors).
     meeting_rules_db_id: str | None = Field(
         None,
         description=(
             "Notion DB ID for the Meeting Rules registry (was: Topic Mirror "
             "Routes). Each row maps a tag (Match Property + Match Value) to "
-            "an Action: 'Mirror to DB' (clone the meeting into a target DB) "
-            "or 'Fire Affinity LP Funnel (no transcript)' / '... (with "
-            "transcript)' (mirrored to Supabase for the standalone fundraising "
-            "Lambda to consume). "
-            "Required when topic_mirror_enabled is True."
+            "an Action: 'Mirror to DB' or 'Fire Affinity LP Funnel (no "
+            "transcript)' / '... (with transcript)'. Mirrored to Supabase for "
+            "the standalone consumer Lambdas; also read by supabase_sync."
         ),
     )
     # Hierarchy DB (source of truth for the Macro Work Block taxonomy).
@@ -255,11 +250,8 @@ def load_config() -> SyncConfig:
             for d in os.getenv("GCAL_PROXY_DOMAINS", "").split(",")
             if d.strip()
         ),
-        topic_mirror_enabled=os.getenv("TOPIC_MIRROR_ENABLED", "false").lower()
-        in ("true", "1", "yes"),
-        # Prefer the new env var; fall back to the old name for one deploy
-        # cycle. Drop TOPIC_MIRROR_ROUTES_DB_ID once Lambda + .env are
-        # both updated.
+        # Prefer the new env var; fall back to the legacy
+        # TOPIC_MIRROR_ROUTES_DB_ID name still present in some .env / SAM config.
         meeting_rules_db_id=(
             os.getenv("MEETING_RULES_DB_ID")
             or os.getenv("TOPIC_MIRROR_ROUTES_DB_ID")

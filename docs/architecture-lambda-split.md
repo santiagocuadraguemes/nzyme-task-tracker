@@ -38,6 +38,13 @@ Two questions decide where each job lives:
 | 6 | Template injection (+ set Date field) | real-time, on page creation (webhook) | Notion | Notion |
 | 7 | Weekly "Done" task archive sweep | Sunday 06:00 UTC | Team Task Tracker | Archive DB |
 
+> **Carve-out status (2026-06-08):** #4 Fundraising and #3 Meeting Mirrors now
+> run as their own Lambdas (`nzyme-fundraising`, `nzyme-meeting-mirrors`); their
+> in-monolith branches are disabled (Fundraising flag + Mirrors
+> `TOPIC_MIRROR_ENABLED=false`), and the Mirrors code has been removed from this
+> repo. #1 Sync's config mirror is committed and live in Supabase. #2 Extraction,
+> #5 Housekeeping, #6 Webhook, #7 Archive still run inside the monolith.
+
 ## Target architecture — 6 programs
 
 ### Group A — plumbing (2)
@@ -47,8 +54,11 @@ Reads Notion, writes Supabase. Mirrors three tables: `meeting_transcripts`,
 `org_chart_rows`, `meeting_rule_rows`. Carries the heartbeat alarm
 (`nzyme-supabase-sync-stalled`) because a stalled sync starves every downstream
 worker.
-*Status: ~95% done. Final piece (team list + rules mirror, `config_mirror_sync.py`)
-is uncommitted on branch `external-orgs-db-sync`. This is **step 1**.*
+*Status: ✅ read surface in place. The team-list + rules mirror
+(`config_mirror_sync.py`) is committed (ce139b0) and populating Supabase —
+`meeting_rule_rows` and `org_chart_rows` (incl. `default_mirror_visibility`)
+are live, which is what unblocked the Mirrors carve-out. Pending: push branch
+`external-orgs-db-sync` + redeploy the monolith to ship the latest Sync code.*
 
 **2. Housekeeping** — daily. The Hierarchy + Detail + External Org appliers
 (`src/hierarchy/`), **plus** the weekly Done-task archive sweep folded in (both are
@@ -65,8 +75,16 @@ prompt, terminology) — those rarely change and are not worth mirroring.
 *Status: still inside the monolith.*
 
 **4. Meeting Mirrors** — reads the copy, clones tagged meetings into topic DBs.
-Own claim table.
-*Status: still inside the monolith.*
+Own claim table (`mirror_meeting_posts`).
+*Status: ✅ carved out → standalone repo `nzyme-meeting-mirrors` (SAM stack
+`nzyme-meeting-mirrors`, `rate(15 min)`). "Decide-in-Supabase / act-in-Notion":
+discovery/routing/gating/idempotency read Supabase, the `template_id` clone +
+block-level note merge stay Notion calls (it is NOT zero-Notion like
+fundraising). Cut over 2026-06-08: deployed live (`rate(15 min)`), the in-monolith branch
+disabled on the live function (`TOPIC_MIRROR_ENABLED=false`) and its code
+removed from the repo (`route_registry.py` retained for `config_mirror_sync` +
+the Affinity actions). The repo deletion takes effect on the next monolith
+redeploy.*
 
 **5. Fundraising** — reads the copy, writes to Affinity. Own claim table
 (`affinity_meeting_posts`).
@@ -116,6 +134,10 @@ Fundraising is the reference implementation. Each worker:
 2. **Cut over Fundraising** — flip the legacy flag off once the parallel window is clean.
 3. **Carve out Extraction** — new standalone repo using the fundraising pattern.
 4. **Carve out Meeting Mirrors** — same pattern; trickiest because it writes most to Notion.
+   ✅ **Done (2026-06-08)** — repo `nzyme-meeting-mirrors`
+   (github.com/santiagocuadraguemes/nzyme-meeting-mirrors), deployed live at
+   `rate(15 min)`; in-monolith branch disabled (`TOPIC_MIRROR_ENABLED=false`) and
+   its code removed from this repo. First ticks cloned 10 + merged 1, zero failures.
 5. **Split Housekeeping + Webhook** out of the monolith last (lowest risk, lowest churn).
 
 ## Honest caveats

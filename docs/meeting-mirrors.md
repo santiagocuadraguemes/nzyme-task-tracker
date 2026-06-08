@@ -1,5 +1,23 @@
 # Meeting Mirrors branch (opt-in)
 
+> **✅ Carved out → standalone `nzyme-meeting-mirrors` Lambda** (Lambda-split
+> migration step 4, completed 2026-06-08). The in-monolith Meeting Mirrors
+> branch has been **disabled in production** (`TOPIC_MIRROR_ENABLED=false` on the
+> live function) and its **code removed from this repo** — the orchestrator,
+> `writer.py`, `notes_extractor.py`, `confidentiality.py`, and `outcome.py` are
+> gone, along with `_run_topic_mirror` in `pipeline.py` and the
+> `topic_mirror_enabled` config field. **`src/topic_mirror/route_registry.py` is
+> retained** — it still backs `config_mirror_sync` (Meeting Rules → Supabase) and
+> the Affinity LP-funnel action constants. The live feature now runs as a
+> "decide-in-Supabase / act-in-Notion" worker (reads `meeting_transcripts` /
+> `meeting_rule_rows` / `org_chart_rows`, owns the `mirror_meeting_posts` claim
+> table, clones/merges via Notion). **This document is retained as the
+> behavioural / parity reference** for that worker — see
+> `nzyme-meeting-mirrors/docs/how-it-works.md` and
+> `specs/meeting-mirrors-carveout-plan.md`. (Note: these monolith edits are not
+> live until the monolith is redeployed; the running function already has the
+> branch disabled via the flag.)
+
 After the primary task-tracker write, each meeting page is checked against a routing table. Pages tagged with values like `Detail = "AI & Tech"` or `External Org = "White Vega"` get cloned into topic-specific Notion DBs. Off by default; enable with `TOPIC_MIRROR_ENABLED=true` and `TOPIC_MIRROR_ROUTES_DB_ID=<routes DB>`.
 
 ## Mechanism
