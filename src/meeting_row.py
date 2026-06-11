@@ -54,10 +54,18 @@ def _select_or_multi_value(prop: dict[str, Any] | None) -> str | None:
     return _select_value(prop)
 
 
-def _title_text(prop: dict[str, Any] | None) -> str:
-    if not prop or prop.get("type") != "title":
-        return ""
-    return "".join(p.get("plain_text", "") for p in prop.get("title", []) or [])
+def _title_text(props: dict[str, Any] | None) -> str:
+    """Return the page's title text, located by property TYPE.
+
+    Every Notion data source has exactly one property of type ``title``, but
+    its NAME varies by DB ("Meeting" in the standard member DBs, "Note" in
+    Álvaro Lozano's). Matching on type — not a hardcoded name — keeps the title
+    populating regardless of what the title column is called.
+    """
+    for prop in (props or {}).values():
+        if isinstance(prop, dict) and prop.get("type") == "title":
+            return "".join(p.get("plain_text", "") for p in prop.get("title", []) or [])
+    return ""
 
 
 def _date_fields(
@@ -188,7 +196,7 @@ def extract_row(
     props = page.get("properties", {})
 
     start, end, is_dt = _date_fields(props.get("Date"))
-    title = _title_text(props.get("Meeting")) or "(untitled)"
+    title = _title_text(props) or "(untitled)"
 
     blocks = client.get_block_children(page["id"])
     mn_block = find_meeting_notes_block(blocks)

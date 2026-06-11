@@ -25,11 +25,13 @@ def _page(
     external_org: str | None = None,
     confidential: str | None = None,
     created_by: dict | None = None,
+    title_prop_name: str = "Meeting",
+    title_text: str = "LP X update",
 ) -> dict:
     props: dict = {
-        "Meeting": {
+        title_prop_name: {
             "type": "title",
-            "title": [{"plain_text": "LP X update"}],
+            "title": [{"plain_text": title_text}],
         },
         "Date": {
             "type": "date",
@@ -70,6 +72,29 @@ def _client() -> MagicMock:
     client = MagicMock()
     client.get_block_children.return_value = []  # no meeting_notes block
     return client
+
+
+def test_title_read_from_standard_meeting_property():
+    row = extract_row(_page(title_text="LP X update"), _OWNER, _client())
+    assert row["title"] == "LP X update"
+
+
+def test_title_read_by_type_when_property_named_differently():
+    # Álvaro Lozano's DB names its title property "Note", not "Meeting".
+    # The title must still be extracted (located by type == "title"), not
+    # fall back to "(untitled)".
+    row = extract_row(
+        _page(title_prop_name="Note", title_text="Revisión Modelo"),
+        _OWNER, _client(),
+    )
+    assert row["title"] == "Revisión Modelo"
+
+
+def test_title_untitled_when_no_title_property():
+    page = _page()
+    del page["properties"]["Meeting"]
+    row = extract_row(page, _OWNER, _client())
+    assert row["title"] == "(untitled)"
 
 
 def test_reads_macro_work_block_property():

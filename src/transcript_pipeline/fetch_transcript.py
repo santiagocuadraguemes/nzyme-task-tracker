@@ -123,12 +123,17 @@ def extract_page_metadata(page: dict[str, Any]) -> dict[str, str]:
         {"title": "Meeting title", "date": "2026-04-09"} with empty strings as fallbacks.
     """
     props = page.get("properties", {})
-    # Title — "Meeting" property (title type)
+    # Title — located by property TYPE, not name. Every Notion DB has exactly
+    # one property of type "title", but its NAME varies ("Meeting" in standard
+    # member DBs, "Note" in Álvaro Lozano's, "Título" in Jaime Gervás's).
+    # Matches `meeting_row._title_text`.
     title = ""
-    title_prop = props.get("Meeting", {})
-    title_parts = title_prop.get("title", [])
-    if title_parts:
-        title = "".join(t.get("plain_text", "") for t in title_parts)
+    for prop in props.values():
+        if isinstance(prop, dict) and prop.get("type") == "title":
+            title = "".join(
+                t.get("plain_text", "") for t in prop.get("title", []) or []
+            )
+            break
 
     # Date — try "Date" property first, fall back to page created_time
     date = ""
