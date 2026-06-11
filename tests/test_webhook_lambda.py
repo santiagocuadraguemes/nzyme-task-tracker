@@ -82,11 +82,10 @@ class TestWebhookRoute:
 
 
 class TestExtractionRoute:
-    @patch("src.webhook.lambda_handler._archive_done_tasks")
     @patch("src.webhook.lambda_handler.run_sync_for_page")
     @patch("src.webhook.lambda_handler.SingleSource")
     @patch("src.webhook.lambda_handler._init")
-    def test_processes_ready_pages(self, mock_init, mock_source_cls, mock_sync, mock_archive):
+    def test_processes_ready_pages(self, mock_init, mock_source_cls, mock_sync):
         config = MagicMock()
         config.idle_minutes = 3
         config.meeting_notes_db_id = "db-meetings"
@@ -126,11 +125,10 @@ class TestExtractionRoute:
         body = json.loads(response["body"])
         assert body["processed"] == 0
 
-    @patch("src.webhook.lambda_handler._archive_done_tasks")
     @patch("src.webhook.lambda_handler.run_sync_for_page")
     @patch("src.webhook.lambda_handler.SingleSource")
     @patch("src.webhook.lambda_handler._init")
-    def test_continues_on_page_failure(self, mock_init, mock_source_cls, mock_sync, mock_archive):
+    def test_continues_on_page_failure(self, mock_init, mock_source_cls, mock_sync):
         config = MagicMock()
         config.idle_minutes = 3
         config.meeting_notes_db_id = "db-meetings"

@@ -259,13 +259,6 @@ Resources:
             Schedule: rate(5 minutes)
             Description: Check for idle meeting pages and run AI extraction
             Enabled: true
-        WeeklyArchive:
-          Type: Schedule
-          Properties:
-            Schedule: cron(0 6 ? * SUN *)
-            Description: Sweep Done tasks (idle >3d) into the Team Task Tracker — Archive DB. Sunday 06:00 UTC.
-            Enabled: true
-            Input: '{"source": "aws.events", "job": "weekly_archive"}'
         SupabaseSync:
           Type: Schedule
           Properties:
@@ -280,18 +273,6 @@ Resources:
             Description: Sunday safety-net — re-sync every meeting page edited in the last 14 days, regardless of checkpoint. Sunday 07:00 UTC.
             Enabled: true
             Input: '{"source": "aws.events", "job": "supabase_sync_full"}'
-        HierarchySync:
-          Type: Schedule
-          Properties:
-            Schedule: cron(0 5 * * ? *)
-            Description: >-
-              Sync Hierarchy DB → downstream Notion state (Tier 0 → member DB
-              Macro Work Block options, etc.). Daily 05:00 UTC (= 07:00 Madrid CEST,
-              06:00 Madrid CET — DST drift accepted; bump to cron(0 6 ...) in
-              winter if 06:00 local is too early).
-            Enabled: true
-            Input: '{"source": "aws.events", "job": "hierarchy_sync"}'
-
   HttpApi:
     Type: AWS::Serverless::HttpApi
     Properties:

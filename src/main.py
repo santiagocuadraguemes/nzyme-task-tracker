@@ -10,7 +10,7 @@ from notion_client import Client as NotionClient
 from src.config import SyncConfig, load_config
 from src.utils.logger import setup_logging, get_logger
 from src.notion_client_wrapper import NotionClientWrapper
-from src.pipeline import run_inject_templates, run_sync, _archive_done_tasks
+from src.pipeline import run_inject_templates, run_sync
 from src.utils.llm_logging import configure_logfire, print_usage_summary, start_tracking
 
 logger = get_logger(__name__)
@@ -35,27 +35,6 @@ def parse_args() -> argparse.Namespace:
         "--sync",
         action="store_true",
         help="Run the AI extraction pipeline (one-shot)",
-    )
-    parser.add_argument(
-        "--archive",
-        action="store_true",
-        help="Run the Done-task archive sweep once (mirrors the weekly Sunday Lambda job).",
-    )
-    parser.add_argument(
-        "--sync-hierarchy",
-        action="store_true",
-        help="Run the Hierarchy DB → downstream Notion state sync once "
-             "(mirrors the daily 07:00 Madrid Lambda job).",
-    )
-    parser.add_argument(
-        "--sub-sync",
-        metavar="NAME",
-        action="append",
-        default=None,
-        help="Restrict --sync-hierarchy to one or more named sub-syncs "
-             "(e.g. canonical_mirror_sync, macro_block_sync). Repeat the "
-             "flag to allow multiple. Defaults to running every registered "
-             "sub-sync.",
     )
     parser.add_argument(
         "--dry-run",
@@ -171,43 +150,6 @@ def main() -> None:
 
     if args.watch:
         run_watch(config, client)
-        return
-
-    if args.archive:
-        logger.info("Starting archive sweep (dry_run=%s)", config.dry_run)
-        try:
-            archived = _archive_done_tasks(
-                client,
-                config.team_tracker_db_id,
-                config.task_archive_db_id,
-                grace_days=5,
-                dry_run=config.dry_run,
-            )
-            logger.info("Archive sweep complete: archived=%d", archived)
-        except Exception:
-            logger.exception("Archive sweep failed")
-            sys.exit(1)
-        return
-
-    if args.sync_hierarchy:
-        only = list(args.sub_sync) if args.sub_sync else None
-        logger.info(
-            "Starting hierarchy sync (dry_run=%s, only=%s)",
-            config.dry_run, only or "all",
-        )
-        try:
-            from src import hierarchy
-            reports = hierarchy.run_all(client, config, only=only)
-            total_errors = sum(r.errors for r in reports)
-            logger.info(
-                "Hierarchy sync complete: sub_syncs=%d errors=%d",
-                len(reports), total_errors,
-            )
-            if total_errors:
-                sys.exit(1)
-        except Exception:
-            logger.exception("Hierarchy sync failed")
-            sys.exit(1)
         return
 
     # One-shot mode: if neither flag is set, run both (backwards compatible)

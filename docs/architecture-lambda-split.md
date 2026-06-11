@@ -64,8 +64,16 @@ master and the monolith fully redeployed 2026-06-11.*
 (`src/hierarchy/`), **plus** the weekly Done-task archive sweep folded in (both are
 scheduled jobs that tidy Notion). Reads the canonical lists / Affinity, writes Notion
 dropdowns + Tracker nodes.
-*Status: works today as a group, still inside the monolith. **Next carve-out**
-(moved ahead of Extraction, 2026-06-11) — deploys straight to the org account.*
+*Status: ✅ **fully carved out (2026-06-11)** → standalone repo `nzyme-housekeeping`
+(SAM stack in org account `047719630984`; also subtree'd into the
+`nzyme-fund/nzyme-meeting-notes` monorepo). The `src/hierarchy/` package, the archive
+functions in `pipeline.py`, the two Schedule events, the cron handler branches, and the
+`--sync-hierarchy`/`--archive` CLI flags were all **removed** from this monolith. The
+one shared helper that had to stay behind — `canonical_mirror_sync._http`, still used by
+the active `config_mirror_sync` — was lifted into `src/supabase_rest.py`. Smoke-tested
+live (`hierarchy_sync` → `errors=0`). `TASK_ARCHIVE_DB_ID` is unset in prod, so the
+weekly archive remains a no-op (carried over as-is — wiring the Archive DB is a separate
+decision).*
 
 ### Group B — workers, each reads the Supabase copy and does one thing (3)
 
@@ -138,9 +146,10 @@ Fundraising is the reference implementation. Each worker:
    (github.com/santiagocuadraguemes/nzyme-meeting-mirrors), deployed live at
    `rate(15 min)`; in-monolith branch disabled and its code removed from this repo.
    First ticks cloned 10 + merged 1, zero failures.
-4. **Carve out Housekeeping** — the `src/hierarchy/` appliers + the weekly Done-archive
-   sweep → standalone repo, deployed directly to the org account. *(Moved ahead of
-   Extraction 2026-06-11 — Santiago's call.)*
+4. **Carve out Housekeeping** — ✅ **Done (2026-06-11)** — standalone repo
+   `nzyme-housekeeping` deployed to the org account; the appliers, archive sweep, cron
+   schedules, handler branches, and CLI flags were removed from the monolith (shared
+   `_http` moved to `src/supabase_rest.py`). Smoke-tested (`errors=0`).
 5. **Carve out Extraction** — new standalone repo using the fundraising pattern.
 6. **Webhook** — stays in the monolith, in the old account, indefinitely (see
    "Account placement" below). Splitting it is optional and last.

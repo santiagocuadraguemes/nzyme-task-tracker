@@ -10,7 +10,7 @@ from notion_client import APIResponseError, Client as NotionClient
 from src.config import load_config
 from src.meeting_db_registry import load_registry
 from src.notion_client_wrapper import NotionClientWrapper
-from src.pipeline import run_sync_for_page, _archive_done_tasks
+from src.pipeline import run_sync_for_page
 from src.sources.single_source import SingleSource
 from src.supabase_sync import run_full as supabase_run_full
 from src.supabase_sync import run_incremental as supabase_run_incremental
@@ -47,20 +47,19 @@ def handler(event, context):
 
     Routes based on event source:
     - API Gateway (has "requestContext") → template injection via webhook
-    - CloudWatch Events with {"job": "weekly_archive"} → weekly Done-task sweep
+    - CloudWatch Events with {"job": "supabase_sync"} → Notion → Supabase mirror
     - CloudWatch Events (default) → scheduled extraction
+
+    NOTE: hierarchy_sync (daily) + weekly_archive (Sunday) were carved out to the
+    standalone nzyme-housekeeping Lambda (org account, 2026-06-11).
     """
     # CloudWatch Events cron — silent unless there's actual work
     if event.get("source") == "aws.events":
         job = event.get("job")
-        if job == "weekly_archive":
-            return _handle_weekly_archive(event, context)
         if job == "supabase_sync":
             return _handle_supabase_sync(event, context)
         if job == "supabase_sync_full":
             return _handle_supabase_sync_full(event, context)
-        if job == "hierarchy_sync":
-            return _handle_hierarchy_sync(event, context)
         return _handle_extraction(event, context)
 
     # API Gateway (has requestContext or pathParameters)
@@ -210,56 +209,3 @@ def _handle_supabase_sync_full(event, context):
     except Exception:
         logger.exception("Supabase weekly sweep failed")
         return {"statusCode": 500, "body": json.dumps({"error": "sweep failed"})}
-
-
-def _handle_weekly_archive(event, context):
-    """Weekly Sunday sweep: copy Done tasks (idle >5 days) to the archive DB."""
-    config, client = _init()
-    try:
-        archived = _archive_done_tasks(
-            client,
-            config.team_tracker_db_id,
-            config.task_archive_db_id,
-            grace_days=5,
-            dry_run=config.dry_run,
-        )
-        logger.info("weekly archive complete: archived=%d", archived)
-        return {"statusCode": 200, "body": json.dumps({"archived": archived})}
-    except Exception:
-        logger.exception("Weekly archive sweep failed")
-        return {"statusCode": 500, "body": json.dumps({"error": "archive failed"})}
-
-
-def _handle_hierarchy_sync(event, context):
-    """Daily 07:00 Madrid sync: Hierarchy DB → downstream Notion state.
-
-    Runs every registered sub-sync (currently: Tier 0 → member DB `Macro
-    Work Block` options). Each sub-sync logs its own structured
-    ``hierarchy_sync: ...``
-    line. Returns a per-sub-sync summary.
-    """
-    from src import hierarchy
-
-    config, client = _init()
-    try:
-        reports = hierarchy.run_all(client, config)
-        summary = [
-            {
-                "name": r.name,
-                "created": r.created,
-                "renamed": r.renamed,
-                "archived": r.archived,
-                "errors": r.errors,
-            }
-            for r in reports
-        ]
-        total_errors = sum(r.errors for r in reports)
-        if total_errors:
-            return {
-                "statusCode": 500,
-                "body": json.dumps({"errors": total_errors, "reports": summary}),
-            }
-        return {"statusCode": 200, "body": json.dumps({"reports": summary})}
-    except Exception:
-        logger.exception("Hierarchy sync failed")
-        return {"statusCode": 500, "body": json.dumps({"error": "sync failed"})}

@@ -27,10 +27,10 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from src.hierarchy.canonical_mirror_sync import _http
 from src.meeting_db_registry import _extract_db_id
 from src.meeting_row import _hex_to_uuid
 from src.notion_client_wrapper import NotionClientWrapper
+from src.supabase_rest import _http
 from src.topic_mirror.route_registry import (
     ACTION_AFFINITY_LP_FUNNEL,
     ACTION_MIRROR_TO_DB,
