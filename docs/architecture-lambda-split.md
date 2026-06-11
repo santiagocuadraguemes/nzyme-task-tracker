@@ -142,8 +142,8 @@ Fundraising is the reference implementation. Each worker:
    and the monolith fully redeployed. The read surface is complete.
 2. **Cut over Fundraising** — ✅ **Done (2026-06-08)** — no parallel period; legacy flag
    off, fundraising runs only in `nzyme-fundraising`.
-3. **Carve out Meeting Mirrors** — ✅ **Done (2026-06-08)** — repo `nzyme-meeting-mirrors`
-   (github.com/santiagocuadraguemes/nzyme-meeting-mirrors), deployed live at
+3. **Carve out Meeting Mirrors** — ✅ **Done (2026-06-08)** — `nzyme-meeting-mirrors`
+   (in the `nzyme-fund/nzyme-meeting-notes` monorepo), deployed live at
    `rate(15 min)`; in-monolith branch disabled and its code removed from this repo.
    First ticks cloned 10 + merged 1, zero failures.
 4. **Carve out Housekeeping** — ✅ **Done (2026-06-11)** — standalone repo
