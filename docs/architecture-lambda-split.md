@@ -54,17 +54,18 @@ Reads Notion, writes Supabase. Mirrors three tables: `meeting_transcripts`,
 `org_chart_rows`, `meeting_rule_rows`. Carries the heartbeat alarm
 (`nzyme-supabase-sync-stalled`) because a stalled sync starves every downstream
 worker.
-*Status: ✅ read surface in place. The team-list + rules mirror
+*Status: ✅ done (2026-06-11). The team-list + rules mirror
 (`config_mirror_sync.py`) is committed (ce139b0) and populating Supabase —
 `meeting_rule_rows` and `org_chart_rows` (incl. `default_mirror_visibility`)
-are live, which is what unblocked the Mirrors carve-out. Pending: push branch
-`external-orgs-db-sync` + redeploy the monolith to ship the latest Sync code.*
+are live, which is what unblocked the Mirrors carve-out. Branch merged to
+master and the monolith fully redeployed 2026-06-11.*
 
 **2. Housekeeping** — daily. The Hierarchy + Detail + External Org appliers
 (`src/hierarchy/`), **plus** the weekly Done-task archive sweep folded in (both are
 scheduled jobs that tidy Notion). Reads the canonical lists / Affinity, writes Notion
 dropdowns + Tracker nodes.
-*Status: works today as a group, still inside the monolith.*
+*Status: works today as a group, still inside the monolith. **Next carve-out**
+(moved ahead of Extraction, 2026-06-11) — deploys straight to the org account.*
 
 ### Group B — workers, each reads the Supabase copy and does one thing (3)
 
@@ -72,7 +73,7 @@ dropdowns + Tracker nodes.
 them to the Team Task Tracker. Own claim table for idempotency, own readiness rule.
 Still reads a handful of static prompt pages from Notion at startup (classifier
 prompt, terminology) — those rarely change and are not worth mirroring.
-*Status: still inside the monolith.*
+*Status: still inside the monolith. Carves out after Housekeeping.*
 
 **4. Meeting Mirrors** — reads the copy, clones tagged meetings into topic DBs.
 Own claim table (`mirror_meeting_posts`).
@@ -129,16 +130,40 @@ Fundraising is the reference implementation. Each worker:
 
 ## Rollout order
 
-1. **Finish Sync** (step 1) — commit + deploy `config_mirror_sync`. Completes the read
-   surface so the remaining workers have everything they need in Supabase.
-2. **Cut over Fundraising** — flip the legacy flag off once the parallel window is clean.
-3. **Carve out Extraction** — new standalone repo using the fundraising pattern.
-4. **Carve out Meeting Mirrors** — same pattern; trickiest because it writes most to Notion.
-   ✅ **Done (2026-06-08)** — repo `nzyme-meeting-mirrors`
+1. **Finish Sync** — ✅ **Done (2026-06-11)** — `config_mirror_sync` merged to master
+   and the monolith fully redeployed. The read surface is complete.
+2. **Cut over Fundraising** — ✅ **Done (2026-06-08)** — no parallel period; legacy flag
+   off, fundraising runs only in `nzyme-fundraising`.
+3. **Carve out Meeting Mirrors** — ✅ **Done (2026-06-08)** — repo `nzyme-meeting-mirrors`
    (github.com/santiagocuadraguemes/nzyme-meeting-mirrors), deployed live at
-   `rate(15 min)`; in-monolith branch disabled (`TOPIC_MIRROR_ENABLED=false`) and
-   its code removed from this repo. First ticks cloned 10 + merged 1, zero failures.
-5. **Split Housekeeping + Webhook** out of the monolith last (lowest risk, lowest churn).
+   `rate(15 min)`; in-monolith branch disabled and its code removed from this repo.
+   First ticks cloned 10 + merged 1, zero failures.
+4. **Carve out Housekeeping** — the `src/hierarchy/` appliers + the weekly Done-archive
+   sweep → standalone repo, deployed directly to the org account. *(Moved ahead of
+   Extraction 2026-06-11 — Santiago's call.)*
+5. **Carve out Extraction** — new standalone repo using the fundraising pattern.
+6. **Webhook** — stays in the monolith, in the old account, indefinitely (see
+   "Account placement" below). Splitting it is optional and last.
+
+## Account placement (decided 2026-06-11)
+
+Two AWS accounts, both eu-west-1:
+
+- **Old `company` account `607081650195`** (profile `company`) — keeps the **monolith**
+  (`nzyme-task-tracker`) permanently. Its API Gateway host (`9g8txmxkef…`) is the URL
+  all ~10 Notion meeting automations point to; keeping the monolith here means never
+  repointing them. Whatever remains un-carved (Sync, Webhook, Archive until
+  Housekeeping ships) lives here. *(This supersedes the 2026-06-09 idea of repointing
+  webhooks to the staged org-account copy.)*
+- **Org account `047719630984`** (SSO, profile `org`) — hosts every timer-driven
+  carve-out. `nzyme-fundraising` + `nzyme-meeting-mirrors` were staged here dormant on
+  2026-06-09; the cron flip (enable org rules → verify → disable company rules) is the
+  pending cutover. All future carve-outs (Housekeeping, Extraction) deploy here
+  directly — never to the old account.
+- The staged `nzyme-task-tracker` copy in the org account (webhook host `zntuq4wrz6…`)
+  is **redundant** under this decision — tear it down once the fundraising/mirrors flip
+  is verified. Keep the org-account GCal secret (`nzyme/gcal-service-account`): the
+  future Extraction worker needs it for attendee resolution.
 
 ## Honest caveats
 
