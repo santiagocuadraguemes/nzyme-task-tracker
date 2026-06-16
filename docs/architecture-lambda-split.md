@@ -1,8 +1,10 @@
 # Architecture: splitting the monolith into focused Lambdas
 
-> **Status:** nearly complete. Five of the six programs are carved out and live;
-> only the **Webhook** (and the Sync that co-tenants with it) remains in the
-> monolith, by design. Updated 2026-06-16.
+> **Status:** complete. All six programs are split and live. The final step —
+> giving the **Webhook** its own Lambda (`nzyme-webhook`) — shipped 2026-06-16
+> as a same-stack / same-API-Gateway function split, so the webhook URL is
+> unchanged and no Notion automations were repointed. The old `nzyme-task-tracker`
+> function now runs only the **Sync** (Notion → Supabase mirror). Updated 2026-06-16.
 
 ## Why
 
@@ -40,13 +42,15 @@ Two questions decide where each job lives:
 | 7 | Weekly "Done" task archive sweep | Sunday 06:00 UTC | Team Task Tracker | Archive DB |
 
 > **Carve-out status (2026-06-16):** #4 Fundraising, #3 Meeting Mirrors, #5
-> Housekeeping, and #2 Extraction all now run as their own Lambdas
+> Housekeeping, and #2 Extraction all run as their own Lambdas
 > (`nzyme-fundraising`, `nzyme-meeting-mirrors`, `nzyme-housekeeping`,
 > `nzyme-task-extraction`); their in-monolith code has been removed from this
-> repo. #1 Sync's config mirror is committed and live in Supabase. Only #6
-> Webhook + #1 Sync (its co-tenant) — and the no-op #7 Archive — still run inside
-> the monolith. Extraction cut over live 2026-06-15; this repo's working tree
-> removes the dead extraction stack (the `_resolve_attendees` helper Sync still
+> repo. #1 Sync's config mirror is live in Supabase. #6 Webhook was split out
+> 2026-06-16 into its own function `nzyme-webhook` — same stack `nzyme-task-tracker`,
+> same API Gateway / URL — so it no longer shares a function with Sync. The old
+> `nzyme-task-tracker` function now runs only #1 Sync (+ the no-op #7 Archive,
+> which is unset in prod). Extraction cut over live 2026-06-15; this repo's working
+> tree removed the dead extraction stack (the `_resolve_attendees` helper Sync still
 > needs was first lifted into `src/attendees.py`).
 
 ## Target architecture — 6 programs
@@ -117,7 +121,16 @@ cutover.*
 **6. Webhook** — the only real-time piece. On page creation: set the Date field and
 inject the meeting template. Must be its own Lambda because it's triggered by an HTTP
 call from Notion, not a timer.
-*Status: still inside the monolith.*
+*Status: ✅ **split out (2026-06-16)** → own function `nzyme-webhook` (Handler
+`src.webhook.lambda_handler.webhook_handler`, 256 MB / 30 s) in the **same** stack
+`nzyme-task-tracker` (company account `607081650195`). Kept on the **same**
+`AWS::Serverless::HttpApi` resource, so the `POST /webhook/{token}` route's api-id
+(`9g8txmxkef`) and URL are unchanged — the ~10 Notion automations were not repointed.
+The old `NzymeFunction` (FunctionName `nzyme-task-tracker`, handler now
+`cron_handler`) keeps only the two Supabase-sync Schedule events + the heartbeat
+alarm. A future nzyme-owned custom domain (e.g. `hooks.nzyme.com`) can sit in front
+of this same API Gateway and route to any number of backing Lambdas without further
+change.*
 
 ## Picture
 
@@ -166,9 +179,10 @@ Fundraising is the reference implementation. Each worker:
    (folder in the `nzyme-fund/nzyme-meeting-notes` monorepo, org account `047719630984`,
    `rate(5 min)`), built on the fundraising pattern. Worker is the live extractor; monolith
    `ScheduledExtraction` cron disabled and its extraction code removed from this repo.
-6. **Webhook** — stays in the monolith, in the old account, indefinitely (see
-   "Account placement" below). Splitting it is optional and last. **This is the only
-   remaining piece in the monolith** (alongside Sync, its co-tenant).
+6. **Webhook** — ✅ **Done (2026-06-16)** — split into its own function `nzyme-webhook`
+   in the **same** stack/account, keeping the **same** API Gateway so the URL never
+   changed (no Notion repoint). The old `nzyme-task-tracker` function now runs only
+   Sync. This was the optional final step; the migration is now complete.
 
 ## Account placement (decided 2026-06-11)
 

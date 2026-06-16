@@ -59,5 +59,27 @@ python -m src.main --inject-templates --dry-run --verbose
 python -m src.main --supabase-sync
 ```
 
+## Two functions, one stack (since 2026-06-16)
+
+The stack `nzyme-task-tracker` deploys **two** Lambda functions from the same code
+package:
+
+| Function | Handler | Trigger | Job |
+|----------|---------|---------|-----|
+| `nzyme-webhook` (256 MB / 30 s) | `src.webhook.lambda_handler.webhook_handler` | API Gateway `POST /webhook/{token}` | real-time template injection |
+| `nzyme-task-tracker` (512 MB / 300 s) | `src.webhook.lambda_handler.cron_handler` | `SupabaseSync` + `SupabaseWeeklySync` schedules | Notion → Supabase mirror |
+
+Both sit behind the **same** `HttpApi` resource, so the webhook URL (api-id
+`9g8txmxkef`) is stable across this split — no Notion automation repointing.
+`deploy.sh` (full `sam build` + `sam deploy`) handles both; a `template.yaml` change
+(like this split) requires the full deploy, not `quick-deploy.sh`. The heartbeat
+alarm is keyed to `/aws/lambda/nzyme-task-tracker`, so the Sync function must keep
+that name.
+
+> **`quick-deploy.sh` caveat:** it updates a single function's code by name. After
+> this split it targets `nzyme-task-tracker` (Sync) only — to hot-patch the webhook
+> code, point it at `nzyme-webhook` or run the full `deploy.sh`.
+
 See `docs/architecture.md` for the Lambda entry points (the webhook handler routes
-template injection + the `supabase_sync` / `supabase_sync_full` cron jobs).
+template injection; the cron handler routes the `supabase_sync` /
+`supabase_sync_full` cron jobs).

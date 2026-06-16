@@ -4,7 +4,7 @@
 
 Nzyme is an AI-driven system that extracts action items from Notion meeting notes (English/Spanish/mixed) and writes them to a Team Task Tracker, built for Kibo Ventures (PE/VC fund, ~10-20 people).
 
-**This repo is the monolith.** After the lambda-split migration it runs just two jobs: real-time **meeting-template injection** (webhook) and the **Notion → Supabase mirror** (Sync). Task **extraction** was carved out to the standalone `nzyme-task-extraction` project (cut over 2026-06-15); **meeting mirrors**, **fundraising**, and **housekeeping** are likewise their own Lambdas. See [docs/architecture-lambda-split.md](docs/architecture-lambda-split.md) for the full split and [docs/architecture.md](docs/architecture.md) for pipeline detail.
+**This repo runs the two jobs left after the lambda-split migration:** real-time **meeting-template injection** (webhook) and the **Notion → Supabase mirror** (Sync). They run as **two Lambda functions in one stack** (`nzyme-task-tracker`, company account `607081650195`), sharing this code package: `nzyme-webhook` (`webhook_handler`, API Gateway-triggered) and `nzyme-task-tracker` (`cron_handler`, schedule-triggered Sync — keeps that name for the heartbeat alarm). Both sit behind the **same** API Gateway, so the webhook URL (api-id `9g8txmxkef`) is fixed — **don't repoint the ~10 Notion automations**. Task **extraction** was carved out to the standalone `nzyme-task-extraction` project (cut over 2026-06-15); **meeting mirrors**, **fundraising**, and **housekeeping** are likewise their own Lambdas. See [docs/architecture-lambda-split.md](docs/architecture-lambda-split.md) for the full split and [docs/architecture.md](docs/architecture.md) for pipeline detail.
 
 ## Setup
 

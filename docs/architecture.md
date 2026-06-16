@@ -161,22 +161,30 @@ Internal behavior:
 
 ## Webhook / Lambda mode
 
-The single Lambda (`NzymeFunction`, company account `607081650195`) multiplexes the
-two remaining jobs by event source:
+The two remaining jobs run in **two separate Lambda functions** in one stack
+(`nzyme-task-tracker`, company account `607081650195`), split 2026-06-16. Both share
+the same code package (`src/webhook/lambda_handler.py`), each with its own entry point:
 
 ```
-[Template injection — event-driven]
+[Template injection — event-driven]  →  function nzyme-webhook  (webhook_handler)
 Notion Automation (page created in any per-member DB) → API Gateway → Lambda (webhook)
   → derive parent DB from the page, set "Date" = page.created_time (with hour)
   → inject template → set "Template Injected" = true
 
-[Notion → Supabase sync — scheduled]
+[Notion → Supabase sync — scheduled]  →  function nzyme-task-tracker  (cron_handler)
 CloudWatch Events (every 5 min, Input={"job":"supabase_sync"})      → _handle_supabase_sync       → incremental mirror
 CloudWatch Events (Sunday,    Input={"job":"supabase_sync_full"})   → _handle_supabase_sync_full  → 14-day safety re-sync
 ```
 
-Unknown cron jobs return HTTP 400 (the old default `→ extraction` branch was removed
-with the carve-out). The registry is reloaded per tick, so Org Chart joiner/leaver
+Both functions sit behind the **same** `AWS::Serverless::HttpApi` resource; the
+webhook split only moved the `POST /webhook/{token}` route's integration to
+`nzyme-webhook`, so the api-id (`9g8txmxkef`) and URL are unchanged. The Sync
+function keeps the name `nzyme-task-tracker` so the heartbeat metric filter on
+`/aws/lambda/nzyme-task-tracker` keeps counting.
+
+`cron_handler` returns HTTP 400 for an unrecognised job; `webhook_handler` returns
+400 for a non-API-Gateway event (the old default `→ extraction` branch was removed
+with the carve-out). The registry is reloaded per webhook, so Org Chart joiner/leaver
 changes take effect within minutes without a redeploy.
 
 ### Components
@@ -184,20 +192,21 @@ changes take effect within minutes without a redeploy.
 | File | Responsibility |
 |------|---------------|
 | `src/webhook/handler.py` | Parses the Notion automation payload, validates the page's parent DB against the discovered registry, sets `Date = page.created_time`, calls template injection |
-| `src/webhook/lambda_handler.py` | Lambda entry point: routes API Gateway events → webhook (template injection), `aws.events` cron → `supabase_sync` / `supabase_sync_full` |
+| `src/webhook/lambda_handler.py` | Two Lambda entry points: `webhook_handler` (API Gateway → template injection, backs `nzyme-webhook`) and `cron_handler` (`aws.events` → `supabase_sync` / `supabase_sync_full`, backs `nzyme-task-tracker`) |
 | `src/meeting_db_registry.py` | Reads active Org Chart rows' `Meeting Notes DB` URL property, returns `[MeetingDB]` |
 | `src/sources/single_source.py` | Per-DB query/mark helpers (`get_unprocessed_pages`, `mark_template_injected`, `mark_page_processed`, …) |
 
 ### AWS resources
 
-- API Gateway (HTTP API) — `POST /webhook/{token}`
-- Lambda: `NzymeFunction` — template injection + Supabase sync
-- CloudWatch Events rules — `SupabaseSync` (`rate(5 minutes)`) + `SupabaseWeeklySync` (Sunday)
-- `nzyme-supabase-sync-stalled` alarm on the heartbeat metric filter
+- API Gateway (HTTP API, logical id `HttpApi`) — `POST /webhook/{token}` → `nzyme-webhook`
+- Lambda `nzyme-webhook` (`WebhookFunction`, 256 MB / 30 s) — template injection
+- Lambda `nzyme-task-tracker` (`NzymeFunction`, 512 MB / 300 s) — Supabase sync
+- CloudWatch Events rules (on `nzyme-task-tracker`) — `SupabaseSync` (`rate(5 minutes)`) + `SupabaseWeeklySync` (Sunday)
+- `nzyme-supabase-sync-stalled` alarm on the heartbeat metric filter (`/aws/lambda/nzyme-task-tracker`)
 
 See `template.yaml` (SAM) for the infrastructure and `scripts/deploy.sh` /
-`scripts/quick-deploy.sh` for deployment. The webhook stays in the old `company`
-account permanently because its API Gateway host is the URL all ~10 Notion
+`scripts/quick-deploy.sh` for deployment. Both functions stay in the old `company`
+account permanently because the shared API Gateway host is the URL all ~10 Notion
 automations point at (see [architecture-lambda-split.md](architecture-lambda-split.md)).
 
 ## Error handling

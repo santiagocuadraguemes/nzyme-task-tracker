@@ -1,7 +1,19 @@
-"""AWS Lambda handler — webhook (template injection) + Notion → Supabase sync.
+"""AWS Lambda handlers — webhook (template injection) + Notion → Supabase sync.
+
+Two explicit entry points, each backing its own Lambda function (split
+2026-06-16, the final step of the lambda-split migration):
+
+- ``webhook_handler`` → ``nzyme-webhook`` Lambda, wired to the API Gateway
+  route ``POST /webhook/{token}`` (real-time template injection on page
+  creation). Same shared API Gateway / URL as before — only the backing
+  function changed, so the ~10 Notion automations need no repointing.
+- ``cron_handler``    → ``nzyme-task-tracker`` Lambda, wired to the two
+  Schedule events (``supabase_sync`` 5-min + ``supabase_sync_full`` Sunday).
+  Keeps the function name ``nzyme-task-tracker`` so the heartbeat metric
+  filter on ``/aws/lambda/nzyme-task-tracker`` keeps working.
 
 Task extraction was carved out to the standalone ``nzyme-task-extraction``
-project (2026-06-15); this handler no longer runs any extraction.
+project (2026-06-15); this module no longer runs any extraction.
 """
 from __future__ import annotations
 
@@ -43,35 +55,44 @@ def _init():
     return config, client
 
 
-def handler(event, context):
-    """Unified Lambda entry point.
+def webhook_handler(event, context):
+    """Entry point for the ``nzyme-webhook`` Lambda (API Gateway).
 
-    Routes based on event source:
-    - API Gateway (has "requestContext") → template injection via webhook
-    - CloudWatch Events with {"job": "supabase_sync"} → Notion → Supabase mirror
-    - CloudWatch Events with {"job": "supabase_sync_full"} → weekly safety sweep
+    Wired solely to the HttpApi route ``POST /webhook/{token}``, so every
+    invocation is an API Gateway proxy event → template injection via the
+    webhook. A non-API-Gateway event (e.g. a stray manual invoke) returns a
+    400 rather than silently mis-routing.
 
     NOTE: task extraction was carved out to the standalone nzyme-task-extraction
     project (2026-06-15); hierarchy_sync (daily) + weekly_archive (Sunday) were
     carved out to nzyme-housekeeping (org account, 2026-06-11).
     """
-    # CloudWatch Events cron — silent unless there's actual work
-    if event.get("source") == "aws.events":
-        job = event.get("job")
-        if job == "supabase_sync":
-            return _handle_supabase_sync(event, context)
-        if job == "supabase_sync_full":
-            return _handle_supabase_sync_full(event, context)
-        logger.warning("Unknown cron job: %s", job)
-        return {"statusCode": 400, "body": json.dumps({"error": "unknown job"})}
-
-    # API Gateway (has requestContext or pathParameters)
     if event.get("requestContext") or event.get("pathParameters"):
         logger.info("webhook received")
         return _handle_webhook(event, context)
 
-    logger.warning("Unknown event source: %s", json.dumps(event)[:200])
+    logger.warning("Unknown event for webhook_handler: %s", json.dumps(event)[:200])
     return {"statusCode": 400, "body": json.dumps({"error": "unknown event source"})}
+
+
+def cron_handler(event, context):
+    """Entry point for the ``nzyme-task-tracker`` Lambda (scheduled sync).
+
+    Wired to the two Schedule events, which send
+    ``{"source": "aws.events", "job": ...}``:
+    - ``supabase_sync``      → incremental Notion → Supabase mirror (5-min)
+    - ``supabase_sync_full`` → weekly 14-day safety re-sync (Sunday)
+
+    An unrecognised job returns HTTP 400 (the old default ``→ extraction``
+    branch was removed with the extraction carve-out).
+    """
+    job = event.get("job")
+    if job == "supabase_sync":
+        return _handle_supabase_sync(event, context)
+    if job == "supabase_sync_full":
+        return _handle_supabase_sync_full(event, context)
+    logger.warning("Unknown cron job: %s", job)
+    return {"statusCode": 400, "body": json.dumps({"error": "unknown job"})}
 
 
 def _handle_webhook(event, context):

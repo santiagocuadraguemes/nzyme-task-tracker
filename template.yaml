@@ -221,23 +221,27 @@ Conditions:
   AlertsEnabled: !Not [!Equals [!Ref AlertEmail, '']]
 
 Resources:
+  # Notion → Supabase mirror (scheduled). Keeps the name `nzyme-task-tracker`
+  # so the heartbeat metric filter on /aws/lambda/nzyme-task-tracker keeps
+  # counting the per-tick heartbeat line. The real-time webhook split out into
+  # WebhookFunction (below) on 2026-06-16 — same stack, same API Gateway.
   NzymeFunction:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: nzyme-task-tracker
-      Handler: src.webhook.lambda_handler.handler
+      Handler: src.webhook.lambda_handler.cron_handler
       CodeUri: .
       MemorySize: 512
-      # Transcript pipeline = 3 sequential LLM calls (correct → extract →
-      # classify) per meeting. End-to-end runs ~60–110s for typical meetings;
-      # 120s left no headroom and timed out the 2026-04-21 fundraising test
-      # mid-classifier. 300s gives ~3x margin for the slow tail.
+      # Sunday full re-sync can walk every page edited in the last 14 days;
+      # 300s gives ample margin over the 5-min incremental's small delta.
       Timeout: 300
       LoggingConfig:
         LogFormat: JSON
         ApplicationLogLevel: !Ref LogLevel
         SystemLogLevel: WARN
       Policies:
+        # Sync resolves meeting attendees via GCal (src/attendees.py), so it
+        # still needs to read the Google service-account secret.
         - !If
           - GCalEnabled
           - Statement:
@@ -247,12 +251,6 @@ Resources:
                 Resource: !Ref GoogleServiceAccountSecretArn
           - !Ref AWS::NoValue
       Events:
-        WebhookPost:
-          Type: HttpApi
-          Properties:
-            Path: /webhook/{token}
-            Method: POST
-            ApiId: !Ref HttpApi
         SupabaseSync:
           Type: Schedule
           Properties:
@@ -267,6 +265,33 @@ Resources:
             Description: Sunday safety-net — re-sync every meeting page edited in the last 14 days, regardless of checkpoint. Sunday 07:00 UTC.
             Enabled: true
             Input: '{"source": "aws.events", "job": "supabase_sync_full"}'
+
+  # Real-time meeting-template injection. Split out of NzymeFunction 2026-06-16
+  # (final, optional step of the lambda-split migration) so the webhook can
+  # grow in its own function / failure-domain / log-group. It stays on the SAME
+  # HttpApi resource below, so the API Gateway URL is unchanged — the ~10 Notion
+  # automations need no repointing. Injection only calls Notion (set Date +
+  # inject template); no GCal/Supabase/AWS-resource access → no extra IAM.
+  WebhookFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: nzyme-webhook
+      Handler: src.webhook.lambda_handler.webhook_handler
+      CodeUri: .
+      MemorySize: 256
+      Timeout: 30
+      LoggingConfig:
+        LogFormat: JSON
+        ApplicationLogLevel: !Ref LogLevel
+        SystemLogLevel: WARN
+      Events:
+        WebhookPost:
+          Type: HttpApi
+          Properties:
+            Path: /webhook/{token}
+            Method: POST
+            ApiId: !Ref HttpApi
+
   HttpApi:
     Type: AWS::Serverless::HttpApi
     Properties:
@@ -323,4 +348,8 @@ Outputs:
     Description: URL for the Notion automation webhook (append your secret token)
     Value: !Sub https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/webhook/{your-token}
   FunctionArn:
+    Description: Sync (Notion → Supabase) function — nzyme-task-tracker
     Value: !GetAtt NzymeFunction.Arn
+  WebhookFunctionArn:
+    Description: Real-time webhook (template injection) function — nzyme-webhook
+    Value: !GetAtt WebhookFunction.Arn
