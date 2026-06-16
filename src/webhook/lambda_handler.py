@@ -1,17 +1,18 @@
-"""AWS Lambda handler — single function for both webhook and scheduled extraction."""
+"""AWS Lambda handler — webhook (template injection) + Notion → Supabase sync.
+
+Task extraction was carved out to the standalone ``nzyme-task-extraction``
+project (2026-06-15); this handler no longer runs any extraction.
+"""
 from __future__ import annotations
 
 import json
 import logging
 import os
 
-from notion_client import APIResponseError, Client as NotionClient
+from notion_client import Client as NotionClient
 
 from src.config import load_config
-from src.meeting_db_registry import load_registry
 from src.notion_client_wrapper import NotionClientWrapper
-from src.pipeline import run_sync_for_page
-from src.sources.single_source import SingleSource
 from src.supabase_sync import run_full as supabase_run_full
 from src.supabase_sync import run_incremental as supabase_run_incremental
 from src.utils.llm_logging import configure_logfire
@@ -48,10 +49,11 @@ def handler(event, context):
     Routes based on event source:
     - API Gateway (has "requestContext") → template injection via webhook
     - CloudWatch Events with {"job": "supabase_sync"} → Notion → Supabase mirror
-    - CloudWatch Events (default) → scheduled extraction
+    - CloudWatch Events with {"job": "supabase_sync_full"} → weekly safety sweep
 
-    NOTE: hierarchy_sync (daily) + weekly_archive (Sunday) were carved out to the
-    standalone nzyme-housekeeping Lambda (org account, 2026-06-11).
+    NOTE: task extraction was carved out to the standalone nzyme-task-extraction
+    project (2026-06-15); hierarchy_sync (daily) + weekly_archive (Sunday) were
+    carved out to nzyme-housekeeping (org account, 2026-06-11).
     """
     # CloudWatch Events cron — silent unless there's actual work
     if event.get("source") == "aws.events":
@@ -60,7 +62,8 @@ def handler(event, context):
             return _handle_supabase_sync(event, context)
         if job == "supabase_sync_full":
             return _handle_supabase_sync_full(event, context)
-        return _handle_extraction(event, context)
+        logger.warning("Unknown cron job: %s", job)
+        return {"statusCode": 400, "body": json.dumps({"error": "unknown job"})}
 
     # API Gateway (has requestContext or pathParameters)
     if event.get("requestContext") or event.get("pathParameters"):
@@ -103,73 +106,6 @@ def _handle_webhook(event, context):
     except Exception:
         logger.exception("Webhook handler failed")
         return {"statusCode": 500, "body": json.dumps({"error": "internal error"})}
-
-
-def _handle_extraction(event, context):
-    """Scheduled extraction: find idle meeting pages and run AI extraction.
-
-    Triggered by CloudWatch Events rule (every 1 minute). Stays silent at
-    INFO when there's no work — only logs once a page is found.
-    """
-    config, client = _init()
-
-    # include_inactive: poll inactive members' DBs too so their meetings
-    # still reach the Supabase mirror. Inactive members' pages skip task
-    # extraction (gated in process_meeting by owner.active).
-    try:
-        registry = load_registry(config, client, include_inactive=True)
-    except Exception:
-        logger.exception("Failed to load Meeting Notes DB registry — aborting tick")
-        return {"statusCode": 500, "body": json.dumps({"error": "registry load failed"})}
-
-    # Gather ready pages across all per-member DBs.
-    ready: list[tuple[dict, str]] = []  # (page, owner_name)
-    for member_db in registry:
-        try:
-            source = SingleSource(client, member_db.db_id)
-            for page in source.get_ready_pages(idle_minutes=config.idle_minutes):
-                ready.append((page, member_db.owner_name or "?"))
-        except APIResponseError as e:
-            # Notion transient outage (429 / 5xx) after retries exhausted —
-            # next 5-min cron tick will pick up this DB, so log as WARNING
-            # without a stack trace rather than alarming as ERROR.
-            if e.status in (429, 500, 502, 503, 504):
-                logger.warning(
-                    "Notion transient %s for db=%s (%s) — will retry next cycle",
-                    e.status, member_db.db_id, member_db.owner_name or "?",
-                )
-            else:
-                logger.exception(
-                    "Failed to query ready pages for db=%s (%s) — skipping this DB",
-                    member_db.db_id, member_db.owner_name or "?",
-                )
-        except Exception:
-            logger.exception(
-                "Failed to query ready pages for db=%s (%s) — skipping this DB",
-                member_db.db_id, member_db.owner_name or "?",
-            )
-
-    processed = 0
-    if ready:
-        logger.info(
-            "cron tick: %d page(s) ready for extraction across %d DB(s)",
-            len(ready), len(registry),
-        )
-        for page, owner in ready:
-            page_id = page["id"]
-            try:
-                run_sync_for_page(config, client, page_id)
-                processed += 1
-            except Exception:
-                logger.exception(
-                    "Failed to process page %s (db_owner=%s) — will retry next cycle",
-                    page_id, owner,
-                )
-    else:
-        logger.debug("cron tick: 0 pages ready across %d DB(s)", len(registry))
-
-    logger.info("cron tick complete: processed=%d", processed)
-    return {"statusCode": 200, "body": json.dumps({"processed": processed})}
 
 
 def _handle_supabase_sync(event, context):

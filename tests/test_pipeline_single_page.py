@@ -5,7 +5,7 @@ import httpx
 from notion_client import APIResponseError
 
 from src.config import SyncConfig
-from src.pipeline import run_inject_templates_for_page, run_sync_for_page
+from src.pipeline import run_inject_templates_for_page
 
 
 def _make_404_error(message: str = "Could not find block") -> APIResponseError:
@@ -156,102 +156,3 @@ class TestRunInjectTemplatesForPage:
 
         assert result is False
         mock_source_cls.return_value.mark_template_injected.assert_not_called()
-
-
-class TestRunSyncForPage:
-    def test_skips_already_processed_page(self):
-        config = _make_config()
-        client = MagicMock()
-        client.get_page.return_value = {
-            "id": "page-1",
-            "parent": {"type": "database_id", "database_id": "db-meetings"},
-            "properties": {
-                "Processed": {"type": "checkbox", "checkbox": True},
-                "Date": {"type": "date", "date": {"start": "2026-01-01"}},
-            },
-        }
-
-        run_sync_for_page(config, client, "page-1")
-
-        # Should return early without calling any extraction
-        client.list_users.assert_not_called()
-
-    @patch("src.pipeline._load_sync_context")
-    @patch("src.pipeline._build_seen_fingerprints")
-    @patch("src.pipeline.SingleSource")
-    def test_marks_empty_page_as_processed(
-        self, mock_source_cls, mock_fingerprints, mock_ctx,
-    ):
-        config = _make_config()
-        client = MagicMock()
-        client.get_page.return_value = {
-            "id": "page-1",
-            "parent": {"type": "database_id", "database_id": "db-meetings"},
-            "properties": {
-                "Processed": {"type": "checkbox", "checkbox": False},
-                "Date": {"type": "date", "date": {"start": "2026-01-01"}},
-                "Meeting": {"type": "title", "title": [{"plain_text": "Empty meeting"}]},
-                "Meeting type": {"type": "select", "select": None},
-                "Attendees": {"type": "people", "people": []},
-            },
-        }
-
-        mock_fingerprints.return_value = set()
-        mock_source = mock_source_cls.return_value
-        mock_source.get_page_content.return_value = "   "  # empty content
-        mock_source.get_page_metadata.return_value = {
-            "title": "Empty meeting", "date": "2026-01-01",
-            "meeting_type": "", "attendees": [],
-        }
-
-        mock_ctx.return_value = {
-            "system_prompt_template": "template", "user_prompt_template": "template",
-            "hierarchy": [], "categories": ["Other"],
-            "all_users": [], "existing_tasks": [], "deals": [],
-            "extractor": MagicMock(), "writer": MagicMock(), "semantic_dedup": None,
-        }
-
-        run_sync_for_page(config, client, "page-1")
-
-        mock_source.mark_page_processed.assert_called_once_with("page-1")
-        mock_ctx.return_value["extractor"].extract.assert_not_called()
-
-    @patch("src.pipeline._load_sync_context")
-    @patch("src.pipeline._build_seen_fingerprints")
-    @patch("src.pipeline.SingleSource")
-    def test_dedup_marks_processed_and_skips(
-        self, mock_source_cls, mock_fingerprints, mock_ctx,
-    ):
-        config = _make_config()
-        client = MagicMock()
-        client.get_page.return_value = {
-            "id": "page-1",
-            "parent": {"type": "database_id", "database_id": "db-meetings"},
-            "properties": {
-                "Processed": {"type": "checkbox", "checkbox": False},
-                "Date": {"type": "date", "date": {"start": "2026-01-01"}},
-                "Meeting": {"type": "title", "title": [{"plain_text": "Standup"}]},
-                "Meeting type": {"type": "select", "select": None},
-                "Attendees": {"type": "people", "people": []},
-            },
-        }
-
-        # Fingerprint is now (db_id|title|date) — db prefix is the page's parent DB.
-        mock_fingerprints.return_value = {"dbmeetings|standup|2026-01-01"}
-        mock_source = mock_source_cls.return_value
-        mock_source.get_page_metadata.return_value = {
-            "title": "Standup", "date": "2026-01-01",
-            "meeting_type": "", "attendees": [],
-        }
-
-        mock_ctx.return_value = {
-            "system_prompt_template": "template", "user_prompt_template": "template",
-            "hierarchy": [], "categories": ["Other"],
-            "all_users": [], "existing_tasks": [], "deals": [],
-            "extractor": MagicMock(), "writer": MagicMock(), "semantic_dedup": None,
-        }
-
-        run_sync_for_page(config, client, "page-1")
-
-        mock_source.mark_page_processed.assert_called_once_with("page-1")
-        mock_ctx.return_value["extractor"].extract.assert_not_called()

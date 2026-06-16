@@ -146,14 +146,12 @@ def _resolve_attendee_emails(
 ) -> list[str] | None:
     """GCal-first attendee emails for a meeting page, or None.
 
-    Runs the same GCal → Notion resolution chain as the extraction pipeline
-    (``pipeline._resolve_attendees``). Soft-fails: any error → None (the
+    Runs the same GCal → Notion resolution chain the extraction pipeline used
+    (``attendees._resolve_attendees``). Soft-fails: any error → None (the
     column stays NULL; the next edit / weekly sweep retries).
     """
     try:
-        # Lazy import — pipeline imports from this module (via fundraising),
-        # so a top-level import would be circular.
-        from src.pipeline import _resolve_attendees
+        from src.attendees import _resolve_attendees
 
         metadata = {
             "title": title,

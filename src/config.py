@@ -34,23 +34,6 @@ class SyncConfig(BaseModel):
         "https://openrouter.ai/api/v1",
         description="OpenRouter OpenAI-compatible base URL.",
     )
-    # Per-stage model overrides (manual CLI runs / experiments).
-    # When set, take precedence over openai_model / gemini_model for that
-    # stage. Provider is inferred from the model name prefix:
-    # `gemini-*` → Gemini key + base URL, anything else → OpenAI key + base URL.
-    extraction_model: str | None = Field(None, description="Override model for task extraction stage")
-    classification_model: str | None = Field(None, description="Override model for task classification stage")
-    # CLI override for the per-member `Auto-extract Tasks` Org Chart flag.
-    # When None, the registry value applies (default True). When True/False,
-    # forces every page in this run onto that path regardless of the Org
-    # Chart. Used for debugging — not loaded from .env.
-    auto_extract_tasks_override: bool | None = Field(
-        None,
-        description=(
-            "CLI override for the Org Chart `Auto-extract Tasks` flag. "
-            "When set, applies to every page processed in this run."
-        ),
-    )
     meeting_notes_db_id: str | None = Field(
         None,
         description=(
@@ -80,8 +63,6 @@ class SyncConfig(BaseModel):
     sync_interval: int = Field(300, description="Seconds between sync runs in watch mode")
     # Deal context (Investment Team)
     deal_workplans_db_id: str | None = Field(None, description="Deal Workplans DB ID (enables deal-aware extraction)")
-    # Semantic dedup
-    semantic_dedup_threshold: float = Field(0.80, description="Cosine similarity threshold for semantic dedup (0.0-1.0)")
     # Transcript pipeline
     terminology_db_id: str | None = Field(None, description="Terminology Dictionary DB ID (transcript correction)")
     org_chart_db_id: str | None = Field(None, description="Org Chart DB ID (transcript speaker identification)")
@@ -213,8 +194,6 @@ def load_config() -> SyncConfig:
         openrouter_base_url=os.getenv(
             "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1",
         ),
-        extraction_model=os.getenv("EXTRACTION_MODEL") or None,
-        classification_model=os.getenv("CLASSIFICATION_MODEL") or None,
         meeting_notes_db_id=os.getenv("MEETING_NOTES_DB_ID") or None,
         team_tracker_db_id=os.environ["TEAM_TRACKER_DB_ID"],
         task_archive_db_id=os.getenv("TASK_ARCHIVE_DB_ID") or None,
@@ -226,7 +205,6 @@ def load_config() -> SyncConfig:
         meeting_template_page_id=os.getenv("MEETING_TEMPLATE_PAGE_ID"),
         inject_template=os.getenv("INJECT_TEMPLATE", "true").lower() in ("true", "1", "yes"),
         deal_workplans_db_id=os.getenv("DEAL_WORKPLANS_DB_ID"),
-        semantic_dedup_threshold=float(os.getenv("SEMANTIC_DEDUP_THRESHOLD", "0.80")),
         terminology_db_id=os.getenv("TERMINOLOGY_DB_ID"),
         org_chart_db_id=os.getenv("ORG_CHART_DB_ID"),
         classifier_prompt_page_id=os.getenv("CLASSIFIER_PROMPT_PAGE_ID"),

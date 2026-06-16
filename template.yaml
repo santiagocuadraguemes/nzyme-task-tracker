@@ -253,12 +253,6 @@ Resources:
             Path: /webhook/{token}
             Method: POST
             ApiId: !Ref HttpApi
-        ScheduledExtraction:
-          Type: Schedule
-          Properties:
-            Schedule: rate(5 minutes)
-            Description: Check for idle meeting pages and run AI extraction
-            Enabled: true
         SupabaseSync:
           Type: Schedule
           Properties:

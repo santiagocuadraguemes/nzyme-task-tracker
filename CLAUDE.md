@@ -2,9 +2,9 @@
 
 ## Project
 
-Nzyme is an AI-driven sync engine that extracts action items from Notion meeting notes and writes them to a Team Task Tracker database. Built for Kibo Ventures (PE/VC fund, ~10-20 people). Meeting notes may be in English, Spanish, or mixed.
+Nzyme is an AI-driven system that extracts action items from Notion meeting notes (English/Spanish/mixed) and writes them to a Team Task Tracker, built for Kibo Ventures (PE/VC fund, ~10-20 people).
 
-For pipeline detail, see [docs/architecture.md](docs/architecture.md).
+**This repo is the monolith.** After the lambda-split migration it runs just two jobs: real-time **meeting-template injection** (webhook) and the **Notion → Supabase mirror** (Sync). Task **extraction** was carved out to the standalone `nzyme-task-extraction` project (cut over 2026-06-15); **meeting mirrors**, **fundraising**, and **housekeeping** are likewise their own Lambdas. See [docs/architecture-lambda-split.md](docs/architecture-lambda-split.md) for the full split and [docs/architecture.md](docs/architecture.md) for pipeline detail.
 
 ## Setup
 
@@ -18,23 +18,9 @@ pip install -e "nzyme-task-tracker/.[dev]"
 
 Environment: copy `.env.example` to `.env` and fill in credentials. Never commit `.env` or `.secrets/`.
 
-## LLM keys — two-key setup
+## LLM keys
 
-Nzyme uses **two separate API keys** to balance cost and quality. When a run fails with an "API key not valid" error, check which endpoint was called to know which key to rotate.
-
-| Stage | Model | Env var |
-|-------|-------|---------|
-| Task extraction (heavy) — single merged correction + extraction call | `gemini-3-flash-preview` (Gemini 3 Flash Preview — **not** `gemini-2.5-flash`) | `GEMINI_API_KEY` |
-| Task classification (light) | `gpt-5-mini` | `OPENAI_API_KEY` |
-| Literal-notes extraction (light) — `Auto-extract Tasks = false` path | `gpt-5-mini` | `OPENAI_API_KEY` |
-| Semantic dedup embeddings (light) | `text-embedding-3-small` | `OPENAI_API_KEY` |
-
-- Endpoint `generativelanguage.googleapis.com` → Gemini key (`GEMINI_API_KEY`).
-- Endpoint `api.openai.com` → OpenAI key (`OPENAI_API_KEY`).
-
-**When suggesting any run command, always prefix with this key/model split so Santiago knows which key to check if the run fails.**
-
-The transcript path runs a single merged Gemini call (correction + extraction inline; ~60-70% cheaper than a 2-call flow). See [docs/transcript-pipeline.md](docs/transcript-pipeline.md) for internals, schema candidates, and the cost-optimisation harness.
+This repo (template injection + Supabase sync) makes **no LLM calls** — it needs only the Notion token plus Supabase credentials. The two-key cost/quality split — Gemini 3 Flash Preview (`GEMINI_API_KEY`) for heavy extraction, `gpt-5-mini` / `text-embedding-3-small` (`OPENAI_API_KEY`) for classification, literal-notes, and dedup embeddings — moved with task extraction to **`nzyme-task-extraction`**; see that project's docs for the key/model split and the cost-optimisation harness.
 
 ## Common commands
 
@@ -42,17 +28,14 @@ The transcript path runs a single merged Gemini call (correction + extraction in
 # Tests
 ../venv/Scripts/python -m pytest tests/ -v
 
-# Watch mode — loop continuously (Ctrl+C to stop)
+# Watch mode — loop continuously: inject templates every tick, Supabase sync on interval (Ctrl+C to stop)
 python -m src.main --watch
 python -m src.main --watch --dry-run --verbose
 
-# One-shot: run both template injection + AI extraction (default)
+# One-shot: inject templates (default) / run only the Notion → Supabase mirror
 python -m src.main
-
-# One-shot: run only template injection / only sync / only weekly archive sweep
 python -m src.main --inject-templates
-python -m src.main --sync
-python -m src.main --archive
+python -m src.main --supabase-sync
 
 # Lint
 ../venv/Scripts/python -m ruff check src/ tests/
@@ -60,13 +43,9 @@ python -m src.main --archive
 # Deploy Lambda — code-only (fast) / full (deps or template.yaml changed)
 ./scripts/quick-deploy.sh
 ./scripts/deploy.sh
-
-# Pause / resume the Lambda extraction cron without redeploying
-./scripts/pause-lambda.sh
-./scripts/resume-lambda.sh
 ```
 
-For per-stage model overrides, `--db-id`, the manual debug workflow, and deploy mechanics, see [docs/deployment.md](docs/deployment.md).
+For `--db-id`, dry-run options, and deploy mechanics, see [docs/deployment.md](docs/deployment.md). The extraction cron (and its `pause-lambda.sh` / `resume-lambda.sh`) moved to `nzyme-task-extraction`.
 
 ## Hard rules
 

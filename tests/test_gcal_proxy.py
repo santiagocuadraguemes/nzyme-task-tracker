@@ -9,7 +9,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from src.pipeline import _gcal_impersonation_target
+from src.attendees import _gcal_impersonation_target
 from src.transcript_pipeline import gcal_attendees
 
 

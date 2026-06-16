@@ -81,73 +81,40 @@ class TestWebhookRoute:
         assert response["statusCode"] == 200
 
 
-class TestExtractionRoute:
-    @patch("src.webhook.lambda_handler.run_sync_for_page")
-    @patch("src.webhook.lambda_handler.SingleSource")
+class TestCronRoute:
+    @patch("src.webhook.lambda_handler.supabase_run_incremental")
     @patch("src.webhook.lambda_handler._init")
-    def test_processes_ready_pages(self, mock_init, mock_source_cls, mock_sync):
+    def test_supabase_sync_job(self, mock_init, mock_sync):
         config = MagicMock()
-        config.idle_minutes = 3
-        config.meeting_notes_db_id = "db-meetings"
-        config.team_tracker_db_id = "db-tracker"
-        config.dry_run = False
-        client = MagicMock()
-        mock_init.return_value = (config, client)
+        mock_init.return_value = (config, MagicMock())
+        mock_sync.return_value = 3
 
-        mock_source = mock_source_cls.return_value
-        mock_source.get_ready_pages.return_value = [
-            {"id": "page-1"},
-            {"id": "page-2"},
-        ]
-
-        event = {"source": "aws.events", "detail-type": "Scheduled Event"}
+        event = {"source": "aws.events", "job": "supabase_sync"}
         response = handler(event, None)
 
         assert response["statusCode"] == 200
-        body = json.loads(response["body"])
-        assert body["processed"] == 2
-        assert mock_sync.call_count == 2
-        mock_source.get_ready_pages.assert_called_once_with(idle_minutes=3)
+        assert json.loads(response["body"])["upserted"] == 3
 
-    @patch("src.webhook.lambda_handler.SingleSource")
+    @patch("src.webhook.lambda_handler.supabase_run_full")
     @patch("src.webhook.lambda_handler._init")
-    def test_no_ready_pages(self, mock_init, mock_source_cls):
+    def test_supabase_sync_full_job(self, mock_init, mock_sweep):
         config = MagicMock()
-        config.idle_minutes = 3
-        config.meeting_notes_db_id = "db-meetings"
         mock_init.return_value = (config, MagicMock())
+        mock_sweep.return_value = 7
 
-        mock_source_cls.return_value.get_ready_pages.return_value = []
-
-        event = {"source": "aws.events", "detail-type": "Scheduled Event"}
+        event = {"source": "aws.events", "job": "supabase_sync_full"}
         response = handler(event, None)
 
-        body = json.loads(response["body"])
-        assert body["processed"] == 0
+        assert response["statusCode"] == 200
+        assert json.loads(response["body"])["upserted"] == 7
 
-    @patch("src.webhook.lambda_handler.run_sync_for_page")
-    @patch("src.webhook.lambda_handler.SingleSource")
-    @patch("src.webhook.lambda_handler._init")
-    def test_continues_on_page_failure(self, mock_init, mock_source_cls, mock_sync):
-        config = MagicMock()
-        config.idle_minutes = 3
-        config.meeting_notes_db_id = "db-meetings"
-        config.team_tracker_db_id = "db-tracker"
-        config.dry_run = False
-        client = MagicMock()
-        mock_init.return_value = (config, client)
-
-        mock_source_cls.return_value.get_ready_pages.return_value = [
-            {"id": "page-1"},
-            {"id": "page-2"},
-        ]
-        mock_sync.side_effect = [Exception("API error"), None]
-
+    def test_unknown_cron_job_returns_400(self):
+        # Extraction was carved out — a cron event with no recognized job
+        # must NOT trigger extraction; it returns a clear 400.
         event = {"source": "aws.events", "detail-type": "Scheduled Event"}
         response = handler(event, None)
-
-        body = json.loads(response["body"])
-        assert body["processed"] == 1  # second page succeeded
+        assert response["statusCode"] == 400
+        assert json.loads(response["body"])["error"] == "unknown job"
 
 
 class TestEventRouting:

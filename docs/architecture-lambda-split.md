@@ -1,7 +1,8 @@
 # Architecture: splitting the monolith into focused Lambdas
 
-> **Status:** roadmap / in progress. This is the target we are migrating toward,
-> not the current deployed shape. Updated 2026-06-08.
+> **Status:** nearly complete. Five of the six programs are carved out and live;
+> only the **Webhook** (and the Sync that co-tenants with it) remains in the
+> monolith, by design. Updated 2026-06-16.
 
 ## Why
 
@@ -38,12 +39,15 @@ Two questions decide where each job lives:
 | 6 | Template injection (+ set Date field) | real-time, on page creation (webhook) | Notion | Notion |
 | 7 | Weekly "Done" task archive sweep | Sunday 06:00 UTC | Team Task Tracker | Archive DB |
 
-> **Carve-out status (2026-06-08):** #4 Fundraising and #3 Meeting Mirrors now
-> run as their own Lambdas (`nzyme-fundraising`, `nzyme-meeting-mirrors`); their
-> in-monolith branches are disabled (Fundraising flag + Mirrors
-> `TOPIC_MIRROR_ENABLED=false`), and the Mirrors code has been removed from this
-> repo. #1 Sync's config mirror is committed and live in Supabase. #2 Extraction,
-> #5 Housekeeping, #6 Webhook, #7 Archive still run inside the monolith.
+> **Carve-out status (2026-06-16):** #4 Fundraising, #3 Meeting Mirrors, #5
+> Housekeeping, and #2 Extraction all now run as their own Lambdas
+> (`nzyme-fundraising`, `nzyme-meeting-mirrors`, `nzyme-housekeeping`,
+> `nzyme-task-extraction`); their in-monolith code has been removed from this
+> repo. #1 Sync's config mirror is committed and live in Supabase. Only #6
+> Webhook + #1 Sync (its co-tenant) — and the no-op #7 Archive — still run inside
+> the monolith. Extraction cut over live 2026-06-15; this repo's working tree
+> removes the dead extraction stack (the `_resolve_attendees` helper Sync still
+> needs was first lifted into `src/attendees.py`).
 
 ## Target architecture — 6 programs
 
@@ -81,7 +85,15 @@ decision).*
 them to the Team Task Tracker. Own claim table for idempotency, own readiness rule.
 Still reads a handful of static prompt pages from Notion at startup (classifier
 prompt, terminology) — those rarely change and are not worth mirroring.
-*Status: still inside the monolith. Carves out after Housekeeping.*
+*Status: ✅ **carved out + cut over live (2026-06-15)** → `nzyme-task-extraction`
+(folder in the `nzyme-fund/nzyme-meeting-notes` monorepo; SAM stack in org account
+`047719630984`, `rate(5 min)`). Reads candidates from `meeting_transcripts` +
+`org_chart_rows` (page-quiet gate, route on `auto_extract_tasks`); own claim table
+`extraction_meeting_posts`. The monolith's `ScheduledExtraction` cron is **disabled**
+and its extraction code is removed in this repo's working tree — the
+`pipeline._resolve_attendees` helper that Sync still lazy-imports was first lifted into
+`src/attendees.py`. Cutover was briefly blocked by a globally-revoked `OPENAI_API_KEY`
+(which had silently broken the monolith's extraction too); resolved by rotating the key.*
 
 **4. Meeting Mirrors** — reads the copy, clones tagged meetings into topic DBs.
 Own claim table (`mirror_meeting_posts`).
@@ -118,10 +130,10 @@ call from Notion, not a timer.
                                                                ▼
                           ┌──────────────┬──────────────┬──────────────┐
                           │ 2.EXTRACTION │ 3.MIRRORS     │ 4.FUNDRAISING│
-                          │ →Task Tracker│ →topic DBs    │ →Affinity ✅ │
+                          │ →Task Trkr ✅│ →topic DBs ✅ │ →Affinity ✅ │
                           └──────────────┴──────────────┴──────────────┘
 
-   Hierarchy/Detail DBs ─▶ 5. HOUSEKEEPING (daily) ─▶ Notion dropdowns + Tracker
+   Hierarchy/Detail DBs ─▶ 5. HOUSEKEEPING (daily) ✅ ─▶ Notion dropdowns + Tracker
    Affinity deals       ─▶    (+ weekly Done-archiving)
 ```
 
@@ -150,9 +162,13 @@ Fundraising is the reference implementation. Each worker:
    `nzyme-housekeeping` deployed to the org account; the appliers, archive sweep, cron
    schedules, handler branches, and CLI flags were removed from the monolith (shared
    `_http` moved to `src/supabase_rest.py`). Smoke-tested (`errors=0`).
-5. **Carve out Extraction** — new standalone repo using the fundraising pattern.
+5. **Carve out Extraction** — ✅ **Done (cut over 2026-06-15)** — `nzyme-task-extraction`
+   (folder in the `nzyme-fund/nzyme-meeting-notes` monorepo, org account `047719630984`,
+   `rate(5 min)`), built on the fundraising pattern. Worker is the live extractor; monolith
+   `ScheduledExtraction` cron disabled and its extraction code removed from this repo.
 6. **Webhook** — stays in the monolith, in the old account, indefinitely (see
-   "Account placement" below). Splitting it is optional and last.
+   "Account placement" below). Splitting it is optional and last. **This is the only
+   remaining piece in the monolith** (alongside Sync, its co-tenant).
 
 ## Account placement (decided 2026-06-11)
 
@@ -167,8 +183,9 @@ Two AWS accounts, both eu-west-1:
 - **Org account `047719630984`** (SSO, profile `org`) — hosts every timer-driven
   carve-out. `nzyme-fundraising` + `nzyme-meeting-mirrors` were staged here dormant on
   2026-06-09; the cron flip (enable org rules → verify → disable company rules) is the
-  pending cutover. All future carve-outs (Housekeeping, Extraction) deploy here
-  directly — never to the old account.
+  pending cutover. All timer-driven carve-outs — Fundraising, Mirrors, Housekeeping, and
+  now Extraction (`nzyme-task-extraction`, live 2026-06-15) — live here; future carve-outs
+  deploy here directly, never to the old account.
 - The staged `nzyme-task-tracker` copy in the org account (webhook host `zntuq4wrz6…`)
   is **redundant** under this decision — tear it down once the fundraising/mirrors flip
   is verified. Keep the org-account GCal secret (`nzyme/gcal-service-account`): the

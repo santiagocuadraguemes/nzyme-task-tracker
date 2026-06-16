@@ -166,7 +166,7 @@ def test_created_by_missing_entirely_is_safe():
     assert row["created_by_name"] is None
 
 
-@patch("src.pipeline._resolve_attendees")
+@patch("src.attendees._resolve_attendees")
 def test_attendees_resolved_for_every_meeting_when_enabled(mock_resolve):
     mock_resolve.return_value = [
         {"id": "lp@fund.com", "name": "LP", "email": "LP@Fund.com"},
@@ -186,7 +186,7 @@ def test_attendees_resolved_for_every_meeting_when_enabled(mock_resolve):
     mock_resolve.assert_called_once()
 
 
-@patch("src.pipeline._resolve_attendees")
+@patch("src.attendees._resolve_attendees")
 def test_attendees_not_resolved_when_disabled(mock_resolve):
     row = extract_row(
         _page(macro_work_block="Investor Relations & Fundraising"),
@@ -198,7 +198,7 @@ def test_attendees_not_resolved_when_disabled(mock_resolve):
     mock_resolve.assert_not_called()
 
 
-@patch("src.pipeline._resolve_attendees")
+@patch("src.attendees._resolve_attendees")
 def test_attendees_not_resolved_without_config(mock_resolve):
     row = extract_row(
         _page(macro_work_block="Investor Relations & Fundraising"),
@@ -209,7 +209,7 @@ def test_attendees_not_resolved_without_config(mock_resolve):
     mock_resolve.assert_not_called()
 
 
-@patch("src.pipeline._resolve_attendees")
+@patch("src.attendees._resolve_attendees")
 def test_attendee_resolution_failure_soft_fails(mock_resolve):
     mock_resolve.side_effect = RuntimeError("GCal exploded")
     row = extract_row(
