@@ -1,5 +1,19 @@
 # Transcript pipeline
 
+> **MOVED (2026-06-15).** The transcript/task-extraction pipeline was carved out to
+> the standalone **`nzyme-task-extraction`** project. The modules below that did
+> extraction — `task_extractor.py`, `task_classifier.py`, `transcript_cleaner.py`,
+> `context_loader.py`, `schemas.py`, the `__main__` CLI, and the output-token harness
+> (`scripts/compare_candidate.py` et al.) — **no longer exist in this repo**; this
+> section is retained as the reference description of that project. See
+> `nzyme-task-extraction` for the live code and [architecture-lambda-split.md](architecture-lambda-split.md).
+>
+> **Still in this repo:** `src/transcript_pipeline/fetch_transcript.py` and
+> `gcal_attendees.py`. They are kept because the Notion → Supabase mirror's attendee
+> resolution (`src/attendees.py`) uses them to populate `attendee_emails`. The
+> **Google Calendar integration** section below therefore still applies here; the
+> extraction-pipeline sections do not.
+
 The transcript pipeline modules (`src/transcript_pipeline/`) handle transcript-based task extraction. These modules are integrated into the main pipeline orchestrator (`src/pipeline.py`) and are also available as a standalone CLI for diagnostics.
 
 ## Pipeline steps

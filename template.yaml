@@ -1,7 +1,7 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 Description: |
-  Nzyme Task Tracker — webhook-driven sync engine. Template injection via Notion automation webhook, AI extraction via scheduled cron.
+  Nzyme Task Tracker (monolith) — template injection via Notion automation webhook + Notion → Supabase mirror cron. Task extraction, hierarchy housekeeping, mirrors, and fundraising run as separate Lambdas (see docs/architecture-lambda-split.md).
 
 Globals:
   Function:

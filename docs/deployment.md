@@ -20,37 +20,29 @@ For `sam build`, the venv Python must be on PATH:
 PATH="C:/Users/Santiago Cuadra/vscode_projects/venv/Scripts:$PATH" sam build
 ```
 
-## Pausing the extraction cron
+> **Note (post lambda-split).** This repo now only injects templates and runs the
+> Notion → Supabase mirror. Task extraction (and its `pause-lambda.sh` /
+> `resume-lambda.sh` cron controls, per-stage model overrides, and provider
+> auto-detection) moved to `nzyme-task-extraction`; the hierarchy appliers and the
+> Done-task archive moved to `nzyme-housekeeping`. See those projects for their
+> deploy/CLI docs and [architecture-lambda-split.md](architecture-lambda-split.md)
+> for the overall shape.
 
-`scripts/pause-lambda.sh` disables the EventBridge schedule rule (`*-NzymeFunctionScheduledExtraction-*`) so the 1-minute extraction cron stops firing. The webhook (template injection) keeps working. Use this when you want to run the pipeline manually from the CLI without competing with Lambda for the same meetings.
+## Manual CLI runs
 
-- `./scripts/pause-lambda.sh` — disables the rule (instant, no redeploy)
-- `./scripts/resume-lambda.sh` — re-enables the rule
-
-While paused, live AWS state drifts from `template.yaml` (which still says `Enabled: true`). The next full `./scripts/deploy.sh` resets the rule to enabled, so always resume before deploying — or know that deploy will resume it for you.
-
-## Manual CLI runs (debug / experiment mode)
-
-`python -m src.main --sync` accepts overrides for fine-grained control. Useful when you've paused the Lambda and want to step through a fixed set of meetings.
+`python -m src.main` accepts these flags:
 
 | Flag | Effect |
 |------|--------|
+| `--inject-templates` | Inject the meeting-note template into new pages (one-shot). Default when no flag is given. |
+| `--supabase-sync` | Run the Notion → Supabase incremental mirror (one-shot). |
+| `--watch` | Continuous loop: inject templates every `WATCH_INTERVAL`s, run the Supabase sync every `SYNC_INTERVAL`s. |
 | `--db-id <notion_db_id>` | Process exactly one Meeting Notes DB (skips Org Chart discovery). Equivalent to setting `MEETING_NOTES_DB_ID` in `.env`. |
-| `--correction-model <model>` | Override the model for transcript correction. |
-| `--extraction-model <model>` | Override the model for task extraction. |
-| `--classification-model <model>` | Override the model for task classification. |
-| `--auto-extract-tasks` | Force every page in the run onto the transcript pipeline (ignores per-row Org Chart flag). Debugging only. |
-| `--no-auto-extract-tasks` | Force every page onto the literal-notes path. Debugging only. |
-| `--verbose` | DEBUG-level logs for `src.*` (third-party loggers stay at WARNING via `setup_logging`). Dumps the corrected transcript and raw LLM response payloads. |
+| `--dry-run` | Log actions but don't write to Notion. |
+| `--verbose` | DEBUG-level logs for `src.*` (third-party loggers stay at WARNING via `setup_logging`). |
 
-**Provider auto-detection** (checked in this order):
-- model name contains `/` → OpenRouter slug (e.g. `google/gemini-2.5-flash-preview`, `deepseek/deepseek-chat-v3.1:free`). Routes via `OPENROUTER_API_KEY` + `OPENROUTER_BASE_URL`. Useful as a failover when Google returns 503 UNAVAILABLE on the merged Gemini call. Note: routing through OpenRouter loses Gemini's native context cache (~25% input-token discount).
-- model name starts with `gemini-` → Google Gemini direct via `GEMINI_API_KEY` + `GEMINI_BASE_URL`. Only this path can use the native context cache.
-- otherwise → OpenAI direct via `OPENAI_API_KEY` + the hardcoded OpenAI base URL.
-
-So `--classification-model gemini-3-flash-preview`, `--correction-model gpt-5-mini`, or `--extraction-model google/gemini-2.5-flash-preview` all Just Work.
-
-Default INFO output reads as a clear pipeline trace: per-meeting framing, then one log line per stage with model + elapsed + token counts. Embedding model (`text-embedding-3-small`) and fundraising-summary model are not exposed as flags — those are not interesting for the dev/test loop.
+This repo makes **no LLM calls** — it needs only the Notion token plus Supabase
+credentials. (Model/provider configuration lives with `nzyme-task-extraction`.)
 
 ## Watch vs one-shot mode
 
@@ -59,19 +51,13 @@ Default INFO output reads as a clear pipeline trace: per-meeting framing, then o
 python -m src.main --watch
 python -m src.main --watch --dry-run --verbose
 
-# One-shot: run both template injection + AI extraction (default)
+# One-shot: inject templates (default)
 python -m src.main
-python -m src.main --dry-run --verbose
+python -m src.main --inject-templates --dry-run --verbose
 
-# One-shot: run only template injection
-python -m src.main --inject-templates
-
-# One-shot: run only AI extraction pipeline
-python -m src.main --sync
-
-# One-shot: run the Done-task archive sweep (mirrors the weekly Sunday Lambda job)
-python -m src.main --archive
-python -m src.main --archive --dry-run --verbose
+# One-shot: run only the Notion → Supabase mirror
+python -m src.main --supabase-sync
 ```
 
-See `docs/architecture.md` for the weekly Done-task archive sweep behaviour and the Lambda entry points (`webhook_handler`, `extraction_handler`, `_handle_weekly_archive`).
+See `docs/architecture.md` for the Lambda entry points (the webhook handler routes
+template injection + the `supabase_sync` / `supabase_sync_full` cron jobs).

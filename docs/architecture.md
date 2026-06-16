@@ -1,212 +1,141 @@
 # Architecture
 
-## Pipeline Overview
+> **Scope (post lambda-split, 2026-06).** This repo is the **monolith** and now runs
+> only two jobs: real-time **meeting-template injection** (webhook) and the
+> **Notion → Supabase mirror** (Sync). The AI extraction pipeline, the hierarchy /
+> Detail / External-Org appliers, the weekly Done-task archive, meeting mirrors, and
+> fundraising were all carved out into separate Lambdas. This doc describes what
+> remains here; see [architecture-lambda-split.md](architecture-lambda-split.md) for
+> the full split and where each job now lives.
+>
+> | Concern | Now lives in |
+> |---|---|
+> | Task extraction (transcript + literal-notes, classifier, semantic dedup, tracker writer, hierarchy/deal context) | `nzyme-task-extraction` |
+> | Hierarchy / Detail / External-Org appliers **+** weekly Done-task archive sweep | `nzyme-housekeeping` |
+> | Meeting Mirrors | `nzyme-meeting-mirrors` |
+> | Fundraising → Affinity | `nzyme-fundraising` |
+> | **Template injection + Notion → Supabase mirror** | **this repo** |
+>
+> The carved-out workers are pull-model consumers: they read the Supabase copy this
+> repo's Sync maintains, not Notion directly.
 
-The pipeline routes each meeting through one of three extraction paths. The first decision is the per-member `Auto-extract Tasks` flag on the Org Chart (default `true`). For members who opt out (`false`), the **literal-notes path** runs instead of the transcript pipeline: a single light LLM call (gpt-5-mini) on the page's notes content, using the Notion-hosted prompt at `LITERAL_NOTES_EXTRACTION_PROMPT_PAGE_ID` that instructs the model to keep titles verbatim. For members who opt in (default), the pipeline is transcript-first and falls back to a notes-based AI extractor when no transcript exists. It iterates over a **registry of per-member Meeting Notes databases** discovered from the Org Chart (one DB per active team member).
+## What this repo does
 
-```
-main.py → pipeline.run_sync():
-  0. template_injector → inject `## Action Items` + `## Notes` headings across every DB (if enabled)
-  Discover registry from Org Chart (active rows with a "Meeting Notes DB" URL,
-                                    each carrying owner.auto_extract_tasks)
-  Load shared context once (hierarchy, categories, users, deals, terminology, org chart,
-                            classifier prompt, literal-notes extraction prompt)
-  for each member DB:
-    Build (db_id, title, date) fingerprint set from already-processed meetings in this DB
-    for each unprocessed meeting in this DB:
-      1. Skip if fingerprint matches a processed meeting in THIS DB
-      2. Decide path on owner.auto_extract_tasks (CLI override wins when set):
-         IF auto_extract_tasks is False:
-           a. Resolve attendees (GCal → Notion → governance fallback) — used as LLM context
-           b. literal_notes_extractor.extract → 1 LIGHT LLM call (gpt-5-mini) with the
-              Notion-hosted prompt; returns tasks shaped for the classifier:
-              {title (verbatim), assignee, internal_assignees, external_assignees, supporting_quote}.
-              If the model returns 0 tasks → log WARNING and mark Processed (no further fallback).
-           c. TaskClassifier → parent_task_id, assignee_id; category is
-              derived from the parent's Tier-0 ancestor. Output uses int
-              tokens (`p`, `a`) instead of UUIDs to cut output tokens
-              ~30%; the unpacker translates them back to Notion UUIDs.
-         ELIF transcript_block_id present:
-           a. Resolve attendees (GCal → Notion → governance fallback)
-           b. Merged correction + extraction (1 LLM call)
-           c. Classify tasks (1 LLM call)
-         ELSE (no transcript):
-           a. Mark processed and skip — no extraction path is run.
-      3. Semantic dedup → filter duplicates (workspace-wide, cross-DB)
-      4. Assignee fallback → default to meeting creator on every path
-      5. team_writer → create task pages in Team Task Tracker
-      6. Mark meeting page as Processed
-```
+`src/main.py` (locally) and `src/webhook/lambda_handler.py` (in Lambda) drive two
+independent jobs:
 
-CLI override (debugging only): `python -m src.main --sync --auto-extract-tasks` or `--no-auto-extract-tasks` forces every page in the run onto that path regardless of the per-row Org Chart flag. The override sets `SyncConfig.auto_extract_tasks_override` and is consulted by `_should_auto_extract(config, owner)` before the registry value.
+1. **Template injection** — inject the meeting-note template (`## Action Items` +
+   `## Notes` headings) into new meeting pages across every per-member Meeting Notes
+   DB. Real-time via the Notion-automation webhook on page creation, plus a safety-net
+   pass on each watch-mode tick.
+2. **Notion → Supabase mirror (Sync)** — replicate meetings + member config + meeting
+   rules into Supabase (the Neo project) as the single read surface the consumer
+   Lambdas pull from.
+
+## Entry point (`src/main.py`)
+
+- CLI args: `--watch`, `--inject-templates`, `--supabase-sync`, `--db-id`, `--dry-run`, `--verbose`
+- Loads `SyncConfig` from `.env` via Pydantic; configures Logfire when `LOGFIRE_TOKEN` is set
+- Creates a `NotionClientWrapper` and runs in one of two modes:
+
+**Watch mode** (`--watch`): continuous loop. Template injection runs every
+`WATCH_INTERVAL`s (default 10s); the Supabase sync runs every `SYNC_INTERVAL`s
+(default 5 min). Ctrl+C to stop.
+
+**One-shot mode** (default): runs `run_inject_templates()` and/or the Supabase
+mirror once and exits. With no flag, it injects templates.
 
 ## Per-member Meeting Notes DBs
 
-Each team member has their own Meeting Notes database. The same meeting commonly appears in multiple DBs (each attendee's personal notes capture different commitments from their own perspective). The pipeline polls every DB on every cycle.
+Each team member has their own Meeting Notes database. The same meeting commonly
+appears in multiple DBs (each attendee's personal notes capture different
+commitments). Both jobs iterate every active member DB on every cycle.
 
-**Registry source of truth:** the Nzyme Org Chart DB. Every active row carries a `Meeting Notes DB` URL property pointing at that member's database. `src/meeting_db_registry.py` reads these rows once per cycle and returns one `MeetingDB(db_id, owner_name, owner_email)` per active member with a URL set. Joiners and leavers are managed entirely in Notion (no redeploy):
+**Registry source of truth:** the Nzyme Org Chart DB. Every active row carries a
+`Meeting Notes DB` URL property pointing at that member's database.
+`src/meeting_db_registry.py` reads these rows once per cycle and returns one
+`MeetingDB(db_id, owner_name, owner_email, auto_extract_tasks)` per active member
+with a URL set. Joiners and leavers are managed entirely in Notion (no redeploy):
 
 - **Add a member:** create their DB, set `Active=true` on their Org Chart row, paste the DB URL into `Meeting Notes DB`.
 - **Remove a member:** flip `Active=false` (or clear the URL).
 
-`MEETING_NOTES_DB_ID` env var is an **override** — when set, registry discovery is bypassed and only that DB is polled. Useful for tests and single-DB dev runs. In production, leave it unset and let the Org Chart drive.
+`MEETING_NOTES_DB_ID` (env / `--db-id`) is an **override** — when set, registry
+discovery is bypassed and only that DB is processed (useful for tests / single-DB
+dev runs). The `auto_extract_tasks` flag is still read and mirrored to Supabase
+(`org_chart_rows.auto_extract_tasks`) for the extraction consumer, but this repo no
+longer routes on it.
 
-**Cross-DB fingerprint:** `_meeting_fingerprint(db_id, title, date)` prefixes the dedup key with the DB ID. Two team members' notes about the same meeting (identical title + date in their own DBs) therefore produce different fingerprints and are both processed. Duplicate task titles across DBs are caught later by the workspace-wide semantic dedup layer. Within a single DB, Notion's `(1)` / `(2)` suffix on duplicate pages still collapses correctly.
+**Webhook setup stays per-DB:** each member's Notion automation points at the same
+API Gateway URL. No workspace-level webhook exists in Notion.
 
-**Webhook setup stays per-DB:** each member's Notion automation must point at the same API Gateway URL. No workspace-level webhook exists in Notion.
+## Template injection (`src/pipeline.py` + `src/template_injector.py`)
 
-## Entry Point (`src/main.py`)
+`src/pipeline.py` exposes two template-injection entry points (extraction was
+removed when it moved to `nzyme-task-extraction`):
 
-- Parses CLI args: `--watch`, `--inject-templates`, `--sync`, `--dry-run`, `--verbose`
-- Loads `SyncConfig` from `.env` via Pydantic
-- Configures Logfire for OpenAI observability (uses `LOGFIRE_TOKEN` when provided)
-- Creates `NotionClientWrapper` and runs in one of two modes:
-
-**Watch mode** (`--watch`): Continuous loop. Template injection runs every `WATCH_INTERVAL` seconds (default 10s). Sync extraction runs every `SYNC_INTERVAL` seconds (default 5 min). Ctrl+C to stop.
-
-**One-shot mode** (default): Runs `run_inject_templates()` and/or `run_sync()` once and exits. If neither `--inject-templates` nor `--sync` is passed, both run.
-
-## Pipeline Orchestrator (`src/pipeline.py`)
-
-Two independent entry points:
-
-### `run_inject_templates()` (`--inject-templates`)
-
-Fetches the meeting note template from Notion (`MEETING_TEMPLATE_PAGE_ID`), then injects it into pages that don't have it yet. Queries `Template Injected=false` (created in last 12 hours) to catch pages ASAP. Sets `Template Injected=true` after successful injection.
-
-### `run_sync()` (`--sync`)
-
-Instantiates all components with a shared `NotionClientWrapper`, then:
-
-1. **Discover registry** (`load_registry()`) — reads active Org Chart rows with a `Meeting Notes DB` URL set, returns a list of `MeetingDB` entries. Aborts the cycle on failure.
-2. **Load shared context** (`_load_sync_context()`) — prompts, hierarchy, categories, users, deals, semantic dedup, terminology, org chart, classifier prompt. Loaded **once** per cycle (not per DB) since none of it varies by member DB. Abort on prompt load failure (required). Other context degrades gracefully.
-3. **For each member DB in the registry:**
-   a. **Poll unprocessed meetings** — `created_time < (now - buffer_hours)` AND `Processed = false`
-   b. **Build per-DB fingerprints** — loads already-processed meetings in THIS DB
-   c. **For each meeting page:**
-      - Check fingerprint `(db_id, normalized_title, date)` against this DB's dedup set; skip duplicates
-      - Check for `meeting_notes` block → transcript path or notes fallback
-      - **Transcript path:** resolve attendees → correct → extract → classify (3 LLM calls)
-      - **Notes fallback:** fetch content → AI extract + classify (1 LLM call)
-      - Semantic dedup → assignee fallback → write tasks → mark Processed
-4. **Log summary** — total tasks processed across all DBs
-
-(The Done-task archive sweep no longer runs every cycle — it has been moved to a dedicated weekly Sunday cron. See "Done-task archive sweep" below.)
-
-Helper functions:
-- `_should_auto_extract(config, owner)` — combines the CLI override with the per-member registry flag; returns the boolean used to gate the routing decision
-- `_process_via_literal_notes()` — light LLM extraction with the Notion-hosted prompt at `LITERAL_NOTES_EXTRACTION_PROMPT_PAGE_ID`, then the standard classifier. Title preservation is enforced by the prompt, not by code
-- `_process_via_transcript()` — transcript extraction path (merged correction + extraction → classify)
-- `_resolve_attendees()` — GCal → Notion → governance attendee chain
-- `_meeting_fingerprint(db_id, title, date)` — strips Notion's `(1)`, `(2)` suffixes, lowercases, combines with db_id + date
-- `_build_seen_fingerprints(source, db_id)` — collects fingerprints from processed meetings in one DB
-
-## Component Details
-
-### MeetingDBRegistry (`src/meeting_db_registry.py`)
-
-- **Input:** `SyncConfig` + `NotionClientWrapper`
-- **Output:** `list[MeetingDB(db_id, owner_name, owner_email, auto_extract_tasks)]`
-- `discover_meeting_dbs(client, org_chart_db_id)` queries the Org Chart for `Active=true` rows, parses the `Meeting Notes DB` URL property, reads the `Auto-extract Tasks` checkbox (default `True` when missing), and returns one entry per parseable URL (skipping rows without a URL, with an unparseable URL, or with a URL already claimed by an earlier row)
-- `load_registry(config, client)` returns the override (single-DB list from `MEETING_NOTES_DB_ID`) when set, else discovers from the Org Chart; raises if neither is configured
-- `find_owner_for_page(registry, page_database_id)` returns the registry entry matching a page's parent DB
-- Notion DB IDs are normalized (dashes stripped, lowercased) before comparison, so registry entries with hyphenated UUIDs match payload IDs without hyphens
-
-### Fundraising branch — multi-DB behavior
-
-If two Kibo members independently capture the same LP meeting in their respective DBs, both pages fire the Affinity post and the LP opportunity ends up with two notes. That's intentional: each member's notes capture distinct insights and are independently valuable on the LP timeline. An earlier creator-owns-DB guard tried to enforce "exactly one post per meeting" by skipping when `page.creator != db.owner`, but its premise was false (a meeting recorded by member A in member B's DB has no parallel page in A's DB), so it silently dropped legitimate posts. Removing it favors a small chance of duplicates over the certainty of missed posts.
+- **`run_inject_templates(config, client)`** (`--inject-templates`, watch tick) —
+  loads the registry, then for each member DB queries pages with `Template
+  Injected=false` created in the last 12 hours and injects the template, setting
+  `Template Injected=true` on success. Per-DB failures are isolated.
+- **`run_inject_templates_for_page(config, client, page_id)`** (webhook) — injects
+  into a single page; derives the parent DB from the page itself, so it works for any
+  member DB. Tolerates the page being deleted/archived between automation firing and
+  the webhook arriving (404 / `in_trash` → skip, no error).
 
 ### TemplateInjector (`src/template_injector.py`)
 
 - **Input:** NotionClientWrapper + template page ID + target page ID
-- **Output:** Boolean (True if template was injected)
-- Fetches template blocks dynamically from a normal Notion page (`MEETING_TEMPLATE_PAGE_ID`, e.g. the "Generic Template" page under the Templates folder), converts from "read" to "create" format, filters out AI blocks
-- **Injects INSIDE the page's `meeting_notes` block** — locates the AI Meeting block on the target page, reads `meeting_notes.children.notes_block_id`, and appends template blocks at the start of that human-notes container (not at the page root)
-- Retries the meeting_notes lookup a few times (~3 × 1s) to absorb the race between page creation and Notion attaching the block; if still missing, returns False and the next cron tick retries
+- Fetches template blocks dynamically from a normal Notion page (`MEETING_TEMPLATE_PAGE_ID`, e.g. the "Generic Template" page), converts from "read" to "create" format, filters out AI blocks
+- **Injects INSIDE the page's `meeting_notes` block** — locates the AI Meeting block, reads `meeting_notes.children.notes_block_id`, and appends template blocks at the start of that human-notes container (not at the page root)
+- Retries the meeting_notes lookup a few times (~3 × 1s) to absorb the race between page creation and Notion attaching the block; if still missing, returns False and the next tick retries
 - Idempotency: scans the children of `notes_block_id` for the template's first heading; skips if already present
 - Edit the template page in Notion to change what gets injected — no code changes needed
 
-### PlaybookLoader (`src/playbook_loader.py`)
+## Notion → Supabase mirror (the consumer read surface)
 
-- **Input:** Playbook Notion page ID
-- **Output:** Plain text (markdown) of the playbook content
-- Fetches all blocks from the page, converts via `blocks_to_text`
-- **Caches** result for the lifetime of the instance (one sync cycle)
+The 5-min `SupabaseSync` cron (`src/supabase_sync.py`, plus a weekly 14-day safety
+sweep on Sundays) maintains Supabase (Neo project) as the **single read surface for
+consumer Lambdas** — one Notion poller (this sync) feeding independent pull-model
+consumers (`nzyme-fundraising`, `nzyme-meeting-mirrors`, `nzyme-task-extraction`),
+each with its own claim table and readiness rule. Three mirror tables:
 
-### HierarchyLoader (`src/hierarchy_loader.py`)
+| Table | Source | Writer | Notes |
+|---|---|---|---|
+| `public.meeting_transcripts` | every page in every member Meeting Notes DB (**including inactive members**) | `extract_row` (`src/meeting_row.py`) via `sync_incremental` | Full member-DB replica: title/date, `macro_work_block`, `detail`, `external_org`, `confidential`, `created_by_id/_name`, notes, in-block AI summary, raw transcript, GCal-resolved `attendee_emails` ("never downgrade" — NULL never overwrites stored emails), `task_page_ids`. Deliberately NOT mirrored: `Processed`/`Processing`/`Template Injected` (pipeline state — consumers use Supabase claim tables instead, e.g. `affinity_meeting_posts`). Rows upsert on every Notion edit and **converge over ticks** — a row existing says nothing about the meeting being over; consumers gate on `meeting_end` + `last_edited_time`. |
+| `public.org_chart_rows` | every Org Chart row (incl. inactive, incl. members with no Meeting Notes DB) | `sync_org_chart` (`src/config_mirror_sync.py`) | Member config: email, `meeting_notes_db_id`, `active`, `auto_extract_tasks`, `default_mirror_visibility` (raw; NULL = consumer applies the "Shared" default), `seniority`. |
+| `public.meeting_rule_rows` | every parseable Meeting Rules row (**incl. inactive** — `active` is a column so consumers can tell "off" from "deleted") | `sync_meeting_rules` (`src/config_mirror_sync.py`) | Same validation as `route_registry.load_routes` minus the Active filter; the legacy pre-split Affinity action tag is normalized at mirror time. |
 
-- **Input:** Team Task Tracker database ID
-- **Output:** List of root nodes with nested children: `[{id, title, category, children: [...]}]`
-- Queries all non-Done tasks from the tracker
-- Builds parent-child tree from "Parent item" self-relation
-- Prunes to 4 levels (categories → sub-categories → entities → deals). At max depth, only keeps nodes that have children (organizational nodes), filtering out leaf tasks
-- Removes nodes with empty titles
-- **Caches** result for the lifetime of the instance
+All three use `notion_page_id`/`page_id` as stable identity; the config mirrors
+tombstone vanished rows via `deleted_at` (revived automatically if the row
+reappears). Config-mirror failures are isolated — they never block the meeting sync.
 
-### DealContextLoader (`src/deal_context.py`)
+**Attendee resolution (`src/attendees.py`).** `extract_row` lazy-imports
+`_resolve_attendees` to populate `attendee_emails`. The chain is GCal → Notion
+meeting-block attendees → page governance-access fallback. The GCal lookup
+impersonates the Notion page creator via a Domain-Wide-Delegation service account
+(out-of-domain owners read through an in-domain proxy); names are resolved by
+matching attendee emails against the Org Chart `Email` property. The supporting
+modules `src/transcript_pipeline/fetch_transcript.py` (block/attendee/governance
+extraction) and `src/transcript_pipeline/gcal_attendees.py` (Calendar API) are
+retained here for this reason — the rest of `transcript_pipeline/` was carved out.
+See [transcript-pipeline.md](transcript-pipeline.md) for the GCal proxy / auth
+details.
 
-- **Input:** Deal Workplans database ID (optional, set via `DEAL_WORKPLANS_DB_ID`)
-- **Output:** List of `DealInfo` with name, page IDs, and workstreams
-- Queries Deal Workplans DB for all deals
-- For each deal, fetches the page's child blocks to discover inline databases (Workplan, Action Items) by title pattern
-- Loads active workstreams (Status != Done) from each deal's Workplan DB
-- Extracts workstream title, status, type, and adviser
-- Resolves each deal's Team Task Tracker page ID from the `🖇️ Team Task Tracker` relation
-- Gracefully handles missing inline DBs and per-deal failures
-- Deal context is formatted and injected into the system prompt as `{{DEAL_CONTEXT}}`
-- Meeting titles are scanned for deal name matches; detected deals are appended as hints to the user prompt
+**Heartbeat alarm:** `_handle_supabase_sync` logs `supabase sync heartbeat:` at INFO
+on every tick (wording is load-bearing — a CloudWatch metric filter in
+`template.yaml` counts it). The `nzyme-supabase-sync-stalled` alarm fires after 45
+min without a heartbeat (`TreatMissingData: breaching` catches total silence, not
+just errors); set `ALERT_EMAIL` in `.env` to get SNS email notifications. A stalled
+sync starves every downstream consumer, so this alarm guards the whole fleet.
 
-### SingleSource (`src/sources/single_source.py`)
+**Backfill / manual run:** `python scripts/sync_meeting_transcripts.py --full --days N`
+re-syncs every page edited in the last N days through the same code path (and runs
+the config mirrors at the end).
 
-| Method | Purpose |
-|--------|---------|
-| `get_unprocessed_pages(buffer_hours)` | Filter: `Processed=false AND created_time < (now - buffer)` |
-| `get_ready_pages(idle_minutes)` | Filter: `Processed=false AND last_edited_time < (now - idle)` |
-| `get_processed_pages()` | All processed meetings (for dedup fingerprinting) |
-| `get_page_content(page_id, include_ai_notes)` | Fetch blocks, optionally filter out AI-generated blocks, convert to text via `blocks_to_text` |
-| `get_page_metadata(page)` | Extract title, date, meeting_type, attendees from properties |
-| `mark_processing(page_id)` | Set `Processing=true` (concurrency lock) |
-| `clear_processing(page_id)` | Set `Processing=false` (release lock on failure) |
-| `mark_template_injected(page_id)` | Set `Template Injected=true` checkbox |
-| `mark_page_processed(page_id)` | Set `Processed=true` + clear `Processing` lock |
+## NotionClientWrapper (`src/notion_client_wrapper.py`)
 
-- Handles: no tool calls (returns `[]`), invalid JSON (logs warning, skips that call)
-
-#### Prompt Construction
-
-**System prompt** (`SYSTEM_PROMPT_TEMPLATE`) includes:
-- Playbook rules (natural language from Notion page) → `{playbook}`
-- Team Task Tracker schema with property types
-- Hierarchy as JSON with id/title/children → `{hierarchy}`
-- Attendees list as `- Name (ID: xxx)` → `{attendees}`
-- Category options as dynamic enum string → `{categories}`
-
-**User prompt** (`USER_PROMPT_TEMPLATE`) includes:
-- Meeting title, date, type → `{title}`, `{date}`, `{meeting_type}`
-- Full meeting content as plain text → `{content}`
-
-#### Tool Definition
-
-`create_task` function with parameters:
-- `title` (string, required) — clear, actionable task title
-- `assignee_id` (string, required) — Notion user ID from attendees
-- `priority` (enum, required) — "High" / "Medium" / "Low"
-- `category` (enum, required) — dynamic from DB schema
-- `due_date` (string|null) — ISO date YYYY-MM-DD
-- `parent_task_id` (string|null) — page ID from hierarchy
-- `status` (enum) — defaults to "Not Started"
-
-### TeamTaskTrackerWriter (`src/tracker/team_writer.py`)
-
-- **On init:** Queries all existing task titles for dedup (normalized: `.strip().lower()`)
-- **`create_task(task)`** — Maps dict to Notion properties, creates page. Skips if title already exists.
-- **`link_tasks_to_meeting(meeting_page_id, task_ids)`** — After a batch is written, patches the source meeting page's `Task - Relation` to include the new task IDs (merging with any existing list). This is the only meeting↔task linkage now: the reverse `Meeting - Relation` on the tracker was removed when DBs went per-member, since one relation can't span N source DBs.
-- **`write_batch(tasks)`** — Creates multiple tasks. Per-task error handling; failures don't abort batch.
-- **Dry-run mode:** Logs what would be created, updates in-memory cache, but doesn't write to Notion.
-
-### NotionClientWrapper (`src/notion_client_wrapper.py`)
-
-Rate-limited facade over the Notion SDK, shared by all components in a sync cycle.
+Rate-limited facade over the Notion SDK, shared by all components in a cycle.
 
 | Method | Purpose |
 |--------|---------|
@@ -218,192 +147,75 @@ Rate-limited facade over the Notion SDK, shared by all components in a sync cycl
 | `retrieve_database(database_id)` | Get database schema |
 
 Internal behavior:
-- **Rate limiting:** Token-bucket at 3 req/s (Notion API limit)
-- **Retry:** Exponential backoff on 429/5xx errors, up to 3 retries
-- **Pagination:** Transparently handles multi-page responses via `start_cursor`
+- **Rate limiting:** token-bucket at 3 req/s (Notion API limit)
+- **Retry:** exponential backoff on 429/5xx, up to 3 retries
+- **Pagination:** transparently handles multi-page responses via `start_cursor`
 - **Data source resolution:** Notion API 2025-09-03+ replaced `databases.query` with `data_sources.query`. The wrapper resolves database IDs to data source IDs and caches the mapping.
-- **API version:** `2026-03-11` — supports `meeting_notes` blocks for transcript extraction.
+- **API version:** `2026-03-11` — supports `meeting_notes` blocks.
 
 ### Utilities
 
-- **`blocks_to_text`** (`src/utils/blocks_to_text.py`) — Converts Notion blocks to markdown. Supports headings, lists, to-dos, dividers, callouts, quotes, toggles. Recursively fetches nested children.
-- **`RateLimiter`** (`src/utils/rate_limiter.py`) — Token-bucket, configurable req/s (default 3.0)
-- **`logger`** (`src/utils/logger.py`) — One-time `setup_logging()`, format: `YYYY-MM-DDTHH:MM:SS | LEVEL | module | message`
+- **`blocks_to_text`** (`src/utils/blocks_to_text.py`) — converts Notion blocks to markdown (headings, lists, to-dos, dividers, callouts, quotes, toggles; recurses into nested children).
+- **`RateLimiter`** (`src/utils/rate_limiter.py`) — token-bucket, configurable req/s (default 3.0).
+- **`logger`** (`src/utils/logger.py`) — one-time `setup_logging()`, format `YYYY-MM-DDTHH:MM:SS | LEVEL | module | message`.
 
-## Data Flow
+## Webhook / Lambda mode
 
-### Transcript path (default)
-```
-Meeting Notes DB page
-  → find_meeting_notes_block() → meeting_notes block
-  → fetch transcript text + attendees + human notes
-  → _resolve_attendees() (GCal → Notion → governance)
-  → TaskExtractor.extract_from_raw() → raw tasks (1 merged LLM call — domain
-    correction + speaker resolution + extraction inline)
-  → TaskClassifier.classify() → classified tasks (LLM call 2)
-  → SemanticDedup + assignee fallback
-  → TeamTaskTrackerWriter.write_batch() → Notion pages
-```
-
-## Error Handling
-
-| Failure | Behavior |
-|---------|----------|
-| Playbook fetch fails | Abort entire sync cycle (required for correct extraction) |
-| Hierarchy fetch fails | Degrade gracefully — tasks go to top level (no parent) |
-| Category fetch fails | Fall back to `["Other"]` |
-| Single meeting fails | Log error, skip to next; failed meeting NOT marked processed (retry next cycle) |
-| Single task write fails | Log error, continue with remaining tasks in batch |
-| Notion API 429/5xx | Exponential backoff retry (up to 3 attempts) |
-| Template injection fails | Log error, continue sync cycle — template injection is optional |
-| Empty meeting content | Mark processed, skip extraction (no tasks to create) |
-| Duplicate meeting | Skip extraction, mark processed (fingerprint-based dedup) |
-
-## Done-task archive sweep
-
-A dedicated weekly Lambda job sweeps Done tasks out of the live Team Task Tracker and into a separate **Team Task Tracker — Archive** DB. Filter: `Status = Done` AND `last_edited_time` older than 3 days (the grace window so the team sees completed work in the next Monday standup).
-
-- **Schedule:** Sunday 06:00 UTC, declared as the `WeeklyArchive` event on `NzymeFunction` in `template.yaml`. The schedule sends `{"job":"weekly_archive"}` as the event input; the unified Lambda handler routes that to `_handle_weekly_archive`.
-- **Behavior:** for each match, copy properties to the archive DB (write-shape conversion done by `_copy_property_for_write`) → soft-delete the original via `archive_page`. Re-runs are idempotent: an archive copy carries a `Source Page ID` rich-text marker, and `_load_archived_source_ids` builds the skip-set on each run.
-- **Hierarchy relations are dropped on copy** (`Parent item`, `Sub-item`) — once parents are also archived, references would dangle. The cross-DB `Deal Relation` is preserved. Meeting backlinks aren't preserved: the reverse linkage now lives on the Meeting Notes side as `Task - Relation`, and the archived task page doesn't reciprocate that.
-- **Read-only types skipped on copy:** `formula`, `rollup`, `created_time`, `last_edited_time`, `created_by`, `last_edited_by`, `unique_id`. Notion auto-populates the relevant ones on the new page.
-- **Configuration:** `TASK_ARCHIVE_DB_ID` env var (SAM parameter `TaskArchiveDbId`). When unset, the weekly job logs a warning and exits as a no-op — useful for environments where the archive DB doesn't exist yet.
-- **Manual trigger:** `python -m src.main --archive` runs the same sweep locally (respects `--dry-run`).
-- **Per-task error handling:** one failed archive (copy or source-archive) doesn't block the rest of the batch.
-
-## Hierarchy DB sync (daily 07:00 Madrid)
-
-A second daily cron drives sync work off the **Meeting Notes & Task Tracker Hierarchy** DB (source of truth for the firm's work-block taxonomy — Tier 0 Macro Work Block / Tier 1 Project / Tier 2 Workstream). Lives entirely under `src/hierarchy/` and runs every registered sub-sync in turn, isolating failures: one sub-sync raising doesn't stop the next.
-
-- **Schedule:** daily `cron(0 5 * * ? *)` (= 07:00 Madrid CEST), declared as the `HierarchySync` event on `NzymeFunction` in `template.yaml`. Input `{"job":"hierarchy_sync"}` routes to `_handle_hierarchy_sync` in `src/webhook/lambda_handler.py`, which calls `hierarchy.run_all(client, config)`.
-- **Manual trigger:** `python -m src.main --sync-hierarchy [--dry-run] [--verbose]` runs the same orchestrator locally. Notion-only — no Gemini / OpenAI keys touched.
-- **Logging contract:** each sub-sync emits one structured `hierarchy_sync: name=<sub> created=N renamed=N archived=N edited=N deleted=N reactivated=N parent_fixed=N errors=N` line (each sub-sync uses the subset of counters that fit its model; the rest stay 0); the Lambda response aggregates per-sub-sync reports.
-
-### Sub-syncs
-
-Order in `_SUB_SYNCS` matters: `deal_hierarchy_sync` is a *producer* of the Hierarchy DB and runs **first**; then every canonical mirror runs before the applier(s) reading it. Final order: `deal_hierarchy_sync` → `canonical_mirror_sync` → `detail_canonical_mirror_sync` → `macro_block_sync` → `detail_applier_sync` → `external_org_applier_sync` → `tracker_applier_sync`. Three shared member-DB dropdowns (`Macro Work Block`, `Detail`, `External Org`) flow from canonicals — operators never edit those option lists on member DBs directly. `External Org` is fanned out from the deal pipeline (`public."ReportingNz_deals"`): `deal_hierarchy_sync` writes one Hierarchy DB row per tracked deal (keyed by a `Deal ID` property) and `external_org_applier_sync` fans the same deals out to each member DB's `External Org` select.
-
-**Rename saga.** Notion's `data_sources.update` silently no-ops select / multi-select option renames (verified 2026-05-21 via `scripts/diag_work_area_options.py` across four PATCH variants). All three appliers therefore route canonical name changes through a shared 5-step saga in `src/hierarchy/_rename_saga.py`: PATCH 1 add new option (no id; Notion assigns one) → query every page tagged on the old name → `pages.update` to migrate each tag onto the new option (multi-select preserves every other tagged option on the same page) → PATCH 2 drop the old option → caller back-fills the per-property mapping with the saga's new id. **Option IDs change on rename**; the mapping tables absorb the churn. Idempotent: if a saga fails partway (PATCH 1 succeeded but pages weren't migrated, etc.), the next tick detects the resume signal (an option with the desired name already exists in the option list) and finishes from where it stopped. Color-only changes (Detail / External Org) continue through the existing single-PATCH path — only **name** changes (including archive `X → (archived) X` and un-archive) trigger the rename saga. `external_org_applier_sync` uses the rename saga too (stage-out archive, re-entry un-archive, bootstrap-adopt rename).
-
-**Drop saga.** When a Hierarchy / Detail canonical row is tombstoned (`deleted_at IS NOT NULL`), the matching member-DB option is **removed**, not archived. Same module: `execute_drop_saga` queries every page tagged on the option → clears each page's property (select → `None`; multi_select → entry stripped from the array while every other tag is preserved) → PATCHes the schema with the options array minus the dropped option. The mapping row in Supabase is then `DELETE`d so the next tick doesn't re-process the tombstoned canonical row. Inactive-but-not-tombstoned rows still go through the rename saga to `(archived) X` (the rename + drop split lets operators "soft-delete" via active=false and "hard-delete" via Notion page trash).
-
-Member-DB dropdowns driven by a canonical (option-list fan-out across all member DBs):
-
-| Property | Canonical source | Mapping table | Applier |
-|----------|-----------------|---------------|---------|
-| `Macro Work Block` | Hierarchy DB Tier 0 (Notion) → `public.hierarchy_rows` | `public.work_area_option_mappings` | `macro_block_sync` |
-| `Detail` | Detail Options Settings DB (Notion) → `public.detail_rows` | `public.detail_option_mappings` | `detail_applier_sync` |
-| `External Org` | `public."ReportingNz_deals"` (Affinity → Supabase), filtered to the 4 tracked stages | `public.external_org_option_mappings` | `external_org_applier_sync` |
-
-Unlike the other two, `External Org`'s canonical is the Supabase deal table directly (no Notion editing surface for the option list). Colors are canonical-driven (Portfolio→orange, dealflow→blue) and the option order is stage-priority then alpha. The same tracked deal set is also written into the Hierarchy DB as rows by `deal_hierarchy_sync` (see the sub-sync table below), so each opportunity/PortCo becomes a fileable `[DETAILS INSIDE]` tracker node.
-
-| Sub-sync | Source → Target | Behavior |
-|----------|----------------|----------|
-| `canonical_mirror_sync` (`src/hierarchy/canonical_mirror_sync.py`) | Notion Hierarchy DB → `public.hierarchy_rows` in Neo Supabase | One-way mirror, keyed by `notion_page_id`. Detects `created` / `edited` (with field-level diff) / `deleted` / `reactivated` events; writes one row to `public.hierarchy_sync_runs` per tick with a structured JSONB change log. Source of truth that downstream appliers consume — does not write to Notion. |
-| `detail_canonical_mirror_sync` (`src/hierarchy/detail_canonical_mirror_sync.py`) | Notion Detail Options Settings DB → `public.detail_rows` | Same shape as `canonical_mirror_sync`, smaller schema (`name`, `color`, `parent_hierarchy_page_id`, `active`). Writes audit row to `public.detail_sync_runs` per tick. Skips with a **benign warning** (`errors=0`) when `DETAIL_OPTIONS_DB_ID` is unset — Detail is an optional feature. |
-| `macro_block_sync` (`src/hierarchy/macro_block_sync.py`) | Supabase canonical Tier 0 rows → every active member Meeting Notes DB's `Macro Work Block` select | Each Tier 0 canonical row drives one option on every member DB. Live + active → option name = `_sanitize_option_name(name)`; live + inactive (active=false, deleted_at IS NULL) → `(archived) <sanitized name>`; tombstoned (`deleted_at IS NOT NULL`) → option **removed** from the member DB via the **drop saga** (clear every tagged page's `Macro Work Block`, then PATCH the option out of the schema) + mapping row DELETEd from `public.work_area_option_mappings`. Tombstoned rows are explicitly NOT bootstrap-created (the early tombstone branch skips CASE C/D). Renames (and archive / un-archive name flips) go through the shared **rename saga** — option IDs change on rename; the mapping table is back-filled with the new id and every page previously tagged on the old option is migrated onto the new one in the same tick. The rename saga preserves the option's existing color (Macro Work Block color is operator-set per-member, not canonical-driven). Bootstrap-adopts existing options by sanitized-name match (heals workspaces created before this PR). **Comma sanitization on the Notion side only**: Notion's API forbids commas in select option names, so `_sanitize_option_name` replaces commas with spaces and collapses whitespace; the Hierarchy DB / Supabase canonical keep commas verbatim. Idempotent: no PATCH when state matches. Legacy options unrelated to Tier 0 (`Standup`, `1:1`, etc.) pass through verbatim. Re-uses Supabase HTTP helpers from `canonical_mirror_sync`. Reads canonical *only* — depends on `canonical_mirror_sync` running first within the same tick. |
-| `detail_applier_sync` (`src/hierarchy/detail_applier_sync.py`) | `public.detail_rows` → every active member DB's `Detail` multi-select | Same applier pattern as `macro_block_sync`, with two deltas: (a) property type is `multi_select` (the saga's page-migration step preserves every other tagged option on each page); (b) **color is canonical-driven** — every PATCH carries the desired color from `detail_rows.color`, so renaming OR recoloring on the Settings DB row propagates to every member DB on the next tick (rename via saga, color-only change via direct PATCH). Tombstoned canonical rows are dropped via the same drop saga (the multi-select array entry is stripped from every tagged page before the option is removed) + mapping row DELETEd from `public.detail_option_mappings`. |
-| `deal_hierarchy_sync` (`src/hierarchy/deal_hierarchy_sync.py`) — **runs first** | `public."ReportingNz_deals"` → rows in the Notion **Hierarchy DB** | The *producer* that turns the deal pipeline into hierarchy nodes. Reads ReportingNz_deals live and maintains one Hierarchy row per tracked deal, keyed by the `Deal ID` rich-text property (the Supabase UUID). Dealflow stages (`DD phase` / `Working on a deal (significant effort)` / `Under analysis (team assigned, moderate effort)`) → `2. Workstream` under **Dealflow - Main Opportunities** (`009aebf3-…`); `Portfolio` → `1. Project` under **Value Creation for Portfolio** (`c3a645bf-…`). Tracked deal with no row → **create**; drift in name/tier/parent → **update**; deal that left the tracked stages (or vanished from the snapshot, e.g. Affinity-deleted) → **soft-archive** (`Active=false`); re-entry → `Active=true`. **Rows are never deleted**, and rows WITHOUT a `Deal ID` (hand-made nodes) are never touched. Must run before `canonical_mirror_sync` so the new/updated rows mirror into `hierarchy_rows` and cascade to `[DETAILS INSIDE]` tracker nodes the same tick. Skips with an error when `HIERARCHY_DB_ID` is unset. Re-uses Supabase + Notion-reader helpers from `canonical_mirror_sync`. |
-| `external_org_applier_sync` (`src/hierarchy/external_org_applier_sync.py`) | `public."ReportingNz_deals"` (filtered to the 4 tracked stages) → every active member DB's `External Org` select | Same applier pattern as `macro_block_sync`/`detail_applier_sync`. Each tracked deal drives one option on every member DB; **color is canonical-driven** (Portfolio→orange, dealflow→blue) and options are ordered by stage priority (Portfolio → DD phase → Working → Under analysis) then alphabetically. Deals that leave the tracked stages → option soft-archived as `(archived) X` via the **rename saga** (mapping kept; re-entry un-archives in place). Bootstrap-adopts existing options by sanitized-name match; legacy options no meeting has ever been tagged on are dropped (a Notion tag-check guards this — on query failure every legacy option is kept). Mapping table `public.external_org_option_mappings`, keyed `(deal_id, member_db_id)`. Skips with an error when `ORG_CHART_DB_ID` is unset. Re-uses Supabase HTTP helpers from `canonical_mirror_sync` and `_sanitize_option_name` from `macro_block_sync`. |
-| `tracker_applier_sync` (`src/hierarchy/tracker_applier_sync.py`) | Supabase `public.hierarchy_rows` → Team Task Tracker `[DETAILS INSIDE]` rows, paired via `hierarchy_rows.tracker_node_page_id` | Each canonical row drives a `[DETAILS INSIDE]` Tracker row: live + active → title = `name`; live + inactive → `(archived) name` (soft-archive — the row stays so the classifier keeps parent context); **tombstoned** (`deleted_at IS NOT NULL`) → the tracker page is Notion-archived and `tracker_node_page_id` is cleared in Supabase (the only path that removes a `[DETAILS INSIDE]` row — manual deletion still violates the hard rule). Children of a tombstoned parent clear their Parent item (the relation would otherwise point at an archived/greyed-out page); children of inactive-but-not-tombstoned parents keep the link. Two-pass create-then-reconcile so brand-new parent+child pairs wire up in one tick, plus a third archive pass for tombstoned rows. Pass-1 creates write the new id to BOTH Supabase (authoritative) and the Notion `Tracker Node` relation (best-effort human-readable cache). Re-uses Supabase HTTP helpers from `canonical_mirror_sync`. Reads canonical *only* — depends on `canonical_mirror_sync` running first within the same tick. |
-
-### Adding a new sub-sync
-
-1. Drop a `src/hierarchy/<name>_sync.py` exposing `sync(client, config) -> SyncReport` (use `src/hierarchy/macro_block_sync.py` or `src/hierarchy/tracker_applier_sync.py` as a template — pure planning function + I/O `sync()`, Supabase canonical as input).
-2. Append it to `_SUB_SYNCS` in `src/hierarchy/__init__.py`.
-3. Cover the planner with unit tests under `tests/hierarchy/test_<name>_sync.py`.
-
-No template / cron / IAM change required — the orchestrator and Lambda handler iterate over `_SUB_SYNCS` automatically.
-
-## Webhook / Lambda Mode
-
-An alternative to local polling, the webhook mode uses AWS Lambda for serverless execution:
+The single Lambda (`NzymeFunction`, company account `607081650195`) multiplexes the
+two remaining jobs by event source:
 
 ```
-[Template Injection — event-driven]
-Notion Automation (page created in any per-member DB) → API Gateway → Lambda: webhook_handler
-  → load registry, validate page's parent DB is in it
+[Template injection — event-driven]
+Notion Automation (page created in any per-member DB) → API Gateway → Lambda (webhook)
+  → derive parent DB from the page, set "Date" = page.created_time (with hour)
   → inject template → set "Template Injected" = true
 
-[AI Extraction — scheduled]
-CloudWatch Events (every 1 min) → Lambda: extraction_handler
-  → load registry from Org Chart
-  → for each member DB: query Processed=false AND last_edited_time < now-3min
-  → for each ready page: run_sync_for_page
-
-[Done-task archive — weekly]
-CloudWatch Events (Sun 06:00 UTC, Input={"job":"weekly_archive"}) → Lambda: _handle_weekly_archive
-  → query Team Task Tracker for Status=Done AND last_edited_time < now-3d
-  → for each match: copy properties to TASK_ARCHIVE_DB_ID, archive original
+[Notion → Supabase sync — scheduled]
+CloudWatch Events (every 5 min, Input={"job":"supabase_sync"})      → _handle_supabase_sync       → incremental mirror
+CloudWatch Events (Sunday,    Input={"job":"supabase_sync_full"})   → _handle_supabase_sync_full  → 14-day safety re-sync
 ```
 
-The registry is reloaded once per cron tick — one extra Notion query per minute — so joiner/leaver changes in the Org Chart take effect within a minute without any redeploy.
+Unknown cron jobs return HTTP 400 (the old default `→ extraction` branch was removed
+with the carve-out). The registry is reloaded per tick, so Org Chart joiner/leaver
+changes take effect within minutes without a redeploy.
 
 ### Components
 
 | File | Responsibility |
 |------|---------------|
-| `src/webhook/handler.py` | Parses Notion automation payload, validates against discovered registry, sets `Date = page.created_time` (with hour), calls template injection |
-| `src/webhook/lambda_handler.py` | Two Lambda entry points: `webhook_handler` (API Gateway) and `extraction_handler` (CloudWatch cron) |
+| `src/webhook/handler.py` | Parses the Notion automation payload, validates the page's parent DB against the discovered registry, sets `Date = page.created_time`, calls template injection |
+| `src/webhook/lambda_handler.py` | Lambda entry point: routes API Gateway events → webhook (template injection), `aws.events` cron → `supabase_sync` / `supabase_sync_full` |
 | `src/meeting_db_registry.py` | Reads active Org Chart rows' `Meeting Notes DB` URL property, returns `[MeetingDB]` |
+| `src/sources/single_source.py` | Per-DB query/mark helpers (`get_unprocessed_pages`, `mark_template_injected`, `mark_page_processed`, …) |
 
-### Single-Page Entry Points (`src/pipeline.py`)
-
-- `run_inject_templates_for_page(config, client, page_id)` — Inject template into one page, set `Template Injected = true`
-- `run_sync_for_page(config, client, page_id, use_gcal, force)` — Extract tasks from one page (transcript-first, notes fallback). Guards on `Processed=false` unless `force=True`. `use_gcal=True` enables Google Calendar attendee lookup (CLI only).
-- `_load_sync_context(config, client)` — Shared helper that loads prompts, hierarchy, categories, users, deals, terminology, org chart, classifier prompt
-
-### Why Not Webhook on Content Updates?
-
-During meetings, pages are updated thousands of times. Instead of debouncing those events, a 1-minute cron queries Notion's `last_edited_time` to detect idle pages. Maximum latency: ~4 min after editing stops.
-
-### AWS Resources
+### AWS resources
 
 - API Gateway (HTTP API) — `POST /webhook/{token}`
-- Lambda: `nzyme-webhook` (256 MB, 30s) — template injection
-- Lambda: `nzyme-extraction` (512 MB, 120s) — AI extraction
-- CloudWatch Events rule — `rate(1 minute)` triggers extraction
+- Lambda: `NzymeFunction` — template injection + Supabase sync
+- CloudWatch Events rules — `SupabaseSync` (`rate(5 minutes)`) + `SupabaseWeeklySync` (Sunday)
+- `nzyme-supabase-sync-stalled` alarm on the heartbeat metric filter
 
-See `template.yaml` (SAM) for infrastructure definition and `scripts/deploy.sh` for deployment.
+See `template.yaml` (SAM) for the infrastructure and `scripts/deploy.sh` /
+`scripts/quick-deploy.sh` for deployment. The webhook stays in the old `company`
+account permanently because its API Gateway host is the URL all ~10 Notion
+automations point at (see [architecture-lambda-split.md](architecture-lambda-split.md)).
 
-## Supabase mirror (Notion → Supabase, the consumer read surface)
+## Error handling
 
-The 5-min `SupabaseSync` cron (`src/supabase_sync.py`, weekly 14-day safety
-sweep on Sundays) maintains Supabase (Neo project) as the **single read
-surface for consumer Lambdas** — the target architecture is ONE Notion
-poller (this sync) feeding independent pull-model consumers (the standalone
-`nzyme-fundraising` Lambda today; extraction and topic-mirror next), each
-with its own claim table and readiness rule. Three mirror tables:
+| Failure | Behavior |
+|---------|----------|
+| Registry load fails | Skip the injection cycle (logged); the mirror still runs |
+| Template injection fails (one page / one DB) | Log error, continue with the rest — injection is best-effort |
+| Page deleted/archived before webhook arrives | Skip silently (404 / `in_trash`), no error |
+| Notion API 429/5xx | Exponential backoff retry (up to 3 attempts) |
+| Config-mirror sub-sync fails | Isolated — never blocks the meeting mirror |
+| Supabase sync stalls | `nzyme-supabase-sync-stalled` alarm fires after 45 min of silence |
 
-| Table | Source | Writer | Notes |
-|---|---|---|---|
-| `public.meeting_transcripts` | every page in every member Meeting Notes DB (**including inactive members**) | `extract_row` (`src/meeting_row.py`) via `sync_incremental` | Full member-DB replica: title/date, `macro_work_block`, `detail`, `external_org`, `confidential`, `created_by_id/_name`, notes, in-block AI summary, raw transcript, GCal-resolved `attendee_emails` ("never downgrade" — NULL never overwrites stored emails), `task_page_ids`. Deliberately NOT mirrored: `Processed`/`Processing`/`Template Injected` (pipeline state — consumers use Supabase claim tables instead, e.g. `affinity_meeting_posts`). Rows upsert on every Notion edit and **converge over ticks** — a row existing says nothing about the meeting being over; consumers gate on `meeting_end` + `last_edited_time`. |
-| `public.org_chart_rows` | every Org Chart row (incl. inactive, incl. members with no Meeting Notes DB) | `sync_org_chart` (`src/config_mirror_sync.py`) | Member config: email, `meeting_notes_db_id`, `active`, `auto_extract_tasks`, `default_mirror_visibility` (raw; NULL = consumer applies the "Shared" default), `seniority`. |
-| `public.meeting_rule_rows` | every parseable Meeting Rules row (**incl. inactive** — `active` is a column so consumers can tell "off" from "deleted") | `sync_meeting_rules` (`src/config_mirror_sync.py`) | Same validation as `route_registry.load_routes` minus the Active filter; the legacy pre-split Affinity action tag is normalized at mirror time. |
+## Key design principles
 
-All three use `notion_page_id`/`page_id` as stable identity; the config
-mirrors tombstone vanished rows via `deleted_at` (revived automatically if
-the row reappears). Config-mirror failures are isolated — they never block
-the meeting sync.
-
-**Heartbeat alarm:** `_handle_supabase_sync` logs `supabase sync heartbeat:`
-at INFO on every tick (wording is load-bearing — a CloudWatch metric filter
-in `template.yaml` counts it). The `nzyme-supabase-sync-stalled` alarm fires
-after 45 min without a heartbeat (`TreatMissingData: breaching` catches
-total silence, not just errors); set `ALERT_EMAIL` in `.env` to get SNS
-email notifications.
-
-**Backfill / manual run:**
-`python scripts/sync_meeting_transcripts.py --full --days N` re-syncs every
-page edited in the last N days through the same code path (and runs the
-config mirrors at the end).
-
-## Key Design Principles
-
-1. **Dynamic schema** — Playbook, hierarchy, and category options are all fetched from Notion at runtime. Schema changes in Notion require no code changes.
-1. **AI notes filtering** — `INCLUDE_AI_NOTES` (default `false`) controls whether Notion AI meeting notes blocks are sent to the extractor. When off, only human-written blocks (to-dos, paragraphs, headings, etc.) are included, using a whitelist of known content block types.
-2. **Stateless cycles** — Each sync cycle is independent. No persistent state between runs.
-3. **Graceful degradation** — Non-critical failures (hierarchy, categories, individual meetings/tasks) don't abort the cycle.
-4. **Three-layer dedup** — Meeting-level (title+date fingerprint), semantic embeddings (cosine similarity), and task-level (exact title match in tracker).
-5. **Rate limiting** — All Notion API calls go through the wrapper with 3 req/s pacing and retry.
-6. **Observability** — Logfire spans around each meeting, structured logging throughout.
+1. **Notion is the editing front-end; Supabase is the read surface.** This repo is the only Notion poller for meeting data; consumers read the copy.
+2. **Dynamic discovery** — the member-DB registry and template content are read from Notion at runtime. Joiners/leavers and template changes need no redeploy.
+3. **Stateless cycles** — each cycle is independent; no persistent in-process state between runs.
+4. **Graceful degradation** — non-critical failures (one DB, one page, a config sub-sync) don't abort the cycle.
+5. **Rate limiting** — all Notion calls go through the wrapper with 3 req/s pacing and retry.
+6. **Observability** — Logfire spans + structured logging; a load-bearing heartbeat line backs the stalled-sync alarm.
